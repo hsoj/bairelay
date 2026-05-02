@@ -1,0 +1,10 @@
+[default]
+workspace = true
+all-targets = true
+skip-clean = true
+# `fail-under = 87` is the honest floor against the full workspace; per-crate floors stay tighter (each non-binary crate ≥ 90 %, `bairelay_wake_server` ≥ 94 %)
+fail-under = 87
+exclude-files = [
+	"docs/*",
+	"docs/**/*",
+]

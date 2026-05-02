@@ -1,0 +1,49 @@
+# Test-rig bairelay config used by tests/scripts/ha-verify.sh and the
+# Bairelay Test HA dashboard. Copy to tests/bairelay-test.toml and fill
+# in your camera UIDs / passwords. The MQTT block targets the local
+# test broker started by tests/scripts/ha-up.sh — leave those values
+# alone.
+
+bind = "0.0.0.0"
+
+[mqtt]
+broker_addr = "127.0.0.1"
+port = 1884
+credentials = ["bairelay-test", "bairelay-test-password"]
+topic_prefix = "bairelay"
+
+[mqtt.discovery]
+topic = "homeassistant"
+# features omitted → all 9 (battery, floodlight, camera, motion, led,
+# ir, reboot, pt, siren). The dashboard expects every entity to flow.
+
+[[cameras]]
+name = "Cam1"
+username = "admin"
+password = "REPLACE_ME"
+uid = "REPLACE_ME"
+discovery = "relay"
+idle_disconnect = true
+idle_disconnect_timeout_secs = 30
+
+[cameras.mqtt]
+enable_motion = true
+enable_battery = true
+enable_light = true
+enable_floodlight = true
+enable_pir = true
+
+[[cameras]]
+name = "Cam2"
+username = "admin"
+password = "REPLACE_ME"
+uid = "REPLACE_ME"
+discovery = "relay"
+idle_disconnect = true
+idle_disconnect_timeout_secs = 30
+
+[cameras.mqtt]
+enable_motion = true
+enable_battery = true
+enable_light = true
+enable_pir = true

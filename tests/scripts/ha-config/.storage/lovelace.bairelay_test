@@ -1,0 +1,287 @@
+{
+  "version": 1,
+  "minor_version": 1,
+  "key": "lovelace.bairelay_test",
+  "data": {
+    "config": {
+      "title": "Bairelay Test",
+      "views": [
+        {
+          "title": "Cameras",
+          "path": "cameras",
+          "icon": "mdi:cctv",
+          "type": "sections",
+          "max_columns": 2,
+          "sections": [
+            {
+              "title": "Cam1",
+              "type": "grid",
+              "cards": [
+                {
+                  "type": "picture-glance",
+                  "title": "Cam1 — Main",
+                  "entity": "camera.bairelay_cam1_main",
+                  "camera_image": "camera.cam1_cam1_camera",
+                  "camera_view": "auto",
+                  "show_state": true,
+                  "tap_action": {
+                    "action": "more-info",
+                    "entity": "camera.bairelay_cam1_main"
+                  },
+                  "entities": [
+                    {
+                      "entity": "sensor.cam1_cam1_battery"
+                    },
+                    {
+                      "entity": "binary_sensor.cam1_cam1_md"
+                    },
+                    {
+                      "entity": "light.cam1_cam1_floodlight"
+                    }
+                  ]
+                },
+                {
+                  "type": "picture-glance",
+                  "title": "Cam1 — Sub",
+                  "entity": "camera.bairelay_cam1_sub",
+                  "camera_image": "camera.cam1_cam1_camera",
+                  "camera_view": "auto",
+                  "show_state": true,
+                  "tap_action": {
+                    "action": "more-info",
+                    "entity": "camera.bairelay_cam1_sub"
+                  },
+                  "entities": [
+                    {
+                      "entity": "sensor.cam1_cam1_battery"
+                    },
+                    {
+                      "entity": "binary_sensor.cam1_cam1_md"
+                    },
+                    {
+                      "entity": "light.cam1_cam1_floodlight"
+                    }
+                  ]
+                },
+                {
+                  "type": "entities",
+                  "title": "Sensors",
+                  "show_header_toggle": false,
+                  "entities": [
+                    {
+                      "entity": "sensor.cam1_cam1_battery",
+                      "name": "Battery",
+                      "icon": "mdi:battery"
+                    },
+                    {
+                      "entity": "binary_sensor.cam1_cam1_md",
+                      "name": "Motion (MD)",
+                      "icon": "mdi:motion-sensor"
+                    }
+                  ]
+                },
+                {
+                  "type": "entities",
+                  "title": "Controls",
+                  "show_header_toggle": false,
+                  "entities": [
+                    {
+                      "entity": "light.cam1_cam1_floodlight",
+                      "name": "Floodlight"
+                    },
+                    {
+                      "entity": "switch.cam1_cam1_floodlighttasks",
+                      "name": "Floodlight schedule"
+                    },
+                    {
+                      "entity": "switch.cam1_cam1_pir",
+                      "name": "PIR"
+                    },
+                    {
+                      "entity": "switch.cam1_cam1_led",
+                      "name": "Status LED"
+                    },
+                    {
+                      "entity": "button.cam1_cam1_siren",
+                      "name": "Siren",
+                      "action_name": "Fire"
+                    },
+                    {
+                      "entity": "button.cam1_cam1_reboot",
+                      "name": "Reboot",
+                      "action_name": "Reboot"
+                    }
+                  ]
+                },
+                {
+                  "type": "entities",
+                  "title": "PT presets",
+                  "show_header_toggle": false,
+                  "entities": [
+                    {
+                      "entity": "select.cam1_cam1_preset",
+                      "name": "Go to preset"
+                    }
+                  ]
+                },
+                {
+                  "type": "horizontal-stack",
+                  "cards": [
+                    {
+                      "type": "button",
+                      "entity": "button.cam1_cam1_pan_up",
+                      "icon": "mdi:arrow-up-bold",
+                      "name": "Up",
+                      "show_state": false,
+                      "show_name": true,
+                      "tap_action": {
+                        "action": "call-service",
+                        "service": "button.press",
+                        "target": {
+                          "entity_id": "button.cam1_cam1_pan_up"
+                        }
+                      }
+                    },
+                    {
+                      "type": "button",
+                      "entity": "button.cam1_cam1_pan_left",
+                      "icon": "mdi:arrow-left-bold",
+                      "name": "Left",
+                      "show_state": false,
+                      "show_name": true,
+                      "tap_action": {
+                        "action": "call-service",
+                        "service": "button.press",
+                        "target": {
+                          "entity_id": "button.cam1_cam1_pan_left"
+                        }
+                      }
+                    },
+                    {
+                      "type": "button",
+                      "entity": "button.cam1_cam1_pan_right",
+                      "icon": "mdi:arrow-right-bold",
+                      "name": "Right",
+                      "show_state": false,
+                      "show_name": true,
+                      "tap_action": {
+                        "action": "call-service",
+                        "service": "button.press",
+                        "target": {
+                          "entity_id": "button.cam1_cam1_pan_right"
+                        }
+                      }
+                    },
+                    {
+                      "type": "button",
+                      "entity": "button.cam1_cam1_pan_down",
+                      "icon": "mdi:arrow-down-bold",
+                      "name": "Down",
+                      "show_state": false,
+                      "show_name": true,
+                      "tap_action": {
+                        "action": "call-service",
+                        "service": "button.press",
+                        "target": {
+                          "entity_id": "button.cam1_cam1_pan_down"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "title": "Cam2",
+              "type": "grid",
+              "cards": [
+                {
+                  "type": "picture-glance",
+                  "title": "Cam2 — Main",
+                  "entity": "camera.bairelay_cam2_main",
+                  "camera_image": "camera.cam2_cam2_camera",
+                  "camera_view": "auto",
+                  "show_state": true,
+                  "tap_action": {
+                    "action": "more-info",
+                    "entity": "camera.bairelay_cam2_main"
+                  },
+                  "entities": [
+                    {
+                      "entity": "sensor.cam2_cam2_battery"
+                    },
+                    {
+                      "entity": "binary_sensor.cam2_cam2_md"
+                    }
+                  ]
+                },
+                {
+                  "type": "picture-glance",
+                  "title": "Cam2 — Sub",
+                  "entity": "camera.bairelay_cam2_sub",
+                  "camera_image": "camera.cam2_cam2_camera",
+                  "camera_view": "auto",
+                  "show_state": true,
+                  "tap_action": {
+                    "action": "more-info",
+                    "entity": "camera.bairelay_cam2_sub"
+                  },
+                  "entities": [
+                    {
+                      "entity": "sensor.cam2_cam2_battery"
+                    },
+                    {
+                      "entity": "binary_sensor.cam2_cam2_md"
+                    }
+                  ]
+                },
+                {
+                  "type": "entities",
+                  "title": "Sensors",
+                  "show_header_toggle": false,
+                  "entities": [
+                    {
+                      "entity": "sensor.cam2_cam2_battery",
+                      "name": "Battery",
+                      "icon": "mdi:battery"
+                    },
+                    {
+                      "entity": "binary_sensor.cam2_cam2_md",
+                      "name": "Motion (MD)",
+                      "icon": "mdi:motion-sensor"
+                    }
+                  ]
+                },
+                {
+                  "type": "entities",
+                  "title": "Controls",
+                  "show_header_toggle": false,
+                  "entities": [
+                    {
+                      "entity": "switch.cam2_cam2_pir",
+                      "name": "PIR"
+                    },
+                    {
+                      "entity": "switch.cam2_cam2_led",
+                      "name": "Status LED"
+                    },
+                    {
+                      "entity": "button.cam2_cam2_siren",
+                      "name": "Siren",
+                      "action_name": "Fire"
+                    },
+                    {
+                      "entity": "button.cam2_cam2_reboot",
+                      "name": "Reboot",
+                      "action_name": "Reboot"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,120 @@
+# Bairelay sample configuration. Copy to config.toml and edit.
+# Every commented-out key shows its default.
+
+bind = "0.0.0.0"
+# bind_port = 8554
+
+# TLS server. Plain RTSP keeps running on bind_port; TLS adds a second
+# listener on tls_bind_port. Set bind_port = 0 to disable plain.
+# certificate = "/path/to/cert-and-key.pem"   # PEM with cert chain + key
+# tls_bind_port = 8555
+# tls_client_auth = "none"   # none | request | require
+# tls_client_ca = "/path/to/ca.pem"   # required when client_auth != none
+
+# Grace window before idle StreamSources are pruned. 0 disables.
+# Keep ≤ each camera's idle_disconnect_timeout_secs so the source
+# can never outlive the Baichuan session it pulls from.
+# stream_prune_grace_secs = 30
+
+
+# RTSP user accounts. Without any [[users]], connections are anonymous.
+# [[users]]
+# name = "me"
+# pass = "my-password"
+
+
+# MQTT bridge. Remove the [mqtt] block to run RTSP-only.
+# [mqtt]
+# broker_addr = "192.168.1.50"
+# port = 1883
+# credentials = ["user", "password"]
+# ca = "/path/to/broker-ca.pem"
+# client_auth = ["/path/to/client.pem", "/path/to/client.key"]
+
+# Root segment for every owned MQTT topic and HA discovery
+# unique_id/identifier. Set to "neolink" for legacy migration.
+# topic_prefix = "bairelay"
+
+# HA MQTT discovery. Presence of [mqtt.discovery] enables it.
+# [mqtt.discovery]
+# topic = "homeassistant"
+# features = [
+#     "floodlight", "camera", "motion", "led", "ir",
+#     "reboot", "pt", "battery", "siren",
+# ]
+
+
+# Local wake server.
+# Replaces Reolink's cloud P2P servers for waking battery cameras.
+# Operator must redirect DNS for p2p*.reolink.com to this box.
+# [wake_server]
+# enable = false             # opt-in
+# middleman_port = 9999      # UDP, C2M_Q listener
+# register_port = 58200      # UDP, D2R_HB / C2R_C / D2R_DISC listener
+# heartbeat_ms = 20000       # echoed to cameras in R2D_HB_R
+# stale_after_ms = 80000     # registry entries older than this read as None
+
+
+# Motion-push listener.
+# Treats the camera's TCP connect to pushx.reolink.com as a motion event.
+# Operator must redirect DNS for pushx.reolink.com to push_listener_addr.
+# [push_listener]
+# enable = false                       # opt-in
+# push_listener_addr = "0.0.0.0"       # default: wake_server bind / top-level bind
+# push_listener_port = 443             # override when 443 is taken
+# motion_wake_hold_secs = 30           # wake-lock window per push event
+
+
+# ── Cameras ──
+# Name must match [A-Za-z0-9_-]+. Address OR uid is required.
+
+[[cameras]]
+name = "driveway"
+username = "admin"
+password = "camera-password"
+address = "192.168.1.187:9000"
+# uid = "ABCDEF1234567890"
+# channel_id = 0
+# stream = "all"              # none | all | main | sub | extern
+# discovery = "relay"         # local | remote | map | relay | cellular
+# max_encryption = "aes"      # none | aes | bcencrypt
+# idle_disconnect = false     # true for battery cams
+# idle_disconnect_timeout_secs = 45  # grace period before sleep
+# motion_wake_hold_secs = 30  # wake-lock hold after motion stops
+# enabled = true
+# permitted_users = ["me"]
+
+# [cameras.mqtt]
+# enable_motion     = true
+# enable_light      = true    # status LED
+# enable_battery    = true
+# battery_update    = 2000    # ms, min 500
+# enable_preview    = true
+# preview_update    = 2000    # ms, min 500
+# enable_floodlight = false
+# floodlight_update = 2000    # ms, min 500
+# enable_pir        = false
+
+# [cameras.pause]
+# Fill gaps from the camera (wake / reconnect / stall) with the last
+# frame so RTSP clients don't see a spinner. Default true.
+# bridge_gaps = true
+# Seconds without a live frame before a gap starts. Raise for
+# sub streams with naturally low fps. Default 1.0.
+# gap_threshold_secs = 1.0
+# Draw a CONNECTING/SLEEPING caption on the MQTT preview JPEG.
+# Default true.
+# preview_overlay = true
+#
+# Neolink migration compat (all accepted with a startup warning):
+#   on_motion, on_client, on_disconnect, motion_timeout, mode
+# have no effect in bairelay and can be removed.
+# timeout = 30  # deprecated alias for idle_disconnect_timeout_secs
+
+
+[[cameras]]
+name = "backyard"
+username = "admin"
+password = "another-password"
+address = "192.168.1.188:9000"
+stream = "main"

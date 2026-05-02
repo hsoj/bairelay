@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "minor_version": 1,
+  "key": "person",
+  "data": {
+    "items": [
+      {
+        "id": "bairelay_verify",
+        "name": "Bairelay-Verify",
+        "user_id": "de056bf4eb84467282e7582cfad1891d",
+        "device_trackers": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,98 @@
+[package]
+name = "bairelay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "RTSP Relay for Reolink Baichuan cameras"
+readme = "README.md"
+
+[workspace]
+members = [
+	"crates/*",
+]
+# `fuzz/` is its own detached cargo project (libfuzzer-sys + nightly).
+# Excluding it keeps `cargo build/test --workspace` from walking it
+# and dragging in nightly-only deps.
+exclude = ["fuzz"]
+# Without this, bare `cargo test` / `cargo build` / `cargo clippy`
+# from the workspace root operates only on the root crate and silently
+# skips every member crate (neolink_core's ~686 tests included). The
+# `--workspace` flag works either way; this just makes the bare form
+# do the right thing.
+default-members = [
+	".",
+	"crates/core",
+	"crates/mqtt",
+	"crates/rtsp",
+	"crates/wake-server",
+]
+
+# Single source of truth for version / edition / license across the
+# workspace. Bumping `version` here cascades to every member crate;
+# `build.rs` picks up the same value via CARGO_PKG_VERSION_{MAJOR,MINOR}
+# and resets the build counter when the prefix changes.
+[workspace.package]
+version = "0.9.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/mgc8/bairelay"
+homepage = "https://github.com/mgc8/bairelay"
+keywords = ["reolink", "rtsp", "mqtt", "baichuan", "home-assistant"]
+categories = ["multimedia::video", "network-programming"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+bytes = "1"
+quick-xml = { version = "0.36", features = ["serialize"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+ab_glyph = "0.2"
+time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
+
+neolink_core = { path = "crates/core" }
+bairelay_mqtt = { path = "crates/mqtt" }
+bairelay_rtsp = { path = "crates/rtsp" }
+bairelay_wake_server = { path = "crates/wake-server" }
+
+rustls = "0.23"
+rustls-pemfile = "2"
+# No-echo TTY input + plain-stdin read for `users add` / `users password`
+# when the operator omits the password positional. Keeps the secret out
+# of `ps auxww`, shell history, and supervisor argv-capture logs.
+rpassword = "7"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+rcgen = "0.13"
+
+# Enable neolink_core's test scaffolding (`FakeCamera*`, `MockConnection*`,
+# `BcCamera::from_mock_connection`, `MotionData::test_new`) for the
+# binary's own test suite. The feature is off in production builds, so
+# release `bairelay` cannot accidentally substitute a fake for a real
+# camera.
+neolink_core = { path = "crates/core", features = ["test-util"] }
+
+# tests/fixture_replay.rs drives the real RtspServer::serve over a TCP
+# socket and hand-parses RTP/RTCP bytes off the wire. That requires
+# tokio's net + io-util feature flags (not pulled in by the runtime
+# crate's default feature set). `test-util` enables the virtual-time
+# clock (`tokio::time::advance`, `start_paused = true`) used by the
+# gap-detection unit tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }

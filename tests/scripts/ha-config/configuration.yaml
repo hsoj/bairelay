@@ -1,0 +1,29 @@
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+# bairelay test cameras are provisioned via HA's config-flow REST
+# API by tests/scripts/ha-verify.sh ("Generic Camera" integration).
+# They live in HA as permanent entries across test runs; only a
+# human should delete them. ha-verify.sh also renames each entry
+# title + entity_id via HA's WebSocket API on every run so the
+# integrations page shows real names like "Cam1 (main) [bairelay]"
+# instead of the auto-assigned "host_docker_internal".
+# See docs/ha-testing.md for the full workflow.
+#
+# The cameras point at rtsp://host.docker.internal:8554/<name>,
+# which is how HA running inside the colima VM reaches bairelay's
+# RTSP server on the macOS host (bairelay binds 0.0.0.0:8554 by
+# default).
+
+# Enable HA's stream integration so camera snapshot-from-stream
+# works against the RTSP sources provisioned via the config flow.
+stream:

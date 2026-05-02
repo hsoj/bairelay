@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "minor_version": 1,
+  "key": "auth",
+  "data": {
+    "users": [
+      {
+        "id": "a63749feecdb4f78861ac74596ba9a47",
+        "group_ids": [
+          "system-read-only"
+        ],
+        "is_owner": false,
+        "is_active": true,
+        "name": "Home Assistant Content",
+        "system_generated": true,
+        "local_only": false
+      },
+      {
+        "id": "de056bf4eb84467282e7582cfad1891d",
+        "group_ids": [
+          "system-admin"
+        ],
+        "is_owner": true,
+        "is_active": true,
+        "name": "Bairelay-Verify",
+        "system_generated": false,
+        "local_only": false
+      }
+    ],
+    "groups": [
+      {
+        "id": "system-admin",
+        "name": "Administrators"
+      },
+      {
+        "id": "system-users",
+        "name": "Users"
+      },
+      {
+        "id": "system-read-only",
+        "name": "Read Only"
+      }
+    ],
+    "credentials": [
+      {
+        "id": "cb48489120794b84869e8a504067eecc",
+        "user_id": "de056bf4eb84467282e7582cfad1891d",
+        "auth_provider_type": "homeassistant",
+        "auth_provider_id": null,
+        "data": {
+          "username": "bairelay-verify"
+        }
+      }
+    ],
+    "refresh_tokens": [
+      {
+        "id": "ff2a3617d3894a2691c2e5e351212178",
+        "user_id": "a63749feecdb4f78861ac74596ba9a47",
+        "client_id": null,
+        "client_name": null,
+        "client_icon": null,
+        "token_type": "system",
+        "created_at": "2026-04-19T18:50:09.631073+00:00",
+        "access_token_expiration": 1800.0,
+        "token": "df3c50029490eb7c556dc0a09b556fbe7d132dc45bb7c8f4b4da96fc769932f508c9c317a4b43b66a282b05f01d04cd00bad8f8010b61b14d7cc6fa4e12e0cb4",
+        "jwt_key": "5bb413a4c06707f635fa507f19bbc94e137714febf0a56bffc104819d3ed4dc52e8040dda81507e63cbe39aea13bc64d1b1663697760646b3efc0ee81070ef7d",
+        "last_used_at": null,
+        "last_used_ip": null,
+        "expire_at": null,
+        "credential_id": null,
+        "version": "2026.4.3"
+      },
+      {
+        "id": "2309c3852cca48d2b645a4c1f6d90b3c",
+        "user_id": "de056bf4eb84467282e7582cfad1891d",
+        "client_id": "http://127.0.0.1:8123/",
+        "client_name": null,
+        "client_icon": null,
+        "token_type": "normal",
+        "created_at": "2026-04-19T18:57:24.845338+00:00",
+        "access_token_expiration": 1800.0,
+        "token": "0ae54114c381883c4bb502980ecb1543bcc744fab69c687a70077fc3f17a4175947e430a0e0feaa1a4e621ca45bdcb8793782b108c493cacb88216232cbce42e",
+        "jwt_key": "6765df38a74dccbdfb8af77905adc1c11369a938114ec6fef180d25036252898ddd4099cac6551a3f3ceefb15cfeb1069d862e58a386863bf1c594e9fd578554",
+        "last_used_at": "2026-04-21T14:53:25.523224+00:00",
+        "last_used_ip": "127.0.0.1",
+        "expire_at": 1784559205.523224,
+        "credential_id": "cb48489120794b84869e8a504067eecc",
+        "version": "2026.4.3"
+      },
+      {
+        "id": "0cee9513539f446588501010f2ee5251",
+        "user_id": "de056bf4eb84467282e7582cfad1891d",
+        "client_id": "http://localhost:8123/",
+        "client_name": null,
+        "client_icon": null,
+        "token_type": "normal",
+        "created_at": "2026-04-19T20:02:13.049466+00:00",
+        "access_token_expiration": 1800.0,
+        "token": "a58a866fb8be480829b43011e71eb52f029d3b87a0665498808a6e0ed30abebfc4096d7f0904cf8dcacbfa786b5fa805ff777f322b66678bd1ec9810db94b709",
+        "jwt_key": "0b9958abc96577dc43a55fa649b3d4a6c5cc6dca41bf378d91f363bad3d3c7a84b10f21aa13750ce76576ffb2ba04d7d6d41f86b382d5f22420a80769076bd94",
+        "last_used_at": "2026-04-19T20:02:13.049509+00:00",
+        "last_used_ip": "127.0.0.1",
+        "expire_at": 1784404933.049509,
+        "credential_id": "cb48489120794b84869e8a504067eecc",
+        "version": "2026.4.3"
+      },
+      {
+        "id": "1934bcf9759b4077b61606cdaa908ff4",
+        "user_id": "de056bf4eb84467282e7582cfad1891d",
+        "client_id": null,
+        "client_name": "bairelay-verify",
+        "client_icon": null,
+        "token_type": "long_lived_access_token",
+        "created_at": "2026-05-02T00:00:00+00:00",
+        "access_token_expiration": 1800.0,
+        "token": "b0d817bdfd3cdb5f208deec80da9bae8b9ec9164510047da32f43607e51996bc78c422a6b74c8fd602f3a88159f606e5b54dbc81be7485e2da70f15e52d0ec1e",
+        "jwt_key": "7dc0d354c38182a45dcbc17d779300015cd0b22126f4cfa3c12bbe93e6a7395e",
+        "last_used_at": null,
+        "last_used_ip": null,
+        "expire_at": null,
+        "credential_id": null,
+        "version": "2026.4.3"
+      },
+      {
+        "id": "edfb7b20cfd24491804ed7f6b064453c",
+        "user_id": "de056bf4eb84467282e7582cfad1891d",
+        "client_id": "http://localhost:8123/",
+        "client_name": null,
+        "client_icon": null,
+        "token_type": "normal",
+        "created_at": "2026-05-02T00:56:56.082415+00:00",
+        "access_token_expiration": 1800.0,
+        "token": "2a08cde6a9ed99ecebbbdef2e568b042fdcd31dbed7ffc0ec11f28c720b6b00bf2c8938e3c3690d3e234355c9b8c47d1ba7012cb42c9e2249b643e8d3454a568",
+        "jwt_key": "a43301955f004b48ee5517f231369f8bcc66866912fc35344600f607571ee4929ab7a6f760bc5d26fad106acfd981b0e4487eded54243075176fe8e23cf0bf24",
+        "last_used_at": "2026-05-02T00:56:56.082451+00:00",
+        "last_used_ip": "127.0.0.1",
+        "expire_at": 1785459416.082451,
+        "credential_id": "cb48489120794b84869e8a504067eecc",
+        "version": "2026.4.3"
+      }
+    ]
+  }
+}

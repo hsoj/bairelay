@@ -1,0 +1,6 @@
+[toolchain]
+# cargo-fuzz needs nightly (sanitizer + coverage flags are unstable).
+# Pinning here scopes the requirement to fuzz/ so the rest of the
+# workspace stays on stable; the user `cd`s into this directory before
+# running `cargo fuzz run <target>`.
+channel = "nightly"

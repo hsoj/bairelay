@@ -1,0 +1,86 @@
+[package]
+name = "bairelay-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+
+# Path deps — the fuzz harness drives the same parsers production
+# does. `neolink_core` opts into the `fuzz-api` feature so the small
+# `fuzz_api` shim around `Bc::deserialize` and `BcXml::try_parse`
+# becomes reachable from this out-of-tree crate.
+neolink_core = { path = "../crates/core", features = ["fuzz-api"] }
+bairelay_rtsp = { path = "../crates/rtsp" }
+bairelay_wake_server = { path = "../crates/wake-server" }
+
+# Detach from the parent workspace. Without this, cargo would try to
+# pull this crate into the bairelay workspace and `cargo +nightly fuzz
+# build` would compile every workspace member with libfuzzer
+# instrumentation.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "wake_server_decode_discovery"
+path = "fuzz_targets/wake_server_decode_discovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bcudp_deserialize"
+path = "fuzz_targets/bcudp_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bc_deserialize"
+path = "fuzz_targets/bc_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bcxml_try_parse"
+path = "fuzz_targets/bcxml_try_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aac_parse_adts"
+path = "fuzz_targets/aac_parse_adts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nal_split_decode"
+path = "fuzz_targets/nal_split_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_flow_state"
+path = "fuzz_targets/udp_flow_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adpcm_decode_block"
+path = "fuzz_targets/adpcm_decode_block.rs"
+test = false
+doc = false
+bench = false
