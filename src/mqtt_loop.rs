@@ -259,6 +259,24 @@ pub async fn handle_connack(
 			);
 		}
 	}
+
+	// Re-emit each camera's last-known status (battery / motion /
+	// floodlight / floodlight_tasks / pir) from its in-memory cache.
+	// Brokers without persistence wipe retained messages on restart;
+	// without this republish HA would show "unknown" for event-driven
+	// or long-polled sensors until the next event/poll. The cache is
+	// fully empty until the matching publishers have run at least
+	// once, so this is a no-op on the very first ConnAck of a fresh
+	// process and only contributes work after real state has flowed.
+	for (name, cam) in cameras.iter() {
+		if let Err(e) = cam.republish_cached_status().await {
+			tracing::warn!(
+				camera = %name,
+				error = %e,
+				"Failed to re-publish cached MQTT status on ConnAck"
+			);
+		}
+	}
 }
 
 #[cfg(test)]

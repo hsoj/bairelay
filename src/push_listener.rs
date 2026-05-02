@@ -224,6 +224,7 @@ async fn fire_motion(
 	if let Err(e) = publisher.publish_motion(true).await {
 		tracing::warn!(camera = %handle.name(), error = %e, "push motion: publish_motion(true) failed");
 	}
+	handle.status_cache().set_motion(true);
 
 	// Hold for `hold`, bailing on cancel — same primitive used by the
 	// camera reconnect path so the contract lives in one place.
@@ -235,7 +236,9 @@ async fn fire_motion(
 	// dead broker hits the timeout and we move on quietly.
 	const FALLBACK_PUBLISH_TIMEOUT: Duration = Duration::from_secs(1);
 	match tokio::time::timeout(FALLBACK_PUBLISH_TIMEOUT, publisher.publish_motion(false)).await {
-		Ok(Ok(())) => {}
+		Ok(Ok(())) => {
+			handle.status_cache().set_motion(false);
+		}
 		Ok(Err(e)) => {
 			tracing::warn!(camera = %handle.name(), error = %e, "push motion: fallback publish_motion(false) failed");
 		}

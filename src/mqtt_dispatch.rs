@@ -125,6 +125,7 @@ pub async fn dispatch_control(
 				// Re-publish PIR state after change
 				let publisher = StatusPublisher::new(mqtt, topic_prefix, cam_name);
 				let _ = publisher.publish_pir(state).await;
+				cam.status_cache().set_pir(state);
 			}
 			result
 		}

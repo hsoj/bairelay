@@ -17,10 +17,12 @@ use bairelay_rtsp::buffer::LastFrameBuffer;
 use crate::camera::ReconnectBackoff;
 use crate::preview_overlay::OverlayCache;
 use crate::preview_state::PreviewState;
+use crate::status_cache::StatusCache;
 use crate::wake_lock::{WakeLockCounter, WakeLockGuard};
 
 // ── Motion Detection ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub async fn motion_listener(
 	camera_name: String,
 	bc_camera: Arc<dyn CameraDriver>,
@@ -29,6 +31,7 @@ pub async fn motion_listener(
 	wake_lock: WakeLockCounter,
 	cancel: CancellationToken,
 	motion_wake_hold: Duration,
+	status_cache: Arc<StatusCache>,
 ) {
 	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	// Sustained network flap with N cameras × M retries/min produces a
@@ -92,10 +95,12 @@ pub async fn motion_listener(
 								wake_guard = Some(wake_lock.acquire());
 							}
 							let _ = publisher.publish_motion(true).await;
+							status_cache.set_motion(true);
 						}
 						Ok(MotionStatus::Stop(_)) => {
 							tracing::info!(camera = %camera_name, "Motion stopped");
 							let _ = publisher.publish_motion(false).await;
+							status_cache.set_motion(false);
 							if wake_guard.is_some() {
 								release_at = Some(
 									tokio::time::Instant::now() + motion_wake_hold,
@@ -123,6 +128,7 @@ pub async fn motion_listener(
 
 // ── Battery Poller ───────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub async fn battery_poller(
 	camera_name: String,
 	bc_camera: Arc<dyn CameraDriver>,
@@ -130,6 +136,7 @@ pub async fn battery_poller(
 	topic_prefix: String,
 	interval_ms: u64,
 	cancel: CancellationToken,
+	status_cache: Arc<StatusCache>,
 ) {
 	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
@@ -143,6 +150,7 @@ pub async fn battery_poller(
 						let level = info.battery_percent.min(100) as u8;
 						tracing::debug!(camera = %camera_name, battery = level, "Battery level");
 						let _ = publisher.publish_battery_level(level).await;
+						status_cache.set_battery_level(level);
 					}
 					Ok(Err(e)) => {
 						tracing::debug!(camera = %camera_name, error = %e, "Battery poll failed");
@@ -266,6 +274,7 @@ pub async fn preview_poller(
 
 // ── Floodlight Poller ────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub async fn floodlight_poller(
 	camera_name: String,
 	bc_camera: Arc<dyn CameraDriver>,
@@ -273,6 +282,7 @@ pub async fn floodlight_poller(
 	topic_prefix: String,
 	interval_ms: u64,
 	cancel: CancellationToken,
+	status_cache: Arc<StatusCache>,
 ) {
 	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
@@ -285,6 +295,7 @@ pub async fn floodlight_poller(
 					Ok(Ok(enabled)) => {
 						tracing::debug!(camera = %camera_name, enabled, "Floodlight tasks");
 						let _ = publisher.publish_floodlight_tasks_enabled(enabled).await;
+						status_cache.set_floodlight_tasks(enabled);
 					}
 					Ok(Err(e)) => {
 						tracing::debug!(camera = %camera_name, error = %e, "Floodlight poll failed");
@@ -306,6 +317,7 @@ pub async fn floodlight_listener(
 	mqtt: SharedMqttClient,
 	topic_prefix: String,
 	cancel: CancellationToken,
+	status_cache: Arc<StatusCache>,
 ) {
 	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 
@@ -327,6 +339,7 @@ pub async fn floodlight_listener(
 							let on = flight.status != 0;
 							tracing::debug!(camera = %camera_name, on, "Floodlight state changed");
 							let _ = publisher.publish_floodlight(on).await;
+							status_cache.set_floodlight(on);
 						}
 					}
 					None => break, // Channel closed
@@ -345,6 +358,7 @@ pub async fn publish_pir_state(
 	bc_camera: Arc<dyn CameraDriver>,
 	mqtt: SharedMqttClient,
 	topic_prefix: String,
+	status_cache: Arc<StatusCache>,
 ) {
 	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	match tokio::time::timeout(Duration::from_secs(10), bc_camera.get_pirstate()).await {
@@ -352,6 +366,7 @@ pub async fn publish_pir_state(
 			let enabled = pir_state.enable == 1;
 			tracing::debug!(camera = %camera_name, enabled, "PIR state");
 			let _ = publisher.publish_pir(enabled).await;
+			status_cache.set_pir(enabled);
 		}
 		Ok(Err(e)) => {
 			tracing::debug!(camera = %camera_name, error = %e, "PIR state query failed");
@@ -368,6 +383,15 @@ mod tests {
 	use bairelay_mqtt::test_support::MockHandle;
 	use bytes::Bytes;
 	use neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
+
+	/// Helper: every status-publishing task takes an `Arc<StatusCache>`
+	/// as its final argument. Tests that don't assert on cache contents
+	/// pass a fresh default. Wrapped in a helper to keep the call sites
+	/// terse and not bind a dependency on the StatusCache constructor
+	/// shape into every test.
+	fn empty_cache() -> Arc<StatusCache> {
+		Arc::new(StatusCache::default())
+	}
 
 	/// Poll the mock MQTT handle for up to `budget`, returning `true`
 	/// as soon as any captured publish row satisfies `pred`. Factored
@@ -422,6 +446,7 @@ mod tests {
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
+			empty_cache(),
 		));
 
 		// Push a Start event and wait briefly for the publish to
@@ -475,6 +500,7 @@ mod tests {
 			"bairelay".to_string(),
 			20,
 			cancel.clone(),
+			empty_cache(),
 		));
 
 		let saw_level = await_publish_matching(&mock, Duration::from_secs(2), |(t, p, r)| {
@@ -530,6 +556,7 @@ mod tests {
 			"bairelay".to_string(),
 			20,
 			cancel.clone(),
+			empty_cache(),
 		));
 
 		let saw_level = await_publish_matching(&mock, Duration::from_secs(3), |(t, p, _)| {
@@ -572,6 +599,7 @@ mod tests {
 			mqtt,
 			"bairelay".to_string(),
 			cancel.clone(),
+			empty_cache(),
 		));
 
 		tx.send(FloodlightStatusList {
@@ -618,6 +646,7 @@ mod tests {
 			"bairelay".to_string(),
 			20,
 			cancel.clone(),
+			empty_cache(),
 		));
 
 		let saw = await_publish_matching(&mock, Duration::from_secs(2), |(t, p, r)| {
@@ -654,7 +683,14 @@ mod tests {
 
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
 
-		publish_pir_state("cam1".to_string(), driver, mqtt, "bairelay".to_string()).await;
+		publish_pir_state(
+			"cam1".to_string(),
+			driver,
+			mqtt,
+			"bairelay".to_string(),
+			empty_cache(),
+		)
+		.await;
 
 		let pub_rows = mock.published();
 		assert!(
@@ -834,6 +870,7 @@ mod tests {
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
+			empty_cache(),
 		));
 
 		// Start then Stop in quick succession.
@@ -893,6 +930,7 @@ mod tests {
 			wl.clone(),
 			cancel.clone(),
 			hold,
+			empty_cache(),
 		));
 
 		// Start → wake lock acquired.
@@ -962,6 +1000,7 @@ mod tests {
 			wl.clone(),
 			cancel.clone(),
 			hold,
+			empty_cache(),
 		));
 
 		// Start → Stop → Start, all within the hold-down window.
@@ -1027,6 +1066,7 @@ mod tests {
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
+			empty_cache(),
 		));
 
 		motion_tx
@@ -1082,6 +1122,7 @@ mod tests {
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
+			empty_cache(),
 		));
 
 		// Push one Err into the motion channel. The listener will log
@@ -1121,6 +1162,7 @@ mod tests {
 			mqtt,
 			"bairelay".to_string(),
 			cancel,
+			empty_cache(),
 		)
 		.await;
 		assert!(
@@ -1139,7 +1181,14 @@ mod tests {
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
-		publish_pir_state("cam1".to_string(), driver, mqtt, "bairelay".to_string()).await;
+		publish_pir_state(
+			"cam1".to_string(),
+			driver,
+			mqtt,
+			"bairelay".to_string(),
+			empty_cache(),
+		)
+		.await;
 		assert!(
 			!mock
 				.published()
@@ -1169,6 +1218,7 @@ mod tests {
 			"bairelay".to_string(),
 			20,
 			cancel.clone(),
+			empty_cache(),
 		));
 		// Let at least one tick fire + settle.
 		tokio::time::sleep(Duration::from_millis(80)).await;
@@ -1355,6 +1405,7 @@ mod tests {
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
+			empty_cache(),
 		));
 
 		// Give the listener enough wall time to invoke
@@ -1392,6 +1443,7 @@ mod tests {
 				mqtt,
 				"bairelay".to_string(),
 				cancel,
+				empty_cache(),
 			),
 		)
 		.await
@@ -1421,6 +1473,7 @@ mod tests {
 			"bairelay".to_string(),
 			20,
 			cancel.clone(),
+			empty_cache(),
 		));
 		// Advance past the first tick (20 ms) plus the 10 s per-tick timeout.
 		tokio::time::advance(Duration::from_secs(11)).await;
@@ -1451,6 +1504,7 @@ mod tests {
 			"bairelay".to_string(),
 			20,
 			cancel.clone(),
+			empty_cache(),
 		));
 		// Advance past the first tick (20 ms) plus the 10 s per-tick timeout.
 		tokio::time::advance(Duration::from_secs(11)).await;
@@ -1475,6 +1529,7 @@ mod tests {
 			driver,
 			mqtt,
 			"bairelay".to_string(),
+			empty_cache(),
 		));
 		tokio::time::advance(Duration::from_secs(11)).await;
 		let _ = task.await;

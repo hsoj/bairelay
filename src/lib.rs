@@ -19,6 +19,7 @@ pub mod preview_state;
 pub mod push_listener;
 pub mod run_support;
 pub mod startup_wake;
+pub mod status_cache;
 pub mod stream_source;
 pub mod supervisor;
 pub mod tls_load;

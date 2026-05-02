@@ -1,0 +1,112 @@
+//! Per-camera cache of the most-recent MQTT status values.
+//!
+//! Each camera task that publishes a status topic (battery, motion,
+//! floodlight, floodlight_tasks, pir) writes the just-published value
+//! into this cache. On a broker reconnect, `handle_connack` walks
+//! every camera's cache and re-emits any set value via the standard
+//! `publish_*` retained publishers.
+//!
+//! Why: MQTT brokers without persistence (or whose retained store is
+//! reset alongside HA) lose retained messages on restart. Bairelay's
+//! own publishes are then the only source of state, but several
+//! topics are event-driven (motion, floodlight) or polled at long
+//! intervals (battery: 600 s default), so HA can show "unknown" for
+//! up to 10 min after such a reset. Re-emitting the cache on every
+//! broker reconnect closes the gap.
+//!
+//! What's NOT cached:
+//!
+//! - Connection status (`status`) — already published on every
+//!   connect/disconnect transition.
+//! - Discovery payloads — re-emitted by `mqtt_loop::handle_connack`.
+//! - Preview JPEG — refreshed by `preview_poller` every 5 s default.
+//! - PTZ preset (`status/ptz/preset`) — bairelay genuinely doesn't
+//!   know which preset the camera selected pre-restart, so the
+//!   discovery publisher intentionally clears it on every reconnect.
+
+use crate::stream_source::RwLockPoisonRecover as _;
+use std::sync::RwLock;
+
+#[derive(Debug, Default)]
+pub struct StatusCache {
+	battery_level: RwLock<Option<u8>>,
+	motion: RwLock<Option<bool>>,
+	floodlight: RwLock<Option<bool>>,
+	floodlight_tasks: RwLock<Option<bool>>,
+	pir: RwLock<Option<bool>>,
+}
+
+impl StatusCache {
+	pub fn set_battery_level(&self, level: u8) {
+		*self.battery_level.write_recover() = Some(level);
+	}
+	pub fn battery_level(&self) -> Option<u8> {
+		*self.battery_level.read_recover()
+	}
+
+	pub fn set_motion(&self, detected: bool) {
+		*self.motion.write_recover() = Some(detected);
+	}
+	pub fn motion(&self) -> Option<bool> {
+		*self.motion.read_recover()
+	}
+
+	pub fn set_floodlight(&self, on: bool) {
+		*self.floodlight.write_recover() = Some(on);
+	}
+	pub fn floodlight(&self) -> Option<bool> {
+		*self.floodlight.read_recover()
+	}
+
+	pub fn set_floodlight_tasks(&self, enabled: bool) {
+		*self.floodlight_tasks.write_recover() = Some(enabled);
+	}
+	pub fn floodlight_tasks(&self) -> Option<bool> {
+		*self.floodlight_tasks.read_recover()
+	}
+
+	pub fn set_pir(&self, enabled: bool) {
+		*self.pir.write_recover() = Some(enabled);
+	}
+	pub fn pir(&self) -> Option<bool> {
+		*self.pir.read_recover()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn defaults_to_none() {
+		let c = StatusCache::default();
+		assert_eq!(c.battery_level(), None);
+		assert_eq!(c.motion(), None);
+		assert_eq!(c.floodlight(), None);
+		assert_eq!(c.floodlight_tasks(), None);
+		assert_eq!(c.pir(), None);
+	}
+
+	#[test]
+	fn round_trips_each_field() {
+		let c = StatusCache::default();
+		c.set_battery_level(72);
+		c.set_motion(true);
+		c.set_floodlight(false);
+		c.set_floodlight_tasks(true);
+		c.set_pir(false);
+		assert_eq!(c.battery_level(), Some(72));
+		assert_eq!(c.motion(), Some(true));
+		assert_eq!(c.floodlight(), Some(false));
+		assert_eq!(c.floodlight_tasks(), Some(true));
+		assert_eq!(c.pir(), Some(false));
+	}
+
+	#[test]
+	fn last_write_wins() {
+		let c = StatusCache::default();
+		c.set_battery_level(50);
+		c.set_battery_level(48);
+		assert_eq!(c.battery_level(), Some(48));
+	}
+}

@@ -16,6 +16,7 @@ use crate::capabilities::CameraCapabilities;
 use crate::config::CameraConfig;
 use crate::grace_period::GracePeriod;
 use crate::preview_state::PreviewState;
+use crate::status_cache::StatusCache;
 use crate::stream_source::{MutexPoisonRecover as _, RwLockPoisonRecover as _, StreamSource};
 use crate::wake_lock::WakeLockCounter;
 
@@ -210,6 +211,14 @@ pub struct CameraHandle {
 	/// each lifecycle transition.
 	preview_state_tx: Arc<watch::Sender<PreviewState>>,
 	preview_state_rx: watch::Receiver<PreviewState>,
+	/// Per-camera cache of the most recently published MQTT status
+	/// values (battery, motion, floodlight, floodlight_tasks, pir).
+	/// Threaded into every status-publishing task so each successful
+	/// publish updates the cache; read by `republish_cached_status`
+	/// on every broker ConnAck so HA recovers full state even when
+	/// the broker has lost retained messages (no-persistence config,
+	/// HA-Mosquitto-add-on restart, etc.). See `src/status_cache.rs`.
+	status_cache: Arc<StatusCache>,
 	/// Global `Config::stream_prune_grace_secs` propagated by the
 	/// orchestrator at construction. Threaded through to
 	/// [`crate::config::resolve_idle_disconnect_timeout`] so the floor
@@ -285,6 +294,7 @@ impl CameraHandle {
 			discovery_publisher: None,
 			preview_state_tx,
 			preview_state_rx,
+			status_cache: Arc::new(StatusCache::default()),
 			prune_grace: Duration::ZERO,
 		}
 	}
@@ -439,6 +449,46 @@ impl CameraHandle {
 	#[doc(hidden)]
 	pub fn set_capabilities_for_test(&self, caps: CameraCapabilities) {
 		*self.capabilities.write_recover() = Some(caps);
+	}
+
+	/// Shared per-camera status cache. Each status-publishing task
+	/// (battery / motion / floodlight / floodlight_tasks / pir)
+	/// receives a clone of this Arc and writes the just-published
+	/// value after every successful publish. Read by
+	/// [`Self::republish_cached_status`] on every broker reconnect.
+	pub fn status_cache(&self) -> Arc<StatusCache> {
+		Arc::clone(&self.status_cache)
+	}
+
+	/// Re-emit every cached MQTT status value via retained publishes.
+	/// Called by `mqtt_loop::handle_connack` after the discovery
+	/// republish so HA recovers full state when the broker has lost
+	/// retained messages (no-persistence config, broker restart).
+	///
+	/// No-op when the camera has no MQTT client attached or when no
+	/// status has ever been published yet (cache fully empty).
+	pub async fn republish_cached_status(&self) -> Result<(), bairelay_mqtt::MqttError> {
+		let Some(ref mqtt) = self.mqtt_client else {
+			return Ok(());
+		};
+		let publisher =
+			bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
+		if let Some(level) = self.status_cache.battery_level() {
+			publisher.publish_battery_level(level).await?;
+		}
+		if let Some(motion) = self.status_cache.motion() {
+			publisher.publish_motion(motion).await?;
+		}
+		if let Some(on) = self.status_cache.floodlight() {
+			publisher.publish_floodlight(on).await?;
+		}
+		if let Some(enabled) = self.status_cache.floodlight_tasks() {
+			publisher.publish_floodlight_tasks_enabled(enabled).await?;
+		}
+		if let Some(enabled) = self.status_cache.pir() {
+			publisher.publish_pir(enabled).await?;
+		}
+		Ok(())
 	}
 
 	/// Remove retained HA discovery config payloads for this camera
@@ -988,6 +1038,7 @@ impl CameraHandle {
 					self.wake_lock.clone(),
 					session_cancel.clone(),
 					Duration::from_secs_f64(self.config.motion_wake_hold_secs),
+					self.status_cache(),
 				));
 			}
 			if self.config.mqtt.enable_battery {
@@ -998,6 +1049,7 @@ impl CameraHandle {
 					self.topic_prefix.clone(),
 					self.config.mqtt.battery_update,
 					session_cancel.clone(),
+					self.status_cache(),
 				));
 			}
 			if self.config.mqtt.enable_floodlight {
@@ -1008,6 +1060,7 @@ impl CameraHandle {
 					self.topic_prefix.clone(),
 					self.config.mqtt.floodlight_update,
 					session_cancel.clone(),
+					self.status_cache(),
 				));
 				tasks.spawn(camera_tasks::floodlight_listener(
 					self.config.name.clone(),
@@ -1015,6 +1068,7 @@ impl CameraHandle {
 					mqtt.clone(),
 					self.topic_prefix.clone(),
 					session_cancel.clone(),
+					self.status_cache(),
 				));
 			}
 			if self.config.mqtt.enable_pir {
@@ -1023,6 +1077,7 @@ impl CameraHandle {
 					Arc::clone(driver),
 					mqtt.clone(),
 					self.topic_prefix.clone(),
+					self.status_cache(),
 				)
 				.await;
 			}
