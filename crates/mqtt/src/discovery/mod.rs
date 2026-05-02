@@ -267,17 +267,22 @@ pub struct DiscoveryContext<'a> {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /// ASCII-only title-case helper: `front_door` -> `Front Door`.
-/// Camera names are validated in `src/config.rs` to contain only
-/// alphanumeric + `_` + `-`, so this is a closed-world transform —
-/// no accented characters, no multi-byte scalars.
+/// Splits on `_` AND `-` so an operator naming their camera
+/// `front-door` or `cam_back-yard` gets the same per-word display
+/// treatment in HA. Embedded caps after the first char of each
+/// segment are preserved (`MyCamera` -> `MyCamera`, `4K_Terrace`
+/// -> `4K Terrace`, `IPCam-front` -> `IPCam Front`); only a
+/// lowercase first char is upgraded to uppercase. Camera names
+/// are validated in `src/config.rs` to contain only alphanumeric +
+/// `_` + `-`, so this stays a closed-world ASCII transform.
 fn title_case(name: &str) -> String {
-	name.split('_')
+	name.split(['_', '-'])
 		.map(|word| {
 			let mut chars = word.chars();
 			match chars.next() {
 				Some(first) => {
 					let head = first.to_ascii_uppercase();
-					let tail: String = chars.as_str().to_ascii_lowercase();
+					let tail: &str = chars.as_str();
 					format!("{head}{tail}")
 				}
 				None => String::new(),
@@ -372,7 +377,7 @@ pub fn build_floodlight_tasks_switch(ctx: &DiscoveryContext) -> Option<(String, 
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "floodlight_tasks");
 	let payload = DiscoverySwitch {
-		name: format!("{friendly} FloodlightTasks"),
+		name: format!("{friendly} Floodlight Tasks"),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:spotlight-beam".to_string()),
 		device: device_block(ctx, &friendly),
@@ -829,6 +834,23 @@ mod tests {
 		assert_eq!(title_case("frontdoor"), "Frontdoor");
 		assert_eq!(title_case("front_door"), "Front Door");
 		assert_eq!(title_case("4k_terrace"), "4k Terrace");
+	}
+
+	#[test]
+	fn title_case_treats_hyphen_as_word_separator() {
+		assert_eq!(title_case("front-door"), "Front Door");
+		assert_eq!(title_case("cam_back-yard"), "Cam Back Yard");
+	}
+
+	#[test]
+	fn title_case_preserves_embedded_caps_after_first_char() {
+		// Operators naming a camera in CamelCase / acronym style keep
+		// their casing — only a lowercase first char of each segment
+		// is upgraded to uppercase.
+		assert_eq!(title_case("MyCamera"), "MyCamera");
+		assert_eq!(title_case("4K_Terrace"), "4K Terrace");
+		assert_eq!(title_case("IPCam"), "IPCam");
+		assert_eq!(title_case("IPCam-front"), "IPCam Front");
 	}
 
 	#[test]

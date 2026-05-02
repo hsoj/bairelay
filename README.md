@@ -159,6 +159,27 @@ Key recommended defaults and why:
 - **`gap_threshold_secs = 1.0`** (per-camera, in `[cameras.pause]`) — the placeholder/bridging trigger when the upstream stalls. Sub streams with a naturally low fps may need this raised. Default is fine for main streams.
 - **MQTT discovery `features`** — the listed nine cover every entity HA understands. Drop `pt` for non-PTZ cameras, drop `floodlight` / `siren` for models without that hardware. Bairelay won't emit a discovery payload for a feature the camera doesn't advertise capability for; the list is an opt-in cap.
 
+### Camera names and how they appear in MQTT / Home Assistant
+
+Camera names (`name = "..."` in `[[cameras]]`) are restricted to `[A-Za-z0-9_-]+` so they're safe in MQTT topics, HA unique IDs, and URL paths. The name flows into three different places, with one transform along the way:
+
+- **MQTT topic paths** — verbatim. `name = "front_door"` publishes to `bairelay/front_door/status/...`; `name = "Front-Door"` publishes to `bairelay/Front-Door/status/...`. Topics are case-sensitive.
+- **HA `unique_id` / device identifier** — verbatim, joined with the topic prefix and a per-entity suffix using `_`. `name = "front_door"` produces `bairelay_front_door_floodlight` etc. These are stable across renames in the HA UI; never edit the camera name once Home Assistant has discovered the device or you'll orphan the existing entity history.
+- **HA display labels** (the friendly name shown on dashboards) — title-cased. `_` and `-` are treated as word separators and replaced with a space; the first character of each word is uppercased; **embedded caps are preserved** so an operator-chosen casing is not flattened. Examples:
+
+  | Camera name   | HA display label   |
+  |---------------|--------------------|
+  | `front_door`  | `Front Door`       |
+  | `front-door`  | `Front Door`       |
+  | `MyCamera`    | `MyCamera`         |
+  | `4K_Terrace`  | `4K Terrace`       |
+  | `IPCam-front` | `IPCam Front`      |
+  | `frontdoor`   | `Frontdoor`        |
+
+  Per-feature entities append the feature label with a space: `Front Door Floodlight`, `Front Door Floodlight Tasks`, `Front Door Battery`, `Front Door PIR`, etc.
+
+If you've already renamed an entity in the HA UI, your override wins — bairelay's `name` field is only used the first time HA sees the discovery payload.
+
 ### TLS (RTSPS)
 
 Set `certificate = "/path/to/fullchain-and-key.pem"` at the top level to enable parallel RTSPS on `tls_bind_port` (default 8555). Plain RTSP keeps running on `bind_port`; set `bind_port = 0` for TLS-only. `tls_client_auth = "none" | "request" | "require"` gates client-cert mTLS, with `tls_client_ca` pointing at the CA bundle.
