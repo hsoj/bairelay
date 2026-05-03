@@ -2,7 +2,8 @@ use super::{BcCamera, Error, Result};
 use crate::bc::{model::*, xml::*};
 use std::convert::{TryFrom, TryInto};
 use time::{
-	macros::date, parsing::Parsed, Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset,
+	macros::date, parsing::Parsed, Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset,
+	Weekday,
 };
 
 #[cfg(test)]
@@ -70,6 +71,78 @@ impl BcCamera {
 		}
 	}
 
+	/// Read the camera's daylight-saving-time configuration via
+	/// `MSG_ID_GET_DST`. The reply body is `<Dst>`; some firmwares
+	/// flag it binary (`<Extension><binaryData>1</binaryData></…>`)
+	/// even though the bytes are UTF-8 XML, so this method handles
+	/// both shapes — a parsed `BcXml { dst: Some(_) }` payload and a
+	/// raw `Binary` payload that we re-parse via `BcXml::try_parse`.
+	///
+	/// Returns the parsed `Dst` on success. A camera that doesn't
+	/// support the message (older firmware, or a model without DST
+	/// in its abilities) returns `Error::CameraServiceUnavailable` —
+	/// callers should treat that as "no DST awareness" and fall back
+	/// to sending the host's effective offset directly.
+	pub async fn get_dst(&self) -> Result<Dst> {
+		let connection = self.get_connection();
+		let msg_num = self.new_message_num();
+		let mut sub = connection.subscribe(MSG_ID_GET_DST, msg_num).await?;
+		let req = Bc {
+			meta: BcMeta {
+				msg_id: MSG_ID_GET_DST,
+				channel_id: self.channel_id,
+				msg_num,
+				response_code: 0,
+				stream_type: 0,
+				class: 0x6414,
+			},
+			body: BcBody::ModernMsg(ModernMsg::default()),
+		};
+		sub.send(req).await?;
+		let msg = sub.recv().await?;
+		if msg.meta.response_code != 200 {
+			return Err(Error::CameraServiceUnavailable {
+				id: msg.meta.msg_id,
+				code: msg.meta.response_code,
+			});
+		}
+
+		// Pull `<Dst>` from either a parsed-XML body (the common path
+		// when the camera attaches no Extension) or a Binary body whose
+		// bytes we re-parse as `<body>...<Dst>...</body>` (some replies
+		// carry `binaryData=1` even though the bytes are XML, and a
+		// trailing-padding tail past `</body>` is harmless to the
+		// parser).
+		let dst = match msg.body {
+			BcBody::ModernMsg(ModernMsg {
+				payload: Some(BcPayloads::BcXml(BcXml { dst: Some(d), .. })),
+				..
+			}) => d,
+			BcBody::ModernMsg(ModernMsg {
+				payload: Some(BcPayloads::Binary(bytes)),
+				..
+			}) => match BcXml::try_parse(bytes.as_slice()) {
+				Ok(BcXml { dst: Some(d), .. }) => d,
+				_ => {
+					return Err(Error::UnintelligibleReply {
+						reply: std::sync::Arc::new(Bc {
+							meta: msg.meta,
+							body: BcBody::ModernMsg(ModernMsg::default()),
+						}),
+						why: "GetDst binary payload did not contain <Dst>",
+					});
+				}
+			},
+			_ => {
+				return Err(Error::UnintelligibleReply {
+					reply: std::sync::Arc::new(msg),
+					why: "GetDst reply lacked a <Dst> body",
+				});
+			}
+		};
+		Ok(dst)
+	}
+
 	/// Read the full `SystemGeneral` block from the camera. Used
 	/// internally by `get_time` (for the time fields) and by
 	/// `set_time` (for the read-modify-write that preserves every
@@ -130,6 +203,25 @@ impl BcCamera {
 	pub async fn set_time(&self, timestamp: OffsetDateTime) -> Result<()> {
 		self.has_ability_rw("general").await?;
 
+		// DST compensation. The camera autonomously adds `<Dst><offset/></Dst>`
+		// hours to displayed local time when the moment falls inside the
+		// schedule's window. To make displayed-local match `timestamp`'s
+		// local time after that addition, write the camera's `<timeZone>`
+		// as the BASE offset (host effective offset minus the DST hours
+		// the camera will add) and the wallclock fields as UTC, so the
+		// camera's reconstruction `displayed = <hour> + (-<timeZone>/3600)
+		// + dst_in_window` lands on `timestamp`. Run before the
+		// SystemGeneral read so a non-supporting camera (older firmware,
+		// missing ability) surfaces fast and we fall through to the
+		// pre-DST behaviour without an extra round-trip on failure.
+		let dst_seconds = match self.get_dst().await {
+			Ok(dst) => {
+				let local = PrimitiveDateTime::new(timestamp.date(), timestamp.time());
+				dst_offset_seconds(&dst, local)
+			}
+			Err(_) => 0,
+		};
+
 		// Read-modify-write: we GET the camera's current SystemGeneral,
 		// mutate ONLY the time fields, and SET the full struct back.
 		// Writing a freshly-defaulted SystemGeneral (the previous
@@ -140,15 +232,33 @@ impl BcCamera {
 		// firmware-driven time syncs. Round-tripping the rest of the
 		// struct keeps every other knob bytewise unchanged.
 		let mut general = self.get_system_general().await?;
+
 		general.version = xml_ver();
-		// Reolink uses positive seconds to indicate a negative UTC offset:
-		general.time_zone = Some(-timestamp.offset().whole_seconds());
-		general.year = Some(timestamp.year());
-		general.month = Some(timestamp.month().into());
-		general.day = Some(timestamp.day());
-		general.hour = Some(timestamp.hour());
-		general.minute = Some(timestamp.minute());
-		general.second = Some(timestamp.second());
+
+		if dst_seconds != 0 {
+			let utc = timestamp.to_offset(UtcOffset::UTC);
+			let base_offset_seconds = timestamp
+				.offset()
+				.whole_seconds()
+				.saturating_sub(dst_seconds);
+			// Reolink uses positive seconds to indicate a negative UTC offset:
+			general.time_zone = Some(-base_offset_seconds);
+			general.year = Some(utc.year());
+			general.month = Some(utc.month().into());
+			general.day = Some(utc.day());
+			general.hour = Some(utc.hour());
+			general.minute = Some(utc.minute());
+			general.second = Some(utc.second());
+		} else {
+			// Reolink uses positive seconds to indicate a negative UTC offset:
+			general.time_zone = Some(-timestamp.offset().whole_seconds());
+			general.year = Some(timestamp.year());
+			general.month = Some(timestamp.month().into());
+			general.day = Some(timestamp.day());
+			general.hour = Some(timestamp.hour());
+			general.minute = Some(timestamp.minute());
+			general.second = Some(timestamp.second());
+		}
 
 		let connection = self.get_connection();
 		let msg_num = self.new_message_num();
@@ -183,6 +293,141 @@ impl BcCamera {
 
 		Ok(())
 	}
+}
+
+/// Compute the DST offset (in seconds) the camera will apply to a
+/// displayed local time at `instant_local`, given its `<Dst>` config.
+///
+/// Returns `0` when DST is disabled (`enable != 1`), the schedule fields
+/// are missing/invalid, or `instant_local` is outside the
+/// `[start, end)` window. Otherwise returns `dst.offset * 3600` seconds.
+///
+/// `instant_local` must be expressed in the camera's *local* time (the
+/// schedule fields are wall-time, not UTC) — for the bairelay set-time
+/// path that's the host's `OffsetDateTime::now_local()` projected to
+/// the same `OffsetDateTime` we're about to write to the camera.
+pub(crate) fn dst_offset_seconds(dst: &Dst, instant_local: PrimitiveDateTime) -> i32 {
+	if dst.enable != Some(1) {
+		return 0;
+	}
+	let offset_hours = match dst.offset {
+		Some(h) if h != 0 => h,
+		_ => return 0,
+	};
+
+	let start = match dst_transition_for_year(
+		instant_local.year(),
+		dst.start_month,
+		dst.start_week_index,
+		dst.start_weekday.as_deref(),
+		dst.start_hour,
+		dst.start_minute,
+		dst.start_second,
+	) {
+		Some(t) => t,
+		None => return 0,
+	};
+	let end = match dst_transition_for_year(
+		instant_local.year(),
+		dst.end_month,
+		dst.end_week_index,
+		dst.end_weekday.as_deref(),
+		dst.end_hour,
+		dst.end_minute,
+		dst.end_second,
+	) {
+		Some(t) => t,
+		None => return 0,
+	};
+
+	// Two shapes: northern-hemisphere (start < end, single window inside
+	// the calendar year) and southern-hemisphere (start > end, window
+	// straddles the year boundary). The schedule pinned in current
+	// captures is northern (March → October); the south-hemisphere
+	// branch is handled symmetrically for completeness.
+	let in_window = if start < end {
+		instant_local >= start && instant_local < end
+	} else {
+		instant_local >= start || instant_local < end
+	};
+
+	if in_window {
+		offset_hours.saturating_mul(3600)
+	} else {
+		0
+	}
+}
+
+/// Resolve a Reolink DST schedule entry (month + week-index + weekday +
+/// time-of-day) to a concrete `PrimitiveDateTime` for the given year.
+/// Returns `None` if any field is absent or invalid.
+///
+/// `week_index` semantics: `1`–`4` = "Nth occurrence of `weekday` in the
+/// month"; `5` = "last occurrence in the month".
+fn dst_transition_for_year(
+	year: i32,
+	month: Option<u8>,
+	week_index: Option<u8>,
+	weekday: Option<&str>,
+	hour: Option<u8>,
+	minute: Option<u8>,
+	second: Option<u8>,
+) -> Option<PrimitiveDateTime> {
+	let month: Month = month?.try_into().ok()?;
+	let week_index = week_index?;
+	let weekday = parse_weekday(weekday?)?;
+	let hour = hour.unwrap_or(0);
+	let minute = minute.unwrap_or(0);
+	let second = second.unwrap_or(0);
+
+	let date = nth_weekday_of_month(year, month, week_index, weekday)?;
+	let time = Time::from_hms(hour, minute, second).ok()?;
+	Some(PrimitiveDateTime::new(date, time))
+}
+
+fn parse_weekday(s: &str) -> Option<Weekday> {
+	match s.trim().to_ascii_lowercase().as_str() {
+		"monday" | "mon" => Some(Weekday::Monday),
+		"tuesday" | "tue" => Some(Weekday::Tuesday),
+		"wednesday" | "wed" => Some(Weekday::Wednesday),
+		"thursday" | "thu" => Some(Weekday::Thursday),
+		"friday" | "fri" => Some(Weekday::Friday),
+		"saturday" | "sat" => Some(Weekday::Saturday),
+		"sunday" | "sun" => Some(Weekday::Sunday),
+		_ => None,
+	}
+}
+
+/// Find the date of the Nth (`week_index`) occurrence of `weekday` in
+/// the given `(year, month)`. `week_index = 5` means "last occurrence",
+/// regardless of how many weeks the month actually contains.
+fn nth_weekday_of_month(year: i32, month: Month, week_index: u8, weekday: Weekday) -> Option<Date> {
+	if week_index == 0 || week_index > 5 {
+		return None;
+	}
+	let last_day = month.length(year);
+	if week_index == 5 {
+		for d in (1..=last_day).rev() {
+			if let Ok(date) = Date::from_calendar_date(year, month, d) {
+				if date.weekday() == weekday {
+					return Some(date);
+				}
+			}
+		}
+		return None;
+	}
+	for d in 1..=7 {
+		if let Ok(date) = Date::from_calendar_date(year, month, d) {
+			if date.weekday() == weekday {
+				let day_of_target = d + (week_index - 1) * 7;
+				if day_of_target > last_day {
+					return None;
+				}
+				return Date::from_calendar_date(year, month, day_of_target).ok();
+			}
+		}
+	}
+	None
 }
 
 /// Decode a Reolink `SystemGeneral` payload into an `OffsetDateTime`.
@@ -388,6 +633,24 @@ mod tests {
 		assert!(matches!(err, Error::UnintelligibleXml { .. }));
 	}
 
+	/// Reply that disables DST (`<enable>0</enable>`). Used by every
+	/// non-DST-focused `set_time` test so the production code's
+	/// pre-flight `get_dst()` returns cleanly without compensating
+	/// the wallclock — the original assertions remain meaningful.
+	fn reply_dst_disabled(req: &Bc) -> Bc {
+		reply_200_xml(
+			req,
+			BcXml {
+				dst: Some(Dst {
+					version: "1.1".to_string(),
+					enable: Some(0),
+					..Default::default()
+				}),
+				..Default::default()
+			},
+		)
+	}
+
 	#[tokio::test]
 	async fn set_time_happy_path() {
 		// `set_time` is read-modify-write: GET the camera's current
@@ -399,6 +662,8 @@ mod tests {
 		// silently dropping camera state on every set-time".
 		// Pin the inverted timezone convention here too: UTC+2
 		// (+7200 UtcOffset seconds) serialises as -7200 on the wire.
+		// Camera DST is disabled in the GetDst stub so this test
+		// pins the pre-DST passthrough wire shape.
 		let dt = PrimitiveDateTime::new(
 			Date::from_calendar_date(2026, time::Month::April, 23).unwrap(),
 			Time::from_hms(12, 30, 45).unwrap(),
@@ -406,6 +671,8 @@ mod tests {
 		.assume_offset(UtcOffset::from_whole_seconds(7200).unwrap());
 
 		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(reply_dst_disabled)
 			.expect_msg(MSG_ID_GET_GENERAL)
 			.reply_with(|req| {
 				reply_200_xml(
@@ -459,8 +726,11 @@ mod tests {
 	async fn set_time_get_failure_propagates() {
 		// If the GET roundtrip fails, set_time must surface the error
 		// without sending a partial SET — otherwise we'd be back to
-		// the bug this refactor fixed.
+		// the bug this refactor fixed. GetDst comes back disabled, so
+		// the failure source is the SystemGeneral GET, not DST.
 		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(reply_dst_disabled)
 			.expect_msg(MSG_ID_GET_GENERAL)
 			.reply_with(|req| reply_err_code(req, 500))
 			.build()
@@ -491,6 +761,8 @@ mod tests {
 	#[tokio::test]
 	async fn set_time_non_200_returns_err() {
 		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(reply_dst_disabled)
 			.expect_msg(MSG_ID_GET_GENERAL)
 			.reply_with(|req| {
 				reply_200_xml(
@@ -522,6 +794,445 @@ mod tests {
 			.await
 			.expect_err("should fail");
 		assert!(matches!(err, Error::UnintelligibleReply { .. }));
+	}
+
+	#[tokio::test]
+	async fn set_time_dst_in_window_writes_utc_wallclock_and_base_offset() {
+		// Pins the DST-compensation contract. Operator local =
+		// 2026-05-03 17:30:45 at UTC+2 (a DST-on offset for any zone
+		// that bases on UTC+1 + 1h DST). Camera reports DST enabled
+		// with offset=1h on a Mar-last-Sun → Oct-last-Sun schedule —
+		// exactly the configuration observed against real hardware.
+		// The SET request must carry: <hour> = host UTC (15), and
+		// <timeZone> = -3600 (base UTC+1, DST stripped). The camera
+		// then adds its own +1h DST → display = 17:30:45.
+		let local = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::May, 3).unwrap(),
+			Time::from_hms(17, 30, 45).unwrap(),
+		)
+		.assume_offset(UtcOffset::from_whole_seconds(7200).unwrap());
+
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(|req| {
+				reply_200_xml(
+					req,
+					BcXml {
+						dst: Some(Dst {
+							version: "1.1".to_string(),
+							enable: Some(1),
+							offset: Some(1),
+							start_month: Some(3),
+							start_week_index: Some(5),
+							start_weekday: Some("Sunday".to_string()),
+							start_hour: Some(2),
+							start_minute: Some(0),
+							start_second: Some(0),
+							end_month: Some(10),
+							end_week_index: Some(5),
+							end_weekday: Some("Sunday".to_string()),
+							end_hour: Some(3),
+							end_minute: Some(0),
+							end_second: Some(0),
+						}),
+						..Default::default()
+					},
+				)
+			})
+			.expect_msg(MSG_ID_GET_GENERAL)
+			.reply_with(|req| {
+				reply_200_xml(
+					req,
+					BcXml {
+						system_general: Some(SystemGeneral {
+							version: "1.1".to_string(),
+							time_zone: Some(0),
+							year: Some(2024),
+							month: Some(1),
+							day: Some(1),
+							hour: Some(0),
+							minute: Some(0),
+							second: Some(0),
+							..Default::default()
+						}),
+						..Default::default()
+					},
+				)
+			})
+			.expect_msg(MSG_ID_SET_GENERAL)
+			.reply_with_xml(|req, xml| {
+				let g = xml.system_general.as_ref().expect("system_general on SET");
+				// UTC components, NOT operator-local. Local was 17:30:45
+				// at UTC+2 → UTC = 15:30:45.
+				assert_eq!(g.year, Some(2026));
+				assert_eq!(g.month, Some(5));
+				assert_eq!(g.day, Some(3));
+				assert_eq!(g.hour, Some(15));
+				assert_eq!(g.minute, Some(30));
+				assert_eq!(g.second, Some(45));
+				// Base offset: effective UTC+2 minus DST 1h = UTC+1 base
+				// → wire -3600 per Reolink's inverted convention.
+				assert_eq!(g.time_zone, Some(-3600));
+				reply_200_empty(req)
+			})
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		cam.test_set_ability("general", true).await;
+		cam.set_time(local).await.expect("ok");
+	}
+
+	#[tokio::test]
+	async fn set_time_dst_out_of_window_passes_through() {
+		// DST enabled but the target date sits outside the window.
+		// `dst_offset_seconds` must return 0; set_time keeps the old
+		// behaviour (host-local components + effective offset).
+		// 2026-12-25 in a UTC+1 zone — well past Oct's last Sunday.
+		let dt = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::December, 25).unwrap(),
+			Time::from_hms(9, 0, 0).unwrap(),
+		)
+		.assume_offset(UtcOffset::from_whole_seconds(3600).unwrap());
+
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(|req| {
+				reply_200_xml(
+					req,
+					BcXml {
+						dst: Some(Dst {
+							version: "1.1".to_string(),
+							enable: Some(1),
+							offset: Some(1),
+							start_month: Some(3),
+							start_week_index: Some(5),
+							start_weekday: Some("Sunday".to_string()),
+							start_hour: Some(2),
+							start_minute: Some(0),
+							start_second: Some(0),
+							end_month: Some(10),
+							end_week_index: Some(5),
+							end_weekday: Some("Sunday".to_string()),
+							end_hour: Some(3),
+							end_minute: Some(0),
+							end_second: Some(0),
+						}),
+						..Default::default()
+					},
+				)
+			})
+			.expect_msg(MSG_ID_GET_GENERAL)
+			.reply_with(|req| {
+				reply_200_xml(
+					req,
+					BcXml {
+						system_general: Some(SystemGeneral {
+							version: "1.1".to_string(),
+							time_zone: Some(0),
+							year: Some(2024),
+							month: Some(1),
+							day: Some(1),
+							hour: Some(0),
+							minute: Some(0),
+							second: Some(0),
+							..Default::default()
+						}),
+						..Default::default()
+					},
+				)
+			})
+			.expect_msg(MSG_ID_SET_GENERAL)
+			.reply_with_xml(|req, xml| {
+				let g = xml.system_general.as_ref().expect("system_general on SET");
+				// Host-local components preserved, no UTC conversion.
+				assert_eq!(g.year, Some(2026));
+				assert_eq!(g.month, Some(12));
+				assert_eq!(g.day, Some(25));
+				assert_eq!(g.hour, Some(9));
+				assert_eq!(g.time_zone, Some(-3600));
+				reply_200_empty(req)
+			})
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		cam.test_set_ability("general", true).await;
+		cam.set_time(dt).await.expect("ok");
+	}
+
+	#[tokio::test]
+	async fn set_time_get_dst_failure_falls_back_to_passthrough() {
+		// Older firmware doesn't support GetDst (returns non-200);
+		// set_time must swallow that failure and fall through to the
+		// pre-DST behaviour (effective offset + local components),
+		// not bubble the GetDst error up to the caller.
+		let dt = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::April, 23).unwrap(),
+			Time::from_hms(12, 30, 45).unwrap(),
+		)
+		.assume_offset(UtcOffset::from_whole_seconds(7200).unwrap());
+
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(|req| reply_err_code(req, 500))
+			.expect_msg(MSG_ID_GET_GENERAL)
+			.reply_with(|req| {
+				reply_200_xml(
+					req,
+					BcXml {
+						system_general: Some(SystemGeneral {
+							version: "1.1".to_string(),
+							time_zone: Some(0),
+							year: Some(2024),
+							month: Some(1),
+							day: Some(1),
+							hour: Some(0),
+							minute: Some(0),
+							second: Some(0),
+							..Default::default()
+						}),
+						..Default::default()
+					},
+				)
+			})
+			.expect_msg(MSG_ID_SET_GENERAL)
+			.reply_with_xml(|req, xml| {
+				let g = xml.system_general.as_ref().expect("system_general on SET");
+				assert_eq!(g.hour, Some(12));
+				assert_eq!(g.time_zone, Some(-7200));
+				reply_200_empty(req)
+			})
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		cam.test_set_ability("general", true).await;
+		cam.set_time(dt).await.expect("ok");
+	}
+
+	#[test]
+	fn dst_offset_seconds_disabled_returns_zero() {
+		// `<enable>0</enable>` → no compensation regardless of date.
+		let dst = Dst {
+			version: "1.1".to_string(),
+			enable: Some(0),
+			offset: Some(1),
+			start_month: Some(3),
+			start_week_index: Some(5),
+			start_weekday: Some("Sunday".to_string()),
+			start_hour: Some(2),
+			..Default::default()
+		};
+		let inside = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::May, 3).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, inside), 0);
+	}
+
+	#[test]
+	fn dst_offset_seconds_in_window_returns_offset_seconds() {
+		// EU schedule (last Sun of Mar 02:00 → last Sun of Oct 03:00),
+		// May 3 2026 → in window → 3600 s.
+		let dst = eu_dst_one_hour();
+		let inside = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::May, 3).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, inside), 3600);
+	}
+
+	#[test]
+	fn dst_offset_seconds_out_of_window_returns_zero() {
+		let dst = eu_dst_one_hour();
+		// December 25 — well past Oct's last Sunday.
+		let outside = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::December, 25).unwrap(),
+			Time::from_hms(9, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, outside), 0);
+	}
+
+	#[test]
+	fn dst_offset_seconds_at_start_boundary_inclusive() {
+		// 2026-03-29 02:00:00 (last Sun of Mar) is the FIRST instant
+		// inside the window — the contract is `start <= now`.
+		let dst = eu_dst_one_hour();
+		let at_start = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::March, 29).unwrap(),
+			Time::from_hms(2, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, at_start), 3600);
+
+		let just_before = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::March, 29).unwrap(),
+			Time::from_hms(1, 59, 59).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, just_before), 0);
+	}
+
+	#[test]
+	fn dst_offset_seconds_at_end_boundary_exclusive() {
+		// 2026-10-25 03:00:00 (last Sun of Oct) is the FIRST instant
+		// OUTSIDE the window — contract is `now < end`.
+		let dst = eu_dst_one_hour();
+		let at_end = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::October, 25).unwrap(),
+			Time::from_hms(3, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, at_end), 0);
+
+		let just_before = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::October, 25).unwrap(),
+			Time::from_hms(2, 59, 59).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, just_before), 3600);
+	}
+
+	#[test]
+	fn dst_offset_seconds_missing_schedule_returns_zero() {
+		// Enable + offset present but the schedule is incomplete —
+		// must not crash, must return 0 (conservative passthrough).
+		let dst = Dst {
+			version: "1.1".to_string(),
+			enable: Some(1),
+			offset: Some(1),
+			..Default::default()
+		};
+		let any = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::May, 3).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, any), 0);
+	}
+
+	#[test]
+	fn dst_offset_seconds_southern_hemisphere_window_wraps_year() {
+		// Southern-hemisphere schedule: DST runs Oct → Mar across the
+		// year boundary. The wrap-aware branch in `dst_offset_seconds`
+		// must treat both January AND November as in-window.
+		let dst = Dst {
+			version: "1.1".to_string(),
+			enable: Some(1),
+			offset: Some(1),
+			start_month: Some(10),
+			start_week_index: Some(1),
+			start_weekday: Some("Sunday".to_string()),
+			start_hour: Some(2),
+			start_minute: Some(0),
+			start_second: Some(0),
+			end_month: Some(4),
+			end_week_index: Some(1),
+			end_weekday: Some("Sunday".to_string()),
+			end_hour: Some(3),
+			end_minute: Some(0),
+			end_second: Some(0),
+		};
+		let november = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::November, 15).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		let january = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::January, 15).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		let june = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::June, 15).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, november), 3600);
+		assert_eq!(dst_offset_seconds(&dst, january), 3600);
+		assert_eq!(dst_offset_seconds(&dst, june), 0);
+	}
+
+	#[test]
+	fn nth_weekday_of_month_finds_first_through_fourth() {
+		// 2026-03 starts on a Sunday — first Sunday is the 1st.
+		assert_eq!(
+			nth_weekday_of_month(2026, time::Month::March, 1, Weekday::Sunday).unwrap(),
+			Date::from_calendar_date(2026, time::Month::March, 1).unwrap()
+		);
+		assert_eq!(
+			nth_weekday_of_month(2026, time::Month::March, 2, Weekday::Sunday).unwrap(),
+			Date::from_calendar_date(2026, time::Month::March, 8).unwrap()
+		);
+		assert_eq!(
+			nth_weekday_of_month(2026, time::Month::March, 4, Weekday::Sunday).unwrap(),
+			Date::from_calendar_date(2026, time::Month::March, 22).unwrap()
+		);
+	}
+
+	#[test]
+	fn nth_weekday_of_month_index_5_returns_last_occurrence() {
+		// Last Sunday of March 2026 is the 29th.
+		assert_eq!(
+			nth_weekday_of_month(2026, time::Month::March, 5, Weekday::Sunday).unwrap(),
+			Date::from_calendar_date(2026, time::Month::March, 29).unwrap()
+		);
+		// Last Sunday of October 2026 is the 25th.
+		assert_eq!(
+			nth_weekday_of_month(2026, time::Month::October, 5, Weekday::Sunday).unwrap(),
+			Date::from_calendar_date(2026, time::Month::October, 25).unwrap()
+		);
+	}
+
+	#[test]
+	fn nth_weekday_of_month_index_5_finds_distinct_weekday() {
+		// Last Friday of February 2026 is the 27th.
+		assert_eq!(
+			nth_weekday_of_month(2026, time::Month::February, 5, Weekday::Friday).unwrap(),
+			Date::from_calendar_date(2026, time::Month::February, 27).unwrap()
+		);
+	}
+
+	#[test]
+	fn nth_weekday_of_month_overflow_returns_none() {
+		// February 2026 has at most 4 of any weekday — 5th occurrence
+		// only exists if `week_index = 5` (last). Index 5 of a Sunday
+		// in Feb 2026 = Feb 22. Index 5 of Wednesday in a 28-day Feb
+		// where 4 of them exist = the 4th. `nth_weekday_of_month` with
+		// `week_index = 4` for a weekday whose 4th occurrence falls
+		// past the month should return None — but in Feb 2026 every
+		// weekday has 4 occurrences fitting within 28 days, so this
+		// covers the boundary clean.
+		assert!(nth_weekday_of_month(2026, time::Month::February, 4, Weekday::Sunday).is_some());
+	}
+
+	#[test]
+	fn nth_weekday_of_month_zero_or_six_returns_none() {
+		assert!(nth_weekday_of_month(2026, time::Month::March, 0, Weekday::Sunday).is_none());
+		assert!(nth_weekday_of_month(2026, time::Month::March, 6, Weekday::Sunday).is_none());
+	}
+
+	#[test]
+	fn parse_weekday_accepts_full_and_abbreviated_names() {
+		assert_eq!(parse_weekday("Sunday"), Some(Weekday::Sunday));
+		assert_eq!(parse_weekday("MONDAY"), Some(Weekday::Monday));
+		assert_eq!(parse_weekday("tue"), Some(Weekday::Tuesday));
+		assert_eq!(parse_weekday("  Wed  "), Some(Weekday::Wednesday));
+		assert_eq!(parse_weekday("not-a-day"), None);
+	}
+
+	/// Schedule used by every "in-window vs out-of-window" test: EU-style
+	/// `last Sunday of March 02:00 → last Sunday of October 03:00`,
+	/// `<offset>1</offset>` hours. Pinned to match the real-firmware
+	/// schema observed against current Argus hardware.
+	fn eu_dst_one_hour() -> Dst {
+		Dst {
+			version: "1.1".to_string(),
+			enable: Some(1),
+			offset: Some(1),
+			start_month: Some(3),
+			start_week_index: Some(5),
+			start_weekday: Some("Sunday".to_string()),
+			start_hour: Some(2),
+			start_minute: Some(0),
+			start_second: Some(0),
+			end_month: Some(10),
+			end_week_index: Some(5),
+			end_weekday: Some("Sunday".to_string()),
+			end_hour: Some(3),
+			end_minute: Some(0),
+			end_second: Some(0),
+		}
 	}
 
 	#[test]

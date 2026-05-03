@@ -16,8 +16,11 @@ members = [
 ]
 # `fuzz/` is its own detached cargo project (libfuzzer-sys + nightly).
 # Excluding it keeps `cargo build/test --workspace` from walking it
-# and dragging in nightly-only deps.
-exclude = ["fuzz"]
+# and dragging in nightly-only deps. `tests/scripts/decode-bc-pcap/` is
+# similarly detached: a debugging-only tool that opts neolink_core into
+# the `pcap-decode-api` feature, kept out of the workspace so the feature
+# is never accidentally pulled into a release build.
+exclude = ["fuzz", "tests/scripts/decode-bc-pcap"]
 # Without this, bare `cargo test` / `cargo build` / `cargo clippy`
 # from the workspace root operates only on the root crate and silently
 # skips every member crate (neolink_core's ~686 tests included). The

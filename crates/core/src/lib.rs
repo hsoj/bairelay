@@ -183,3 +183,278 @@ pub mod fuzz_api {
 		}
 	}
 }
+
+/// Offline decoder primitives for captured BcUdp sessions. Drives
+/// Bc / BcUdp parsing + AES-CFB decryption against a pcap recorded with
+/// tcpdump. Consumed by `tests/scripts/decode-bc-pcap`. Gated on the
+/// `pcap-decode-api` Cargo feature so production builds never compile
+/// this surface.
+///
+/// Stream model: a captured BcUdp session has two directions
+/// (client→camera and camera→client). Each direction reassembles its own
+/// sequence of `UdpData` packets by `packet_id` into a Bc TCP-like byte
+/// stream, then drives `Bc::deserialize` against it. Both directions
+/// share a single `BcContext` whose `EncryptionProtocol` is updated when
+/// the camera's login reply (msg_id=1, `response_code >> 8 == 0xdd`)
+/// surfaces — same negotiation logic the production codex runs, lifted
+/// into `Session::feed_datagram`.
+#[cfg(feature = "pcap-decode-api")]
+pub mod pcap_decode_api {
+	use bytes::BytesMut;
+	use std::collections::BTreeMap;
+
+	use crate::bc::crypto::EncryptionProtocol;
+	use crate::bc::model::{Bc, BcBody, BcContext, BcMeta, ModernMsg};
+	use crate::bc::xml::{BcPayloads, BcXml, Encryption};
+	use crate::bcudp::model::BcUdp;
+
+	pub use crate::bc::model::{Bc as BcMessage, BcMeta as BcMessageMeta};
+	pub use crate::bc::xml::BcXml as DecodedXml;
+	pub use crate::bc_protocol::Credentials;
+	pub use crate::bcudp::model::{UdpAck, UdpData, UdpDiscovery};
+	pub use crate::Error;
+
+	/// Source of a UDP datagram in a captured session.
+	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+	pub enum Direction {
+		/// Client to camera (operator software → camera).
+		ClientToCamera,
+		/// Camera to client (camera → operator software).
+		CameraToClient,
+	}
+
+	/// Per-direction reassembly state: pending out-of-order `UdpData`
+	/// packets keyed by `packet_id`, plus the contiguous Bc byte stream
+	/// drained from them.
+	struct DirState {
+		next_packet_id: Option<u32>,
+		pending: BTreeMap<u32, Vec<u8>>,
+		bc_buf: BytesMut,
+	}
+
+	impl DirState {
+		fn new() -> Self {
+			Self {
+				next_packet_id: None,
+				pending: BTreeMap::new(),
+				bc_buf: BytesMut::new(),
+			}
+		}
+
+		fn feed(&mut self, data: UdpData) {
+			let id = data.packet_id;
+			// First packet seen sets the baseline. Production cameras
+			// don't always start at 0 (depends on the connection negotiation
+			// instant); align the cursor to whatever the first observed
+			// packet_id is so we don't stall waiting for "missing" earlier
+			// packets that simply weren't captured.
+			let next = *self.next_packet_id.get_or_insert(id);
+			if id < next {
+				return; // late duplicate / retransmit, ignore
+			}
+			self.pending.insert(id, data.payload);
+			while let Some(payload) = self.pending.remove(&self.next_packet_id.unwrap()) {
+				self.bc_buf.extend_from_slice(&payload);
+				let cur = self.next_packet_id.unwrap();
+				self.next_packet_id = Some(cur.wrapping_add(1));
+			}
+		}
+	}
+
+	/// One captured BcUdp session. Holds the shared encryption state +
+	/// per-direction reassembly buffers.
+	pub struct Session {
+		ctx: BcContext,
+		c2d: DirState,
+		d2c: DirState,
+	}
+
+	/// Result of feeding one datagram: zero or more decoded Bc messages
+	/// that became complete after the new bytes arrived.
+	#[derive(Debug)]
+	pub struct DecodedMessage {
+		/// Direction the message travelled.
+		pub direction: Direction,
+		/// The decoded Bc message (header + decrypted XML / binary body).
+		pub bc: BcMessage,
+		/// Best-effort plaintext view of a binary payload when the camera
+		/// is in `FullAes` mode and the underlying decoder returned the
+		/// raw wire bytes (no `<encryptLen>` was present, so the
+		/// production codec couldn't tell whether the bytes were
+		/// already plaintext or still ciphertext). Some Bc messages —
+		/// notably control replies like `MSG_ID_GET_DST` — encrypt the
+		/// payload on the wire even without an `<encryptLen>` marker;
+		/// others — notably the high-throughput stream chunks
+		/// (`MSG_ID_VIDEO`) — leave the payload plaintext on the wire
+		/// even in `FullAes` mode. Production code never needed to tell
+		/// these apart because bairelay's own commands always include
+		/// `<encryptLen>` when relevant; offline decoders facing
+		/// arbitrary captured client traffic do.
+		///
+		/// The tool consuming this struct prints the raw bytes from
+		/// `bc.body` as a hexdump and additionally checks
+		/// `manually_decrypted_binary` for an XML / UTF-8 view —
+		/// whichever is meaningful is what the operator wants to see.
+		/// `None` when the Bc body is not `Binary` or the context isn't
+		/// `FullAes`.
+		pub manually_decrypted_binary: Option<Vec<u8>>,
+	}
+
+	impl Session {
+		/// Construct a session decoder for the given camera credentials.
+		/// The `Credentials` value is used to derive the AES key once the
+		/// login response selects an AES variant.
+		pub fn new(creds: Credentials) -> Self {
+			let mut ctx = BcContext::new(creds);
+			// Enable BcCodex's plaintext-payload trace prints so the
+			// caller's `log` subscriber can surface raw decrypted XML —
+			// including fields the `BcXml` struct doesn't model, which
+			// serde silently drops on parse. This is the only way to
+			// see e.g. `<Dst>` blocks inside an unknown msg_id reply.
+			ctx.debug_on();
+			Self {
+				ctx,
+				c2d: DirState::new(),
+				d2c: DirState::new(),
+			}
+		}
+
+		/// Feed one captured UDP datagram payload. Discovery and Ack
+		/// packets are recognised but not surfaced (they don't carry Bc
+		/// messages). Data packets reassemble per-direction; for every
+		/// complete Bc message that becomes decodable from the new bytes,
+		/// `on_msg` is called in arrival order — once per message,
+		/// before the next is decoded. The callback shape is critical
+		/// for tools that capture neolink_core's `log::trace!` output
+		/// to attach raw decrypted payloads to specific messages: the
+		/// trace channel is a shared global, so the caller must drain
+		/// it between successive decodes.
+		pub fn feed_datagram<F>(
+			&mut self,
+			direction: Direction,
+			datagram: &[u8],
+			mut on_msg: F,
+		) -> Result<(), Error>
+		where
+			F: FnMut(DecodedMessage),
+		{
+			let mut buf = BytesMut::from(datagram);
+			let bcudp = match BcUdp::deserialize(&mut buf) {
+				Ok(b) => b,
+				Err(Error::NomIncomplete(_)) => return Ok(()),
+				Err(e) => return Err(e),
+			};
+
+			let dir_state = match direction {
+				Direction::ClientToCamera => &mut self.c2d,
+				Direction::CameraToClient => &mut self.d2c,
+			};
+
+			match bcudp {
+				BcUdp::Data(data) => {
+					dir_state.feed(data);
+					loop {
+						match Bc::deserialize(&self.ctx, &mut dir_state.bc_buf) {
+							Ok(bc) => {
+								// Mirror the BcCodex login-response
+								// negotiation logic — without this the
+								// follow-on messages don't decrypt.
+								if let Bc {
+									meta:
+										BcMeta {
+											msg_id: 1,
+											response_code,
+											..
+										},
+									body:
+										BcBody::ModernMsg(ModernMsg {
+											payload:
+												Some(BcPayloads::BcXml(BcXml {
+													encryption: Some(Encryption { ref nonce, .. }),
+													..
+												})),
+											..
+										}),
+								} = bc
+								{
+									if response_code >> 8 == 0xdd {
+										let kind = (response_code & 0xff) as u8;
+										let new_proto = match kind {
+											0x00 => EncryptionProtocol::Unencrypted,
+											0x01 => EncryptionProtocol::BCEncrypt,
+											0x02 => EncryptionProtocol::aes(
+												self.ctx.credentials.make_aeskey(nonce),
+											),
+											0x12 => EncryptionProtocol::full_aes(
+												self.ctx.credentials.make_aeskey(nonce),
+											),
+											other => {
+												return Err(Error::UnknownEncryption(
+													other as usize,
+												));
+											}
+										};
+										self.ctx.set_encrypted(new_proto);
+									}
+								}
+
+								// Mirror BcCodex's binary-mode bookkeeping
+								// so streaming msg_nums (3 / 4) don't get
+								// mis-parsed as XML on subsequent packets.
+								if let BcBody::ModernMsg(ModernMsg {
+									extension:
+										Some(crate::bc::xml::Extension {
+											binary_data: Some(on_off),
+											..
+										}),
+									..
+								}) = bc.body
+								{
+									if on_off == 0 {
+										self.ctx.binary_off(bc.meta.msg_num);
+									} else {
+										self.ctx.binary_on(bc.meta.msg_num);
+									}
+								}
+
+								// Compute a "would-be plaintext" view for binary
+								// payloads when the session is in FullAes —
+								// see DecodedMessage's field doc for why.
+								let manually_decrypted_binary =
+									match (&self.ctx.encryption_protocol, &bc.body) {
+										(
+											EncryptionProtocol::FullAes { .. },
+											BcBody::ModernMsg(ModernMsg {
+												payload: Some(BcPayloads::Binary(bytes)),
+												..
+											}),
+										) => {
+											Some(self.ctx.encryption_protocol.decrypt(
+												bc.meta.channel_id as u32,
+												bytes.as_slice(),
+											))
+										}
+										_ => None,
+									};
+								on_msg(DecodedMessage {
+									direction,
+									bc,
+									manually_decrypted_binary,
+								});
+							}
+							Err(Error::NomIncomplete(_)) => break,
+							Err(e) => return Err(e),
+						}
+					}
+				}
+				BcUdp::Discovery(_) | BcUdp::Ack(_) => {
+					// These don't carry Bc messages; ignore for the
+					// reassembled-stream view. (Discovery payloads are
+					// XOR-encrypted XML and worth rendering separately
+					// if needed; today's caller only wants Bc traffic.)
+				}
+			}
+			Ok(())
+		}
+	}
+}

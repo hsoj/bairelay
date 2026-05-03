@@ -1,0 +1,25 @@
+[package]
+name = "decode-bc-pcap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline decoder for captured Reolink Baichuan-over-UDP sessions. Replays tcpdump captures through neolink_core's Bc / BcUdp parsers + AES-CFB and prints decrypted Bc messages."
+
+# Standalone, deliberately NOT a workspace member — see the matching
+# `exclude` entry in the repo-root Cargo.toml. Built with:
+#
+#   cargo run --manifest-path tests/scripts/decode-bc-pcap/Cargo.toml -- \
+#     <pcap> <camera-ip[:port]> <password>
+#
+# See `README.md` in this directory for the full invocation + I/O contract.
+
+[dependencies]
+# `pcap-decode-api` is the feature gate that exposes `Session` + `Direction`
+# for offline decoding. Off in production builds; never compiled into the
+# bairelay binary.
+neolink_core = { path = "../../../crates/core", features = ["pcap-decode-api"] }
+# Captures `neolink_core`'s `log::trace!("Payload Txt: ...")` records,
+# which carry the raw decrypted XML *before* serde parsing — the only
+# place unmodeled fields in unknown msg_ids surface (a parsed-struct
+# view silently drops them).
+log = "0.4"

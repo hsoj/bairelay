@@ -81,6 +81,25 @@ tests/
 
 ---
 
+## Offline Bc-protocol decoder (`tests/scripts/decode-bc-pcap/`)
+
+Replays a `tcpdump` capture of a Reolink Baichuan-over-UDP session through `neolink_core`'s production parsers + AES-CFB primitives and prints each Bc message's header + decrypted payload. Use it to identify message IDs and XML schemas that bairelay does not yet model.
+
+Standalone cargo project, excluded from the workspace, opts `neolink_core` into the `pcap-decode-api` feature (off in production builds). Requires `tshark` on PATH for capture extraction.
+
+Quick invocation:
+
+```
+BAIRELAY_DECODE_PASSWORD='...' \
+  cargo run --manifest-path tests/scripts/decode-bc-pcap/Cargo.toml --quiet -- \
+  tests/logs/real-pcap/<capture>.pcap <camera-ip>:<port> \
+  --filter <msg_id>[,<msg_id>...] --brief
+```
+
+Full usage + flag table: `tests/scripts/decode-bc-pcap/README.md`. Captures go under `tests/logs/real-pcap/` (gitignored).
+
+---
+
 ## BcMedia fixture pipeline
 
 Captures real-camera `BcMedia` streams into files the test harness can replay later — no live camera in the loop. Drives `tests/fixture_replay.rs`.

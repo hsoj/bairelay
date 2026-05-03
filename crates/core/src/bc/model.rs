@@ -62,6 +62,14 @@ pub const MSG_ID_PING: u32 = 93;
 pub const MSG_ID_GET_GENERAL: u32 = 104;
 /// Setting general system info (clock mostly) messages have this ID
 pub const MSG_ID_SET_GENERAL: u32 = 105;
+/// Read the camera's DST configuration. The reply body is `<Dst>`, often
+/// flagged binary on the wire even though the bytes are UTF-8 XML — see
+/// `BcCamera::get_dst` for the parse handling.
+pub const MSG_ID_GET_DST: u32 = 106;
+/// Write the camera's DST configuration. Symmetric to `MSG_ID_GET_DST`;
+/// presumed but not yet exercised in the wild — bairelay does not write
+/// DST today.
+pub const MSG_ID_SET_DST: u32 = 107;
 /// Snapshot to get a jpeg image
 pub const MSG_ID_SNAP: u32 = 109;
 /// Used to grab the UID

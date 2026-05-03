@@ -82,6 +82,17 @@ Reolink fixed-mount cameras (e.g. Argus Altas) report `<ptzMode>none</ptzMode>` 
 
 `crates/core/src/bc_protocol/ledstate.rs::irled_light_set` writes the IR night-vision mode but neolink_core has no getter, so bairelay's HA `select` entity (`build_ir`) emits `state_topic: None`. HA shows it as "unknown" forever — fire-and-forget control. Don't confuse with PIR (passive IR motion sensor), which has a separate `get_pirstate` reader.
 
+### Time + DST split across two Bc messages
+
+Reolink cameras autonomously track DST in a Bc message *separate* from `<SystemGeneral>`. Setting the clock requires modelling both. Load-bearing semantics:
+
+- `msg_id = 104` (`GetGeneral`) `<SystemGeneral>`: `<timeZone>` is the **base UTC offset in seconds, Reolink-inverted** (positive = west of UTC, negative = east, **DST excluded**). `<hour>` is **UTC**, not local. `<year>`/`<month>`/`<day>`/`<minute>`/`<second>` are likewise UTC.
+- `msg_id = 106` (`GetDst`) `<Dst>`: `<enable>` (0/1), `<offset>` (hours), plus `<startMonth>`/`<startWeekIndex>`/`<startWeekday>`/`<startHour|Minute|Second>` and the symmetric `<end…>` family. Camera applies DST internally on display: `displayed_local = <hour> + (-<timeZone>/3600) + dst_offset_if_in_window`.
+- `msg_id = 105` (`SetGeneral`) accepts the same `<SystemGeneral>` shape. Because the camera double-applies DST otherwise, a SET that wants to land at the host's current local time must compute `<timeZone>` as the host's **base** offset (subtract DST if the host is currently in DST) and `<hour>`/etc. as **UTC**. Sending host-local-effective-offset + host-local-wallclock causes a `+dst_offset` drift.
+- `msg_id = 107` (presumed `SetDst`) is not currently observed on the wire — the Reolink Mac client only reads DST. Don't write DST unless the operator explicitly asks.
+
+`<SystemGeneral>` also surfaces `<deviceId>`, `<loginLock>`, `<lockTime>`, `<allowedTimes>` on current Argus firmware; these are **not** modelled in `crates/core/src/bc/xml.rs::SystemGeneral` and therefore aren't preserved by the read-modify-write in `set_time`. A SET silently round-trips them to default. Either model them or accept the round-trip.
+
 ---
 
 ## Wake lock and grace period

@@ -61,6 +61,16 @@ pub struct BcXml {
 	/// Received as part of the Genral system info request
 	#[serde(default, rename = "Norm", skip_serializing_if = "Option::is_none")]
 	pub norm: Option<Norm>,
+	/// Daylight-saving-time configuration. Carried in the body of
+	/// `MSG_ID_GET_DST` (106) replies. Camera autonomously applies the
+	/// `<offset>` to displayed local time when the current date is
+	/// inside the start/end window — clients writing
+	/// `<SystemGeneral>` must therefore use the BASE UTC offset (DST
+	/// excluded) for `<timeZone>` and UTC for the wallclock fields,
+	/// otherwise the camera double-applies DST and drifts forward by
+	/// `<offset>` hours.
+	#[serde(default, rename = "Dst", skip_serializing_if = "Option::is_none")]
+	pub dst: Option<Dst>,
 	/// Received as part of the LEDState info request
 	#[serde(default, rename = "LedState", skip_serializing_if = "Option::is_none")]
 	pub led_state: Option<LedState>,
@@ -555,6 +565,101 @@ pub struct Norm {
 	// This is usually just `"NTSC"`
 	#[serde(default)]
 	norm: String,
+}
+
+/// `Dst` xml — camera-side daylight-saving-time configuration.
+///
+/// The camera tracks DST autonomously: it stores `<SystemGeneral>` with
+/// the **base** UTC offset and UTC wallclock, then on display adds
+/// `<Dst><offset></offset></Dst>` hours when the current date is inside
+/// the `[start_*, end_*)` window per the schedule below.
+///
+/// Clients setting the clock via `MSG_ID_SET_GENERAL` (105) must NOT
+/// pre-bake DST into `<SystemGeneral>`'s `<timeZone>` or wallclock fields
+/// when the camera has DST enabled and the current moment falls inside
+/// the window — doing so produces a `+offset` drift because the camera's
+/// own DST application stacks on top.
+///
+/// `<startWeekIndex>` semantics: `1`–`4` = "Nth occurrence of `<startWeekday>`
+/// in `<startMonth>`"; `5` = "last occurrence in the month". Symmetric
+/// for `<endWeekIndex>`.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct Dst {
+	/// XML Version
+	#[serde(default, rename = "@version")]
+	pub version: String,
+	/// `1` = camera applies DST autonomously; `0` = off.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub enable: Option<u32>,
+	/// DST offset in hours. EU schedules use `1`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub offset: Option<i32>,
+	/// Month the DST window opens, `1`–`12`.
+	#[serde(
+		default,
+		rename = "startMonth",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub start_month: Option<u8>,
+	/// `1`–`4` = Nth occurrence of `start_weekday` in `start_month`;
+	/// `5` = last occurrence.
+	#[serde(
+		default,
+		rename = "startWeekIndex",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub start_week_index: Option<u8>,
+	/// English weekday name: `"Sunday"`, `"Monday"`, …, `"Saturday"`.
+	#[serde(
+		default,
+		rename = "startWeekday",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub start_weekday: Option<String>,
+	/// Wall-time hour of the start transition (in the camera's local time).
+	#[serde(default, rename = "startHour", skip_serializing_if = "Option::is_none")]
+	pub start_hour: Option<u8>,
+	/// Wall-time minute of the start transition.
+	#[serde(
+		default,
+		rename = "startMinute",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub start_minute: Option<u8>,
+	/// Wall-time second of the start transition.
+	#[serde(
+		default,
+		rename = "startSecond",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub start_second: Option<u8>,
+	/// Month the DST window closes, `1`–`12`.
+	#[serde(default, rename = "endMonth", skip_serializing_if = "Option::is_none")]
+	pub end_month: Option<u8>,
+	/// `1`–`4` = Nth occurrence of `end_weekday` in `end_month`;
+	/// `5` = last occurrence.
+	#[serde(
+		default,
+		rename = "endWeekIndex",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub end_week_index: Option<u8>,
+	/// English weekday name for the end transition.
+	#[serde(
+		default,
+		rename = "endWeekday",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub end_weekday: Option<String>,
+	/// Wall-time hour of the end transition.
+	#[serde(default, rename = "endHour", skip_serializing_if = "Option::is_none")]
+	pub end_hour: Option<u8>,
+	/// Wall-time minute of the end transition.
+	#[serde(default, rename = "endMinute", skip_serializing_if = "Option::is_none")]
+	pub end_minute: Option<u8>,
+	/// Wall-time second of the end transition.
+	#[serde(default, rename = "endSecond", skip_serializing_if = "Option::is_none")]
+	pub end_second: Option<u8>,
 }
 
 /// LedState xml

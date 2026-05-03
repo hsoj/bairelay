@@ -51,6 +51,12 @@ test-util = []
 # default — production builds never compile these surfaces.
 fuzz-api = []
 
+# Exposes a `pcap_decode_api` module with the offline-decoder primitives
+# (`Session`, `Direction`) used by `tests/scripts/decode-bc-pcap` to drive
+# Bc/BcUdp parsing + AES-CFB decryption against a captured BcUdp session.
+# Off by default — debugging-only surface, never compiled into release.
+pcap-decode-api = []
+
 [dev-dependencies]
 assert_matches = "1.5.0"
 env_logger = "*"
