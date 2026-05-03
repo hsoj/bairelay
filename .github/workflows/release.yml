@@ -86,9 +86,9 @@ jobs:
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }} --bin bairelay
 
-      - name: Strip binary (Unix)
-        if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/bairelay
+      # Stripping happens in-build via `[profile.release] strip = "symbols"`
+      # in Cargo.toml — uniform across every target, and avoids the
+      # x86_64-host vs aarch64-binary mismatch on the cross cell.
 
       - name: Package archive (tar.gz)
         if: matrix.ext == 'tar.gz'

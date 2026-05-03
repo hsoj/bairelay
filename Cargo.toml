@@ -79,6 +79,15 @@ rustls-pemfile = "2"
 # of `ps auxww`, shell history, and supervisor argv-capture logs.
 rpassword = "7"
 
+# Strip symbols from release builds via rustc itself, not a post-build
+# `strip` step. The cross-compile aarch64-musl release matrix cell can't
+# rely on the runner's host `strip` (x86_64 only), and asking cargo to
+# do it is uniform across every target and Cargo profile-aware. Keep
+# `strip = "symbols"` (not `"debuginfo"`) — the release artifact is for
+# operators, not core dumps; debug-mode local builds keep full info.
+[profile.release]
+strip = "symbols"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
