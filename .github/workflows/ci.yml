@@ -27,6 +27,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Opt third-party JS actions (codecov-action, taiki-e/install-action,
+  # etc.) onto Node 24 ahead of GitHub's 2026-06-02 default flip. Some
+  # of these actions still bundle Node 20 internally and trip the
+  # runner's deprecation warning until they re-release. Becomes a
+  # no-op once Node 24 is the default.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   fmt:

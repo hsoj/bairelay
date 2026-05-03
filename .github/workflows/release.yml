@@ -9,6 +9,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Opt third-party JS actions onto Node 24 ahead of GitHub's
+  # 2026-06-02 default flip. Becomes a no-op once Node 24 is default.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build:
