@@ -86,17 +86,25 @@ EOF
 }
 
 insert_changelog_section() {
-	local section="$1"
-	awk -v section="$section" '
-		!inserted && /^## \[/ {
-			printf "%s", section
-			inserted = 1
-		}
-		{ print }
-		END {
-			if (!inserted) printf "%s", section
-		}
-	' CHANGELOG.md > CHANGELOG.md.new
+	# Pure-shell insert before the first `## [` heading. Avoids awk's
+	# `-v section=...` form, which BSD awk on macOS rejects for multi-
+	# line values with `awk: newline in string ... at source line 1`.
+	#
+	# `$1` arrives stripped of trailing newlines (a `$(...)` rule), so
+	# append a final blank line ourselves — otherwise the new section's
+	# last bullet collides with the next section's `## [` heading.
+	local section="$1"$'\n\n'
+	local insert_line
+	insert_line="$(grep -n '^## \[' CHANGELOG.md | head -1 | cut -d: -f1 || true)"
+	if [[ -z "$insert_line" ]]; then
+		printf '%s' "$section" >> CHANGELOG.md
+		return
+	fi
+	{
+		head -n "$((insert_line - 1))" CHANGELOG.md
+		printf '%s' "$section"
+		tail -n "+$insert_line" CHANGELOG.md
+	} > CHANGELOG.md.new
 	mv CHANGELOG.md.new CHANGELOG.md
 }
 
