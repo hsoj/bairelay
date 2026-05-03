@@ -96,7 +96,7 @@ Running as a Windows service is not packaged; use Task Scheduler or run interact
 
 ### Prerequisites
 
-- A recent stable Rust toolchain (1.74+ should be safe; the workspace builds on whatever current stable is). Install via [rustup](https://rustup.rs/).
+- A current stable Rust toolchain (1.93+). Distro-packaged rustc is often too old for the workspace tests; install via [rustup](https://rustup.rs/) for the smoothest path.
 - A C toolchain for `aws-lc-rs` (the rustls crypto provider) — `build-essential` on Debian / Ubuntu, Xcode Command Line Tools on macOS, MSVC build tools on Windows.
 - That's it. No GStreamer. No OpenSSL. No system MQTT library.
 
