@@ -211,12 +211,12 @@ main() {
 		echo "Once green, review and publish the draft release at:"
 		echo "  https://github.com/mgc8/bairelay/releases"
 		echo
-		echo "Reminder: if this script ran from the public repo, also tag"
-		echo "the equivalent commit on the internal repo so private history"
-		echo "carries the same release marker. Suggested:"
-		echo "    cd /path/to/internal/bairelay"
-		echo "    git tag -a $tag <internal-sha> -m 'Release $tag'"
-		echo "    git push <internal-remote> $tag"
+		echo "Reminder: if you ran this from the public clone, mirror the"
+		echo "tag on the internal repo so private history carries the same"
+		echo "release marker. From the internal clone:"
+		echo "    git checkout main && git pull"
+		echo "    git tag -a $tag -m 'Release $tag'"
+		echo "    git push origin $tag"
 	else
 		echo
 		echo "Stopped before push. To push later:"

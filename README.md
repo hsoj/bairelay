@@ -52,22 +52,22 @@ If you are running wired Reolink cameras with native RTSP, bairelay has nothing 
 
 ## Release binaries
 
-Pre-built binaries are attached to each [GitHub Release](https://github.com/mgc8/bairelay/releases). Each archive contains the `bairelay` binary plus `README.md`, `LICENSE`, `CHANGELOG.md`, and `sample_config.toml`. Targets in the v1 release matrix:
+Pre-built binaries are attached to each [GitHub Release](https://github.com/mgc8/bairelay/releases). Targets in the v1 release matrix:
 
-| Triple                          | Format    | Notes                            |
-|---------------------------------|-----------|----------------------------------|
-| `x86_64-unknown-linux-musl`     | `.tar.gz` | static, glibc-independent        |
-| `aarch64-unknown-linux-musl`    | `.tar.gz` | Pi 4/5, aarch64 NAS              |
-| `aarch64-apple-darwin`          | `.tar.gz` | Apple Silicon (M-series)         |
-| `x86_64-pc-windows-msvc`        | `.zip`    |                                  |
+| Archive suffix              | Format    | Notes                            |
+|-----------------------------|-----------|----------------------------------|
+| `x86_64-linux`              | `.tar.gz` | static musl, glibc-independent   |
+| `aarch64-linux`             | `.tar.gz` | Pi 4/5, aarch64 NAS              |
+| `aarch64-apple-darwin`      | `.tar.gz` | Apple Silicon (M-series)         |
+| `x86_64-pc-windows-msvc`    | `.zip`    |                                  |
 
 Releases are not codesigned. macOS / Windows will refuse to run the binary on first launch; the one-time unblock is below.
 
 ### Linux
 
 ```bash
-tar -xzf bairelay-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz
-cd bairelay-vX.Y.Z-x86_64-unknown-linux-musl
+tar -xzf bairelay-vX.Y.Z-x86_64-linux.tar.gz
+cd bairelay-vX.Y.Z-x86_64-linux
 ./bairelay --help
 ```
 

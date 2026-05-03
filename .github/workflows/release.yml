@@ -19,18 +19,22 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            archive_suffix: x86_64-linux
             ext: tar.gz
             use_cross: false
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
+            archive_suffix: aarch64-linux
             ext: tar.gz
             use_cross: true
           - os: macos-latest
             target: aarch64-apple-darwin
+            archive_suffix: aarch64-apple-darwin
             ext: tar.gz
             use_cross: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            archive_suffix: x86_64-pc-windows-msvc
             ext: zip
             use_cross: false
     runs-on: ${{ matrix.os }}
@@ -88,7 +92,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dir="bairelay-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          dir="bairelay-${GITHUB_REF_NAME}-${{ matrix.archive_suffix }}"
           mkdir -p "$dir"
           cp "target/${{ matrix.target }}/release/bairelay" "$dir/"
           cp README.md LICENSE CHANGELOG.md sample_config.toml "$dir/"
@@ -99,7 +103,7 @@ jobs:
         if: matrix.ext == 'zip'
         shell: pwsh
         run: |
-          $dir = "bairelay-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          $dir = "bairelay-$env:GITHUB_REF_NAME-${{ matrix.archive_suffix }}"
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\bairelay.exe" "$dir\"
           Copy-Item README.md, LICENSE, CHANGELOG.md, sample_config.toml "$dir\"
@@ -109,7 +113,7 @@ jobs:
       - name: Upload archive
         uses: actions/upload-artifact@v7
         with:
-          name: bairelay-${{ matrix.target }}
+          name: bairelay-${{ matrix.archive_suffix }}
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
 
