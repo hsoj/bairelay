@@ -823,6 +823,43 @@ on_motion = true
 	}
 
 	#[test]
+	fn check_config_directory_path_classifies_as_config_not_usage() {
+		// `read_to_string` on a directory returns an IO error whose
+		// `kind()` is *not* `NotFound` (it's `IsADirectory` on Linux,
+		// or a generic `Other` elsewhere). Pins the `else` branch in
+		// the kind classifier — without this test only the
+		// `NotFound → EXIT_USAGE` arm was exercised.
+		let dir = tempfile::tempdir().unwrap();
+		let cli = cli_from(&[
+			"bairelay",
+			"check-config",
+			"-c",
+			&dir.path().display().to_string(),
+		]);
+		let (code, _out, err) = check_config_capture(&cli);
+		assert_eq!(code, classify::EXIT_CONFIG);
+		let s = String::from_utf8(err).expect("utf8");
+		assert!(s.contains("read"));
+	}
+
+	#[test]
+	fn emit_success_real_stdio_does_not_panic() {
+		// The production wrapper around `std::io::stdout().lock()` /
+		// `std::io::stderr().lock()`. Cargo-test captures both, so the
+		// test runner output is untouched. Coverage-only assertion.
+		emit_success(Mode::Json, &Outcome::Siren);
+		emit_success(Mode::Human, &Outcome::Siren);
+	}
+
+	#[test]
+	fn emit_failure_real_stdio_does_not_panic() {
+		// Same shape: production wrapper around real stdout/stderr.
+		let err = anyhow::anyhow!("synthetic failure for coverage");
+		emit_failure(Mode::Json, &err, "test");
+		emit_failure(Mode::Human, &err, "test");
+	}
+
+	#[test]
 	fn check_config_json_mode_writes_ok_payload() {
 		let f = tempfile::NamedTempFile::new().unwrap();
 		let toml = r#"

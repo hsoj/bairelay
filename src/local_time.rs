@@ -47,3 +47,52 @@ impl FormatTime for LocalTimer {
 		write!(w, "{}", s)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn offset_returns_utc_or_captured_value() {
+		// Offset always returns *something*. Either the OnceLock holds
+		// what `init` captured (any unit-test process that imported a
+		// crate which called init() inherits it) or the UTC fallback
+		// fires. Both paths are valid; we only pin that the call is
+		// total.
+		let _ = offset();
+	}
+
+	#[test]
+	fn init_is_idempotent() {
+		// `init()` uses `OnceLock::set` which returns Err on subsequent
+		// calls; the binding swallows that. Calling twice must not panic.
+		init();
+		init();
+	}
+
+	#[test]
+	fn now_local_does_not_panic_and_uses_captured_offset() {
+		// `now_local()` is total — anchored on the captured offset (or
+		// UTC fallback). Cross-check that the returned datetime's offset
+		// matches `offset()` at the same instant.
+		let dt = now_local();
+		assert_eq!(dt.offset(), offset());
+	}
+
+	#[test]
+	fn local_timer_writes_yyyy_mm_dd_hh_mm_ss() {
+		let mut buf = String::new();
+		let mut writer = Writer::new(&mut buf);
+		LocalTimer.format_time(&mut writer).expect("format");
+		// Loose shape match — exact wallclock is non-deterministic but
+		// the format string is fixed: 19 chars, dashes at 5/8, colons
+		// at 14/17, space at 11.
+		assert_eq!(buf.len(), 19, "unexpected output: {buf:?}");
+		let bytes = buf.as_bytes();
+		assert_eq!(bytes[4], b'-');
+		assert_eq!(bytes[7], b'-');
+		assert_eq!(bytes[10], b' ');
+		assert_eq!(bytes[13], b':');
+		assert_eq!(bytes[16], b':');
+	}
+}

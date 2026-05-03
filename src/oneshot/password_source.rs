@@ -45,6 +45,14 @@ pub fn resolve(provided: Option<String>, prompt: &str) -> Result<String> {
 			.context("read password from stdin")?;
 		line
 	};
+	finalize_read_password(&raw)
+}
+
+/// Strip the trailing CR/LF that `read_line` and tty-no-echo readers
+/// leave on the input, then reject an empty result as a usage error.
+/// Extracted so the post-read transform is unit-testable without
+/// faking stdin/TTY.
+pub(crate) fn finalize_read_password(raw: &str) -> Result<String> {
 	let trimmed = raw.trim_end_matches(['\r', '\n']).to_string();
 	if trimmed.is_empty() {
 		return Err(UsageError::new("password must not be empty").into());
@@ -78,5 +86,32 @@ mod tests {
 	// dependent (cargo test typically pipes stdin from `/dev/null`).
 	// Direct integration coverage of the prompt path lives in the
 	// oneshot CLI subprocess tests in tests/cli_oneshot_test.rs, where
-	// stdin can be controlled.
+	// stdin can be controlled. The pure post-read transform is exercised
+	// directly via `finalize_read_password` below.
+
+	#[test]
+	fn finalize_strips_trailing_crlf_and_returns_value() {
+		assert_eq!(finalize_read_password("hunter2\n").unwrap(), "hunter2");
+		assert_eq!(finalize_read_password("hunter2\r\n").unwrap(), "hunter2");
+		assert_eq!(finalize_read_password("hunter2").unwrap(), "hunter2");
+	}
+
+	#[test]
+	fn finalize_keeps_internal_whitespace() {
+		// Only CR/LF at the *end* are stripped; an operator who pastes
+		// a password with a space in the middle keeps it.
+		assert_eq!(finalize_read_password("hun ter2\n").unwrap(), "hun ter2");
+	}
+
+	#[test]
+	fn finalize_empty_after_trim_classifies_as_usage_error() {
+		for input in ["", "\n", "\r\n", "\r"] {
+			let err = finalize_read_password(input).unwrap_err();
+			let chain: Vec<_> = err.chain().collect();
+			assert!(
+				chain.iter().any(|c| c.is::<UsageError>()),
+				"empty stdin input ({input:?}) should classify as usage error"
+			);
+		}
+	}
 }

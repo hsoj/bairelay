@@ -960,6 +960,132 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn get_dst_with_xml_payload_lacking_dst_returns_unintelligible() {
+		// 200 reply + parsed BcXml that has no <Dst> field. The match in
+		// get_dst falls through both arms and hits the `_ =>` arm —
+		// pins the "GetDst reply lacked a <Dst> body" error string.
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(|req| reply_200_xml(req, BcXml::default()))
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		let err = cam.get_dst().await.expect_err("must be error");
+		match err {
+			Error::UnintelligibleReply { why, .. } => {
+				assert!(
+					why.contains("lacked a <Dst> body"),
+					"unexpected reason: {why}"
+				);
+			}
+			other => panic!("expected UnintelligibleReply, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn get_dst_with_binary_payload_containing_xml_succeeds() {
+		// Some firmwares flag the GetDst reply binary even though the
+		// bytes are XML. Construct that shape: serialize a BcXml with a
+		// <Dst> block and wrap as `BcPayloads::Binary`. get_dst must
+		// re-parse via `BcXml::try_parse` and surface the `Dst` —
+		// pinning the binary-body alt path.
+		let dst = eu_dst_one_hour();
+		let dst_clone = dst.clone();
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(move |req| Bc {
+				meta: BcMeta {
+					msg_id: req.meta.msg_id,
+					channel_id: req.meta.channel_id,
+					msg_num: req.meta.msg_num,
+					stream_type: 0,
+					response_code: 200,
+					class: 0x6414,
+				},
+				body: BcBody::ModernMsg(ModernMsg {
+					extension: None,
+					payload: Some(BcPayloads::Binary(
+						BcXml {
+							dst: Some(dst_clone.clone()),
+							..Default::default()
+						}
+						.serialize(Vec::new())
+						.expect("serialize"),
+					)),
+				}),
+			})
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		let got = cam.get_dst().await.expect("must succeed");
+		assert_eq!(got.enable, dst.enable);
+		assert_eq!(got.offset, dst.offset);
+		assert_eq!(got.start_weekday, dst.start_weekday);
+	}
+
+	#[tokio::test]
+	async fn get_dst_with_binary_payload_lacking_dst_returns_unintelligible() {
+		// Binary body whose bytes parse as XML but contain no <Dst> —
+		// hits the inner `_ =>` arm: "GetDst binary payload did not
+		// contain <Dst>".
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_DST)
+			.reply_with(|req| Bc {
+				meta: BcMeta {
+					msg_id: req.meta.msg_id,
+					channel_id: req.meta.channel_id,
+					msg_num: req.meta.msg_num,
+					stream_type: 0,
+					response_code: 200,
+					class: 0x6414,
+				},
+				body: BcBody::ModernMsg(ModernMsg {
+					extension: None,
+					payload: Some(BcPayloads::Binary(
+						BcXml::default().serialize(Vec::new()).expect("serialize"),
+					)),
+				}),
+			})
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		let err = cam.get_dst().await.expect_err("must be error");
+		match err {
+			Error::UnintelligibleReply { why, .. } => {
+				assert!(
+					why.contains("binary payload did not contain <Dst>"),
+					"unexpected reason: {why}"
+				);
+			}
+			other => panic!("expected UnintelligibleReply, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn get_system_general_with_no_system_general_block_returns_unintelligible() {
+		// 200 reply + parsed BcXml that lacks <SystemGeneral>. The
+		// `if let` doesn't bind, the else arm fires — pins the
+		// "Reply did not contain a SystemGeneral block" error path.
+		let mock = MockConnection::new()
+			.expect_msg(MSG_ID_GET_GENERAL)
+			.reply_with(|req| reply_200_xml(req, BcXml::default()))
+			.build()
+			.await;
+		let cam = BcCamera::from_mock_connection(mock).await;
+		cam.test_set_ability("general", false).await;
+		let err = cam.get_time().await.expect_err("must be error");
+		match err {
+			Error::UnintelligibleReply { why, .. } => {
+				assert!(
+					why.contains("did not contain a SystemGeneral"),
+					"unexpected reason: {why}"
+				);
+			}
+			other => panic!("expected UnintelligibleReply, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
 	async fn set_time_get_dst_failure_falls_back_to_passthrough() {
 		// Older firmware doesn't support GetDst (returns non-200);
 		// set_time must swallow that failure and fall through to the
@@ -1096,6 +1222,37 @@ mod tests {
 			enable: Some(1),
 			offset: Some(1),
 			..Default::default()
+		};
+		let any = PrimitiveDateTime::new(
+			Date::from_calendar_date(2026, time::Month::May, 3).unwrap(),
+			Time::from_hms(12, 0, 0).unwrap(),
+		);
+		assert_eq!(dst_offset_seconds(&dst, any), 0);
+	}
+
+	#[test]
+	fn dst_offset_seconds_invalid_end_weekday_returns_zero() {
+		// Valid start, invalid end weekday — `dst_transition_for_year`
+		// returns None for the end transition, the early-return on
+		// `end_match` line fires, function returns 0. Pins the second
+		// fallback path, which the missing-schedule test above doesn't
+		// exercise (it fails on the start transition first).
+		let dst = Dst {
+			version: "1.1".to_string(),
+			enable: Some(1),
+			offset: Some(1),
+			start_month: Some(3),
+			start_week_index: Some(5),
+			start_weekday: Some("Sunday".to_string()),
+			start_hour: Some(2),
+			start_minute: Some(0),
+			start_second: Some(0),
+			end_month: Some(10),
+			end_week_index: Some(5),
+			end_weekday: Some("not-a-day".to_string()),
+			end_hour: Some(3),
+			end_minute: Some(0),
+			end_second: Some(0),
 		};
 		let any = PrimitiveDateTime::new(
 			Date::from_calendar_date(2026, time::Month::May, 3).unwrap(),
