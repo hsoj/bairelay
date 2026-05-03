@@ -1,8 +1,18 @@
 # Changelog
 
+## [1.0.0] — 2026-05-03
+
+First public binary release.
+
+### Changes
+
+- set_time: read DST and compensate, fix +1h drift
+- mqtt: cache + republish status on broker ConnAck for HA recovery
+- mqtt: title-case preserves caps + splits on `-`; fix Floodlight Tasks
+
 ## [0.9.0] — 2026-05-02
 
-Initial public release.
+Initial repo published.
 
 Bairelay is a pure-Rust replacement for [Neolink](https://github.com/QuantumEntangledAndy/neolink) for Reolink battery cameras (Argus class). Relevant Baichuan-protocol code from Neolink is vendored in `neolink_core`; everything else is a clean rewrite.
 
