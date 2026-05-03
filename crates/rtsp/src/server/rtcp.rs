@@ -158,4 +158,41 @@ mod tests {
 		// Sanity: 2026 is well past 1900+2_208_988_800 = 2070 NTP-sec ≈ 2^31.
 		assert!(secs > 2_208_988_800);
 	}
+
+	#[test]
+	fn ntp_minus_subtracts_whole_seconds() {
+		// Whole-second delta with no sub-second component → sec drops by
+		// the duration, frac unchanged.
+		let (sec, frac) = ntp_minus(1000, 0x8000_0000, Duration::from_secs(3));
+		assert_eq!(sec, 997);
+		assert_eq!(frac, 0x8000_0000);
+	}
+
+	#[test]
+	fn ntp_minus_subtracts_subsecond_without_borrow() {
+		// 500 ms = 0.5 in NTP fraction = 0x8000_0000. Subtracting from
+		// 0xC000_0000 leaves 0x4000_0000, no borrow into seconds.
+		let (sec, frac) = ntp_minus(1000, 0xC000_0000, Duration::from_millis(500));
+		assert_eq!(sec, 1000);
+		assert_eq!(frac, 0x4000_0000);
+	}
+
+	#[test]
+	fn ntp_minus_borrows_into_seconds_when_frac_underflows() {
+		// 500 ms subtracted from 0x4000_0000 (0.25) underflows → frac
+		// wraps high (0xC000_0000) and sec borrows one extra.
+		let (sec, frac) = ntp_minus(1000, 0x4000_0000, Duration::from_millis(500));
+		assert_eq!(sec, 999);
+		assert_eq!(frac, 0xC000_0000);
+	}
+
+	#[test]
+	fn ntp_minus_handles_combined_seconds_and_subsecond() {
+		// 2.75 s = 2 s + 0xC000_0000 frac. Subtract from
+		// (1000, 0x4000_0000) → frac borrows once (becomes 0x8000_0000),
+		// seconds decrement by 2 + 1 = 3 → 997.
+		let (sec, frac) = ntp_minus(1000, 0x4000_0000, Duration::from_millis(2750));
+		assert_eq!(sec, 997);
+		assert_eq!(frac, 0x8000_0000);
+	}
 }
