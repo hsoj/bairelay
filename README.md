@@ -1,5 +1,7 @@
 # Bairelay
 
+[![codecov](https://codecov.io/github/mgc8/bairelay/graph/badge.svg?token=BUUBTI4K5E)](https://codecov.io/github/mgc8/bairelay)
+
 A pure-Rust bridge between Reolink **battery** cameras (proprietary "Baichuan" protocol on TCP/9000) and standard RTSP / MQTT, with a local replacement for Reolink's wake-up cloud and motion-push channel.
 
 ## Acknowledgements

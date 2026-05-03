@@ -82,7 +82,34 @@ jobs:
       # below that floor, so the gate is now mechanically enforced
       # alongside fmt + clippy + test.
       - name: Run coverage
-        run: cargo tarpaulin --out stdout --out xml
+        run: |
+          set -o pipefail
+          cargo tarpaulin --out stdout --out xml | tee tarpaulin.txt
+      - name: Append coverage to job summary
+        if: always()
+        run: |
+          if [ ! -f tarpaulin.txt ]; then
+            echo "tarpaulin.txt not found — coverage step likely failed before producing output" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          summary_line="$(grep -E '^[0-9]+\.[0-9]+% coverage' tarpaulin.txt | tail -1 || true)"
+          {
+            echo "## Coverage"
+            echo
+            if [ -n "$summary_line" ]; then
+              echo "**$summary_line**"
+            else
+              echo "_summary line not found in tarpaulin output_"
+            fi
+            echo
+            echo "<details><summary>Full tarpaulin report</summary>"
+            echo
+            echo '```'
+            cat tarpaulin.txt
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7
@@ -90,3 +117,14 @@ jobs:
           name: tarpaulin-cobertura
           path: cobertura.xml
           if-no-files-found: warn
+      # Token avoids Codecov's tokenless-upload rate limits on public
+      # repos. fail_ci_if_error is off so a Codecov hiccup doesn't
+      # tank the CI run; the cobertura artifact above is still the
+      # source of truth.
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: cobertura.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
