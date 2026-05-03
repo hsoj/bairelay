@@ -1,0 +1,19 @@
+# Codecov configuration. Authoritative coverage gate is
+# `cargo tarpaulin --fail-under=87` (see `tarpaulin.toml`); this file
+# only shapes the GitHub status checks Codecov posts back.
+
+coverage:
+  status:
+    # Overall coverage check — the only signal we want surfaced as a
+    # GitHub status. `target: auto` compares against the previous
+    # baseline; `threshold: 1%` absorbs the ~0.1-0.15% run-to-run
+    # variance of tarpaulin's mock-timing tests so a clean PR doesn't
+    # turn red on noise.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    # Patch-level coverage check OFF. Diffs are often CI/release
+    # infrastructure (YAML, shell, markdown) that tarpaulin doesn't
+    # measure, which makes the patch percentage misleading.
+    patch: false
