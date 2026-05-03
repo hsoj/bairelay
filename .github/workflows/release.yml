@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: tar.gz
+            use_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            ext: tar.gz
+            use_cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            use_cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            use_cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install musl tools (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # cross provides a docker image with aarch64-musl-cross + cmake +
+      # clang, which keeps aws-lc-rs's C build happy without the apt
+      # toolchain dance. If cross ever churns on aws-lc-rs, the
+      # documented fallback is to switch the rustls feature flag in
+      # `Cargo.toml` from `aws_lc_rs` to `ring` for release builds —
+      # one call site (`crates/rtsp/src/server/tls.rs::install_*`).
+      - name: Install cross (Linux aarch64)
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # aws-lc-rs on Windows pulls in a C build that needs NASM and
+      # libclang. CMake and LLVM are preinstalled on windows-latest;
+      # NASM comes from chocolatey. LIBCLANG_PATH points the bindgen
+      # crate at the preinstalled LLVM.
+      - name: Install Windows build tools (NASM + LIBCLANG_PATH)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install -y nasm
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\NASM'
+          Add-Content -Path $env:GITHUB_ENV -Value 'LIBCLANG_PATH=C:\Program Files\LLVM\bin'
+
+      - name: Build (cross)
+        if: ${{ matrix.use_cross }}
+        run: cross build --release --target ${{ matrix.target }} --bin bairelay
+
+      - name: Build (cargo)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target ${{ matrix.target }} --bin bairelay
+
+      - name: Strip binary (Unix)
+        if: runner.os != 'Windows'
+        run: strip target/${{ matrix.target }}/release/bairelay
+
+      - name: Package archive (tar.gz)
+        if: matrix.ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="bairelay-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$dir"
+          cp "target/${{ matrix.target }}/release/bairelay" "$dir/"
+          cp README.md LICENSE CHANGELOG.md sample_config.toml "$dir/"
+          tar -czf "$dir.tar.gz" "$dir"
+          echo "ARCHIVE=$dir.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package archive (zip)
+        if: matrix.ext == 'zip'
+        shell: pwsh
+        run: |
+          $dir = "bairelay-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\bairelay.exe" "$dir\"
+          Copy-Item README.md, LICENSE, CHANGELOG.md, sample_config.toml "$dir\"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE=$dir.zip"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: bairelay-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all archives
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Extract the section between '## [X.Y.Z]' and the next '## ['
+      # heading. Empty result falls back to a one-line placeholder so
+      # the operator is never blocked by a missing CHANGELOG entry.
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
+            echo "Release ${GITHUB_REF_NAME}." > release-notes.md
+          fi
+          echo "Notes preview:"
+          head -40 release-notes.md
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: Bairelay ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: dist/*
+          fail_on_unmatched_files: true

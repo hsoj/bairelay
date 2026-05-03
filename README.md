@@ -50,6 +50,48 @@ If you are running wired Reolink cameras with native RTSP, bairelay has nothing 
 
 ---
 
+## Release binaries
+
+Pre-built binaries are attached to each [GitHub Release](https://github.com/mgc8/bairelay/releases). Each archive contains the `bairelay` binary plus `README.md`, `LICENSE`, `CHANGELOG.md`, and `sample_config.toml`. Targets in the v1 release matrix:
+
+| Triple                          | Format    | Notes                            |
+|---------------------------------|-----------|----------------------------------|
+| `x86_64-unknown-linux-musl`     | `.tar.gz` | static, glibc-independent        |
+| `aarch64-unknown-linux-musl`    | `.tar.gz` | Pi 4/5, aarch64 NAS              |
+| `aarch64-apple-darwin`          | `.tar.gz` | Apple Silicon (M-series)         |
+| `x86_64-pc-windows-msvc`        | `.zip`    |                                  |
+
+Releases are not codesigned. macOS / Windows will refuse to run the binary on first launch; the one-time unblock is below.
+
+### Linux
+
+```bash
+tar -xzf bairelay-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz
+cd bairelay-vX.Y.Z-x86_64-unknown-linux-musl
+./bairelay --help
+```
+
+Static musl binaries — run on any modern distribution (glibc or musl), no system dependencies. Move `bairelay` to `~/bin`, `/usr/local/bin`, or wherever your service manager expects it.
+
+### macOS
+
+```bash
+tar -xzf bairelay-vX.Y.Z-aarch64-apple-darwin.tar.gz
+cd bairelay-vX.Y.Z-aarch64-apple-darwin
+xattr -d com.apple.quarantine bairelay
+./bairelay --help
+```
+
+The `xattr -d` line clears the quarantine flag macOS adds to downloaded files; without it Gatekeeper blocks the unsigned binary with "cannot be opened because the developer cannot be verified". Apple Silicon (M-series) only — Intel Macs need to build from source.
+
+### Windows
+
+Extract the `.zip` and launch `bairelay.exe` from PowerShell or `cmd`. On first launch SmartScreen blocks the unsigned executable — click **More info** → **Run anyway**. Alternatively: right-click `bairelay.exe` → Properties → tick **Unblock** before launching.
+
+Running as a Windows service is not packaged; use Task Scheduler or run interactively.
+
+---
+
 ## Build and install
 
 ### Prerequisites
