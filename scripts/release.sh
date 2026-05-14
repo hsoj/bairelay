@@ -64,6 +64,12 @@ update_workspace_version() {
 		{ print }
 	' Cargo.toml > Cargo.toml.new
 	mv Cargo.toml.new Cargo.toml
+
+	# Cascade into the HA add-on manifest. Out-of-sync versions cause
+	# HA Supervisor to silently skip the update (same-version check).
+	sed -i.bak -E "s/^version: \"[^\"]*\"\$/version: \"$new_v\"/" \
+		hassio/bairelay/config.yaml
+	rm hassio/bairelay/config.yaml.bak
 }
 
 build_new_section() {
@@ -194,15 +200,15 @@ main() {
 	cargo check --workspace --quiet
 
 	echo
-	echo "=== full diff (Cargo.toml + Cargo.lock + CHANGELOG.md) ==="
-	git --no-pager diff Cargo.toml Cargo.lock CHANGELOG.md
+	echo "=== full diff (Cargo.toml + Cargo.lock + CHANGELOG.md + hassio/bairelay/config.yaml) ==="
+	git --no-pager diff Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml
 	echo
 	confirm "Commit and tag $tag?" || {
-		git checkout -- Cargo.toml Cargo.lock CHANGELOG.md
+		git checkout -- Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml
 		die "aborted before commit"
 	}
 
-	git add Cargo.toml Cargo.lock CHANGELOG.md
+	git add Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml
 	git commit -m "release: $tag"
 	git tag -a "$tag" -m "Release $tag"
 	echo
