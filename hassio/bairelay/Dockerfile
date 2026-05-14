@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/hassio-addons/base:15.0.10
+ARG BUILD_FROM=ghcr.io/hassio-addons/base:20.1.1
 FROM ${BUILD_FROM}
 
 ARG BAIRELAY_VERSION
