@@ -252,6 +252,8 @@ docker run -d --name homeassistant \
 brew install colima docker mosquitto
 colima start
 
+tests/scripts/colima-vm-setup/install.sh     # see "Colima VM networking" below
+
 docker pull ghcr.io/home-assistant/home-assistant:stable
 docker pull eclipse-mosquitto:2
 
@@ -265,6 +267,21 @@ docker run -d --name homeassistant \
 `--network=host` shares the host network namespace with the container. On Linux that is the host directly; on macOS it is colima's Linux VM, which forwards `localhost:8123` to macOS, so either way HA reaches `http://localhost:8123` on the host. From inside the container, the host is `host.docker.internal` — colima resolves this natively, Linux's Docker needs the explicit `--add-host=host.docker.internal:host-gateway`. bairelay binds `0.0.0.0:8554` by default, so HA reaches it at `host.docker.internal:8554` on either OS.
 
 The `mosquitto` container is created automatically by `ha-up.sh` on first run; no manual `docker run` is needed for it.
+
+### Colima VM networking
+
+Colima's default QEMU profile leaves the VM with two flaws that surface as random `network is unreachable` / `server misbehaving` errors on `docker pull`:
+
+1. **Two default routes.** `col0` (metric 100, via the macOS host) works; `eth0` (metric 200, via QEMU's slirp at `192.168.5.2`) doesn't, and the Docker daemon's outbound source-IP routing picks it.
+2. **Flaky DNS proxy.** The slirp gateway at `192.168.5.1` answers the VM shell reliably but drops daemon image-pull queries.
+
+`tests/scripts/colima-vm-setup/install.sh` copies three idempotent systemd units into the Colima VM:
+
+- `colima-fix-network.service` (oneshot at boot) — deletes the eth0 default route + writes `/etc/gai.conf` to prefer IPv4 in `getaddrinfo` (the VM has no IPv6 transit).
+- `colima-fix-resolv.service` (oneshot, guarded) — rewrites `/etc/resolv.conf` to `1.1.1.1` + `8.8.8.8`.
+- `colima-fix-resolv.path` — re-fires the service whenever Colima's host-side agent resets resolv.conf, which it does ~3 s into every boot.
+
+Run the installer once after `brew install colima` (and re-run after any `colima delete` + recreate). Survives `colima stop` / `colima start` because the VM disk persists.
 
 ### Regenerating the access token
 

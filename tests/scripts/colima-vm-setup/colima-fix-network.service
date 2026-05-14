@@ -1,0 +1,22 @@
+[Unit]
+Description=Fix Colima VM networking — eth0 default route + IPv4 preference
+Documentation=https://github.com/abiosoft/colima/issues
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Drop the eth0 default route. Colima leaves two default routes; eth0
+# (metric 200, via QEMU slirp 192.168.5.2) is reachable from the VM shell
+# but the Docker daemon's outbound source-IP routing picks it and hits
+# "network unreachable". col0 (metric 100, via the macOS host) is the
+# working path.
+ExecStart=/bin/sh -c '/usr/sbin/ip route show default | grep -q "via 192.168.5.2 dev eth0" && /usr/sbin/ip route delete default via 192.168.5.2 dev eth0 || true'
+# Prefer IPv4 in getaddrinfo. Public DNS returns AAAA records the VM
+# can't reach (no IPv6 on col0); without this, curl / Docker try IPv6
+# first and stall on "Network is unreachable".
+ExecStart=/bin/sh -c 'printf "precedence ::ffff:0:0/96  100\n" > /etc/gai.conf'
+
+[Install]
+WantedBy=multi-user.target

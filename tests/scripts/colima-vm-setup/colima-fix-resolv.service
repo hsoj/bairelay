@@ -1,0 +1,9 @@
+[Unit]
+Description=Override Colima's /etc/resolv.conf with public DNS (Colima keeps resetting it)
+After=network.target
+
+[Service]
+Type=oneshot
+# Idempotent: if our nameservers are already present, exit early. Without
+# this guard, our own write would re-fire the .path watcher into a loop.
+ExecStart=/bin/sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf && grep -q "^nameserver 8.8.8.8$" /etc/resolv.conf && exit 0; printf "# Managed by colima-fix-resolv.service\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'

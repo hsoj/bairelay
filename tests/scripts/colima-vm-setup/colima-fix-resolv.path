@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch /etc/resolv.conf, restore public DNS on Colima reset
+After=network.target
+
+[Path]
+PathChanged=/etc/resolv.conf
+Unit=colima-fix-resolv.service
+
+[Install]
+WantedBy=multi-user.target
