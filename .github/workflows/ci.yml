@@ -56,6 +56,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+  hassio-lint:
+    name: hassio lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: hadolint Dockerfile
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: hassio/bairelay/Dockerfile
+      - name: HA add-on config lint
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: hassio/bairelay
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
