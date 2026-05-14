@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: hadolint Dockerfile
-        uses: hadolint/hadolint-action@v3
+        uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: hassio/bairelay/Dockerfile
       - name: HA add-on config lint
