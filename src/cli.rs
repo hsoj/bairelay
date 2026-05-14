@@ -44,7 +44,7 @@ Options:
 #[derive(Debug, Parser)]
 #[command(
 	name = "bairelay",
-	version = env!("BAIRELAY_VERSION"),
+	version = env!("CARGO_PKG_VERSION"),
 	about,
 	help_template = HELP_TEMPLATE,
 	arg_required_else_help = true,

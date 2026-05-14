@@ -243,7 +243,7 @@ pub(crate) fn write_meta_sidecar(
 		"camera": camera,
 		"stream_kind": kind.to_string(),
 		"capture_started_at": format_utc_iso8601(SystemTime::now()),
-		"bairelay_version": env!("BAIRELAY_VERSION"),
+		"bairelay_version": env!("CARGO_PKG_VERSION"),
 	});
 	let mut file = File::create(path)?;
 	file.write_all(serde_json::to_string_pretty(&json)?.as_bytes())?;
@@ -501,7 +501,7 @@ mod tests {
 		assert_eq!(parsed["stream_kind"].as_str(), Some("main"));
 		assert_eq!(
 			parsed["bairelay_version"].as_str(),
-			Some(env!("BAIRELAY_VERSION"))
+			Some(env!("CARGO_PKG_VERSION"))
 		);
 
 		let captured = parsed["capture_started_at"]

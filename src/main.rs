@@ -70,7 +70,7 @@ async fn async_main() -> Result<()> {
 		std::process::exit(code);
 	}
 
-	info!(version = %env!("BAIRELAY_VERSION"), "bairelay starting");
+	info!(version = %env!("CARGO_PKG_VERSION"), "bairelay starting");
 
 	// Load, parse, and validate the config file.
 	let config_path = cli.config_path();
@@ -182,7 +182,7 @@ async fn async_main() -> Result<()> {
 				topic_prefix.clone(),
 				d.topic.clone(),
 				d.features.clone(),
-				env!("BAIRELAY_VERSION").to_string(),
+				env!("CARGO_PKG_VERSION").to_string(),
 			)
 		}),
 		_ => None,

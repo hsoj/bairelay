@@ -407,7 +407,7 @@ By default each camera's `status/preview` topic publishes a base64-encoded JPEG 
 
 ### Build version
 
-Bairelay versions itself as `<major>.<minor>.<build-counter>` where `major.minor` come from the workspace `Cargo.toml`'s `[workspace.package].version` and the counter increments on every meaningful rebuild. Each successful build increments the counter (gitignored at workspace root). Bumping `version` in the workspace `Cargo.toml` resets the counter to zero.
+Bairelay's version is `[workspace.package].version` in the root `Cargo.toml`, exposed via `bairelay --version`. Release cuts happen via `scripts/release.sh <version>` — it bumps the manifest, refreshes the lockfile, drafts a CHANGELOG entry, commits, tags `v<version>`, and pushes; the `release.yml` workflow then matrix-builds the binaries. Between releases every build of a given commit produces an identical binary — see `docs/architecture.md` § Reproducible builds.
 
 ### Test rig
 

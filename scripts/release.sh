@@ -220,11 +220,13 @@ main() {
 		echo "  https://github.com/mgc8/bairelay/releases"
 		echo
 		echo "Reminder: if you ran this from the public clone, mirror the"
-		echo "tag on the internal repo so private history carries the same"
-		echo "release marker. From the internal clone:"
+		echo "version bump + tag on the internal repo. From the internal clone:"
 		echo "    git checkout main && git pull"
+		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm Cargo.toml.bak"
+		echo "    cargo check --workspace --quiet"
+		echo "    git commit -am 'release: $tag'"
 		echo "    git tag -a $tag -m 'Release $tag'"
-		echo "    git push origin $tag"
+		echo "    git push origin main $tag"
 	else
 		echo
 		echo "Stopped before push. To push later:"

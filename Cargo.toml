@@ -85,6 +85,10 @@ rpassword = "7"
 # do it is uniform across every target and Cargo profile-aware. Keep
 # `strip = "symbols"` (not `"debuginfo"`) — the release artifact is for
 # operators, not core dumps; debug-mode local builds keep full info.
+#
+# Release artefact path scrubbing happens via `--remap-path-prefix` in
+# `release.yml` (stable rustc flag). The unified `trim-paths` profile
+# key is still unstable in Cargo 1.95 — revisit when it stabilises.
 [profile.release]
 strip = "symbols"
 

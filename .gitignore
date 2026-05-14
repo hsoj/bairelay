@@ -77,8 +77,3 @@ tests/scripts/ha-config/.storage/http
 # Cobertura XML is uploaded as a workflow artifact instead.
 cobertura.xml
 tarpaulin-report.html
-
-# Auto-incrementing build counter written by build.rs. Per-machine —
-# do not commit. Survives `cargo clean` because it lives at the package
-# root, not in target/.
-build-counter

@@ -67,6 +67,26 @@ Pure-logic modules aim for ≥95%; command modules / pollers ≥90%; I/O-adjacen
 - **Portability**: Linux + macOS are primary; any OS-specific code goes in a separate file/module.
 - **Definition of done**: code review + lint clean + tests + relevant docs updated. No exceptions.
 
+## Reproducible build expectations
+
+This project aims to be buildable reproducibly.
+
+Release builds should not depend on:
+
+- the current time, except through `SOURCE_DATE_EPOCH`;
+- the current username, hostname, home directory, or absolute checkout path;
+- the presence of a `.git` directory;
+- network access during the build;
+- nondeterministic filesystem ordering.
+
+For binary releases, build with:
+
+```bash
+cargo build --release --locked
+```
+
+Before releases, check with `reprotest` where available.
+
 ## Commit style
 
 Subject ≤72 chars, followed by a blank line, then a number of bullet points detailing the changes, **each one line ≤72 chars** — never wrap a bullet onto a second line. The diff documents *what*; the body documents *why* and any non-obvious *how*.

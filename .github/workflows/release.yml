@@ -78,13 +78,35 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\NASM'
           Add-Content -Path $env:GITHUB_ENV -Value 'LIBCLANG_PATH=C:\Program Files\LLVM\bin'
 
+      # Path-scrub for reproducibility: rewrite the cargo registry and
+      # workspace paths that otherwise leak into panic strings + any
+      # residual debug info. `strip = "symbols"` already removes the
+      # bulk; this closes the panic-message gap. Switch to the Cargo
+      # `trim-paths` profile key when it stabilises.
+      - name: Set reproducible RUSTFLAGS (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Both host paths (native cargo) and cross's container paths
+          # (/project workspace, /root/.cargo home) — rustc silently
+          # ignores remap patterns that don't match the actual source.
+          echo "RUSTFLAGS=--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/build --remap-path-prefix=/root/.cargo=/cargo --remap-path-prefix=/project=/build" >> "$GITHUB_ENV"
+
+      - name: Set reproducible RUSTFLAGS (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+          $pwdPath = (Get-Location).Path
+          Add-Content -Path $env:GITHUB_ENV -Value "RUSTFLAGS=--remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$pwdPath=/build"
+
       - name: Build (cross)
         if: ${{ matrix.use_cross }}
-        run: cross build --release --target ${{ matrix.target }} --bin bairelay
+        run: cross build --locked --release --target ${{ matrix.target }} --bin bairelay
 
       - name: Build (cargo)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --target ${{ matrix.target }} --bin bairelay
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin bairelay
 
       # Stripping happens in-build via `[profile.release] strip = "symbols"`
       # in Cargo.toml — uniform across every target, and avoids the

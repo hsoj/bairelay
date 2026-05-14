@@ -269,3 +269,16 @@ The CLI's coarse exit-code table for one-shot commands (see `src/oneshot/classif
 | 130  | Ctrl+C                                                    |
 
 Scripts can branch on the exit code without parsing stdout.
+
+## Reproducible builds
+
+Bairelay release artefacts are bit-for-bit reproducible from `(commit, target triple, rustc version)`. The properties this rests on:
+
+- `Cargo.lock` is committed; every CI and release `cargo`/`cross` invocation passes `--locked`.
+- No `git = "..."` dependencies — everything resolves through `crates.io` or workspace `path =`.
+- `build.rs` is absent. The version comes from `env!("CARGO_PKG_VERSION")`, sourced from `[workspace.package].version`.
+- No build-time wall-clock timestamps, hostnames, usernames, or absolute build paths are embedded. Every `SystemTime::now()` / `OffsetDateTime::now_utc()` in the tree is runtime.
+- `[profile.release]` sets `strip = "symbols"`. The release workflow additionally exports `RUSTFLAGS=--remap-path-prefix=...` to rewrite the cargo registry + workspace paths that otherwise leak into panic strings. Cargo's unified `trim-paths` profile key remains unstable in Cargo 1.95 — swap in when it stabilises.
+- `SOURCE_DATE_EPOCH` is not consulted because no build date is embedded; the contract is the env-var-free baseline. Any future build-time date must go through `SOURCE_DATE_EPOCH` rather than `SystemTime::now()`.
+
+Out-of-tree caveat: `aws-lc-rs` (pulled via `rustls = "0.23"`) compiles C code whose `__DATE__`/`__TIME__` may leak into the static archive. If Debian packaging surfaces it, the documented fallback is the rustls `ring` feature flag — one call site in `crates/rtsp/src/server/tls.rs::install_*`.
