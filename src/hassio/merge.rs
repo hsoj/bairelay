@@ -55,6 +55,10 @@ pub fn merge_cameras(base: Vec<CameraConfig>, overlay: Vec<CameraConfig>) -> Vec
 			overlay_field!(entry, over, idle_disconnect_timeout_secs @opt);
 			overlay_field!(entry, over, defs, motion_wake_hold_secs);
 			overlay_field!(entry, over, defs, enabled);
+			// Whole-struct override: relies on build_base_config leaving
+			// per-camera mqtt + pause at default. If HA options ever start
+			// populating these, switch to a field-level deep merge or this
+			// clobbers them.
 			overlay_field!(entry, over, defs, mqtt);
 			overlay_field!(entry, over, defs, pause);
 			overlay_field!(entry, over, permitted_users @vec_nonempty);
@@ -275,6 +279,10 @@ mod tests {
 		let base = build_base_config(&opts, &mqtt);
 		let merged = merge(base, overlay);
 		assert!(merged.wake_server.is_some());
+		assert!(
+			merged.wake_server.as_ref().unwrap().enable,
+			"overlay enable round-trips"
+		);
 		assert_eq!(merged.cameras.len(), 1);
 
 		crate::config::validate_config(&merged).expect("merged config validates");
