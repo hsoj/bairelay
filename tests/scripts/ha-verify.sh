@@ -238,7 +238,7 @@ if [ "$AS_CONTAINER" = 1 ]; then
 	docker run --rm -d --network host \
 		--name bairelay-test \
 		-v "$ADDON_DATA_DIR:/data" \
-		-v "$ADDON_CONFIG_DIR:/config" \
+		-v "$ADDON_CONFIG_DIR:/homeassistant_config" \
 		"$ADDON_IMAGE" >/dev/null \
 		|| { fail "failed to launch add-on container"; exit 2; }
 	# Pipe container logs into bairelay.log so the rest of the script

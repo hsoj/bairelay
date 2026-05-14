@@ -7,7 +7,6 @@ arch:
   - amd64
   - aarch64
 init: false
-boot: auto
 host_network: true
 services:
   - mqtt:want
@@ -17,7 +16,7 @@ ports:
   9999/udp: 9999
   58200/udp: 58200
 map:
-  - config:rw
+  - homeassistant_config:rw
   - ssl
 options:
   topic_prefix: bairelay
