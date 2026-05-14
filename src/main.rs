@@ -9,7 +9,7 @@ use tracing::{error, info};
 
 use bairelay::bcmedia_dump::BcMediaDumpConfig;
 use bairelay::camera::CameraHandle;
-use bairelay::cli::Cli;
+use bairelay::cli::{Cli, Command};
 use bairelay::cli_convert::{should_emit_ansi, verbosity_env_filter};
 use bairelay::config::{
 	warn_deprecated_pause_fields, warn_idle_timeout_below_prune_floor, warn_neolink_compat_fields,
@@ -62,6 +62,37 @@ async fn async_main() -> Result<()> {
 		.with_timer(LocalTimer)
 		.with_env_filter(verbosity_env_filter(cli.verbose))
 		.init();
+
+	// `render-hassio-config` is a pure-templating subcommand for the HA
+	// add-on entrypoint; it must not flow through the camera-touching
+	// one-shot pipeline. Dispatch it here and exit before any config
+	// load / orchestrator bring-up.
+	if let Command::RenderHassioConfig {
+		options_json,
+		overlay,
+		mqtt_host,
+		mqtt_port,
+		mqtt_user,
+		mqtt_pass,
+		mqtt_ssl,
+		output,
+	} = &cli.command
+	{
+		if let Err(e) = bairelay::hassio::cmd::run(
+			options_json,
+			overlay.as_deref(),
+			mqtt_host.clone(),
+			*mqtt_port,
+			mqtt_user.clone(),
+			mqtt_pass.clone(),
+			*mqtt_ssl,
+			output.as_deref(),
+		) {
+			eprintln!("{e}");
+			std::process::exit(1);
+		}
+		return Ok(());
+	}
 
 	// One-shot subcommands exit before any MQTT / RTSP / orchestrator
 	// bring-up; service modes fall through to the existing pipeline.

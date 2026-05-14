@@ -179,6 +179,14 @@ pub async fn dispatch_oneshot(
 				"internal: check-config routed through camera dispatch"
 			))
 		}
+		Command::RenderHassioConfig { .. } => {
+			// `main::async_main` dispatches `render-hassio-config`
+			// before the one-shot pipeline runs; reaching this arm
+			// means the early-return was bypassed. Programmer bug.
+			Err(anyhow::anyhow!(
+				"internal: render-hassio-config routed through camera dispatch"
+			))
+		}
 	}
 }
 

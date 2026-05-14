@@ -2,5 +2,6 @@
 //! overlay into a single bairelay [`crate::config::Config`], validate,
 //! and emit. Exposed via the `bairelay render-hassio-config` subcommand.
 
+pub mod cmd;
 pub mod merge;
 pub mod options;

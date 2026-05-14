@@ -319,6 +319,29 @@ pub enum Command {
 	/// on missing file. Useful in CI / Ansible / pre-deploy hooks.
 	#[command(name = "check-config")]
 	CheckConfig,
+
+	/// Render Home Assistant Supervisor options + a TOML overlay into
+	/// a complete bairelay config file. Internal subcommand used by the
+	/// HA add-on entrypoint shim; operators do not invoke this directly.
+	#[command(hide = true)]
+	RenderHassioConfig {
+		#[arg(long = "options-json", value_name = "PATH")]
+		options_json: PathBuf,
+		#[arg(long = "overlay", value_name = "PATH")]
+		overlay: Option<PathBuf>,
+		#[arg(long = "mqtt-host")]
+		mqtt_host: Option<String>,
+		#[arg(long = "mqtt-port")]
+		mqtt_port: Option<u16>,
+		#[arg(long = "mqtt-user")]
+		mqtt_user: Option<String>,
+		#[arg(long = "mqtt-pass")]
+		mqtt_pass: Option<String>,
+		#[arg(long = "mqtt-ssl", default_value = "false")]
+		mqtt_ssl: bool,
+		#[arg(long = "output", value_name = "PATH")]
+		output: Option<PathBuf>,
+	},
 }
 
 impl Cli {
@@ -349,7 +372,8 @@ impl Cli {
 			| Command::Ptz { .. }
 			| Command::Services { .. }
 			| Command::Users { .. }
-			| Command::CheckConfig => None,
+			| Command::CheckConfig
+			| Command::RenderHassioConfig { .. } => None,
 		}
 	}
 
@@ -389,7 +413,8 @@ impl Cli {
 			Command::Mqtt
 			| Command::Rtsp { .. }
 			| Command::MqttRtsp { .. }
-			| Command::CheckConfig => None,
+			| Command::CheckConfig
+			| Command::RenderHassioConfig { .. } => None,
 			Command::Reboot(a)
 			| Command::Battery(a)
 			| Command::Presets(a)

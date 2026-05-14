@@ -218,6 +218,25 @@ pub fn clone_command(cmd: &cli::Command) -> cli::Command {
 			action: action.as_ref().map(clone_user_sub),
 		},
 		Command::CheckConfig => Command::CheckConfig,
+		Command::RenderHassioConfig {
+			options_json,
+			overlay,
+			mqtt_host,
+			mqtt_port,
+			mqtt_user,
+			mqtt_pass,
+			mqtt_ssl,
+			output,
+		} => Command::RenderHassioConfig {
+			options_json: options_json.clone(),
+			overlay: overlay.clone(),
+			mqtt_host: mqtt_host.clone(),
+			mqtt_port: *mqtt_port,
+			mqtt_user: mqtt_user.clone(),
+			mqtt_pass: mqtt_pass.clone(),
+			mqtt_ssl: *mqtt_ssl,
+			output: output.clone(),
+		},
 	}
 }
 
