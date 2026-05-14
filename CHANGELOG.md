@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.1.0] — 2026-05-15
+
+Added Dockerfile and initial Home Assistant Add-On support under `hassio/` then updated documentation accordingly.
+
+### Changes
+
+- hassio: rename map to homeassistant_config; drop default boot:auto
+- hassio: set SHELL ash -o pipefail so sha256sum pipe propagates
+- ci: pin hadolint-action to v3.3.0
+- tests: persistent fix for Colima VM networking (route + DNS)
+- hassio: real icon + logo from docs/logos/ source masters
+- hassio: pin base image to ghcr.io/hassio-addons/base:20.1.1
+- hassio: field-merge MqttServerConfig — preserve base topic_prefix
+- docs: README install-as-add-on section + CHANGELOG 1.1.0 entry
+- ha-verify: list --bairelay-as-container in --help; drop dead id file
+- ci: hadolint + HA add-on YAML lint on every push
+- testing: document HA add-on verification surfaces
+- ha-verify: --bairelay-as-container runs the add-on image
+- release.sh: replay block covers hassio manifest too
+- release.sh: bump hassio/bairelay/config.yaml version in lockstep
+- release.yml: docker job pushes per-arch images to GHCR on publish
+- release.yml: publish SHA256SUMS alongside tarballs
+- hassio: boot:auto + entrypoint /tmp comment
+- hassio: treat --mqtt-port 0 as unset sentinel
+- hassio: CHANGELOG + README stubs for the add-on directory
+- hassio: DOCS.md — install, options form, TOML overlay, debug
+- hassio: placeholder transparent icon + logo (replace later)
+- hassio: s6 longrun service runs render-hassio-config + bairelay
+- hassio: Dockerfile pulls SHA-verified tarball from GH release
+- hassio: build.yaml pins hassio-addons/base 15.0.10 per arch
+- hassio: config.yaml — slug, options, services, network
+- hassio: repository.yaml at repo root for HA scanner
+- hassio: rustfmt fixup for cmd.rs
+- hassio: end-to-end CLI test for render-hassio-config
+- hassio: wire render-hassio-config subcommand into CLI
+- hassio: tighten merge — pin wake_server.enable, flag mqtt invariant
+- hassio: top-level merge() ties top-level + per-camera passes
+- hassio: merge_cameras combines HA-options + overlay by name
+- hassio: merge_top_level overlays bairelay-wide knobs
+- hassio: parse_overlay reads operator TOML
+- hassio: pin build_base_config field mappings; cover half-set creds
+- hassio: cover empty-camera + no-mqtt-injection + ssl paths
+- hassio: build_base_config maps HassioOptions to Config
+- hassio: add MqttServiceFlags struct for Supervisor injection
+- hassio: parse Supervisor options.json into HassioOptions
+- hassio: scaffold module tree for render-hassio-config
+- build: target reproducible releases; bump workspace to 1.0.0
+- readme: bump stated rust toolchain floor to 1.93
+
 ## [1.0.0] — 2026-05-03
 
 First public binary release.
