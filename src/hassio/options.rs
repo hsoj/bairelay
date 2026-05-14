@@ -152,4 +152,55 @@ mod tests {
 		assert_eq!(m.port, 1883);
 		assert_eq!(m.topic_prefix, "bairelay");
 	}
+
+	#[test]
+	fn no_cameras_yields_empty_camera_list() {
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![],
+		};
+		let cfg = build_base_config(&opts, &MqttServiceFlags::default());
+		assert!(cfg.cameras.is_empty());
+	}
+
+	#[test]
+	fn no_mqtt_injection_leaves_mqtt_unset() {
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![],
+		};
+		let cfg = build_base_config(&opts, &MqttServiceFlags::default());
+		assert!(
+			cfg.mqtt.is_none(),
+			"mqtt must stay None for overlay to fill in"
+		);
+	}
+
+	#[test]
+	fn ssl_flag_does_not_break_mqtt_propagation() {
+		// Supervisor may report ssl=true (HA broker on 8883). The minimal
+		// builder ignores it — TLS to MQTT requires a CA cert path the
+		// overlay TOML must supply (`[mqtt] ca = "..."`). This test pins
+		// that the base builder still produces a valid Config; the TOML
+		// overlay layer (Task A6+) is where TLS materialises.
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![],
+		};
+		let mqtt = MqttServiceFlags {
+			host: Some("broker.example".into()),
+			port: Some(8883),
+			username: None,
+			password: None,
+			ssl: true,
+		};
+		let cfg = build_base_config(&opts, &mqtt);
+		let m = cfg.mqtt.as_ref().expect("mqtt set");
+		assert_eq!(m.broker_addr, "broker.example");
+		assert_eq!(m.port, 8883);
+		assert!(m.ca.is_none(), "TLS deferred to overlay");
+	}
 }
