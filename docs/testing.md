@@ -428,6 +428,76 @@ The next `ha-verify.sh` run recreates them.
 
 ---
 
+## HA Add-on verification
+
+The HA Add-on at `hassio/bairelay/` has two distinct test surfaces, only one of which the Colima HA Container rig covers.
+
+### Surface 1: container parity (Colima rig)
+
+The HA Container in Colima has no Supervisor and cannot install add-ons. It can, however, run the add-on image as a plain Docker container and observe that the MQTT-side behaviour is identical to `cargo run`. This validates the entrypoint shim, the `render-hassio-config` subcommand, the merge logic, and bairelay end-to-end — everything below the Supervisor integration layer.
+
+Prerequisites:
+
+- The add-on image built locally:
+
+    ```
+    docker build hassio/bairelay/ \
+        --build-arg BAIRELAY_VERSION=<x.y.z> \
+        --build-arg BAIRELAY_SHA256_AMD64=$(sha256sum /path/to/bairelay-vX.Y.Z-x86_64-linux.tar.gz | cut -d' ' -f1) \
+        --build-arg BAIRELAY_SHA256_AARCH64=0000 \
+        --build-arg TARGETARCH=$(uname -m | sed s/x86_64/amd64/) \
+        -t bairelay-hassio-test:<x.y.z>
+    ```
+
+    For local tests, the cross-arch SHA can be zeroed out — only the host's arch is actually verified.
+- `tests/logs/addon-test/data/options.json` — hand-written Supervisor options for the test cameras:
+
+    ```json
+    {
+      "topic_prefix": "bairelay",
+      "log_level": "info",
+      "cameras": [
+        {"name": "TestCamera", "host_or_uid": "192.168.1.50", "password": "<password>"}
+      ]
+    }
+    ```
+- `tests/logs/addon-test/config/bairelay/config.toml` — the TOML overlay. Should mirror the existing on-host test config shape so the merged result matches what `tests/bairelay-test.toml` produces. The overlay must include `[mqtt]` (since the container has no Supervisor injecting it) and any per-camera knobs (`username = "admin"`, channel, etc.).
+
+Run:
+
+```
+tests/scripts/ha-verify.sh --bairelay-as-container
+```
+
+The rest of the test rig (HA Container ingest, MQTT entity verification, snapshot probes) runs unchanged. `--bairelay-as-container` implies `--no-build`.
+
+`ha-verify.sh` 8/8 indicates the add-on packaging is functionally equivalent to on-host bairelay for the MQTT path.
+
+### Surface 2: Supervisor integration
+
+Manifest correctness, the options form rendering, `mqtt:want` service injection, `host_network: true` activation, `/config` + `/ssl` mounts, repository discovery in the HA UI — only testable inside a real Supervisor.
+
+Path: HA OS in QEMU, or HA Supervised on a spare Debian host. Not a CI gate; a manual release-prerequisite run before each release tag.
+
+Steps:
+
+1. Boot HA OS in QEMU (see Home Assistant's "Developer install on QEMU" documentation). Alternatively, install HA Supervised on a spare Debian box.
+2. Settings → Add-ons → Add-on Store → ⋮ → Repositories → paste `https://github.com/mgc8/bairelay` → Add.
+3. The Bairelay add-on appears under "Local add-ons" (when added from a custom repo). Click it → Install.
+4. Configuration tab → fill in `topic_prefix`, `log_level`, and at least one camera entry (name, host_or_uid, password). Save.
+5. Optional: drop a `/config/bairelay/config.toml` overlay via the File Editor add-on or SSH.
+6. Start. Verify the add-on stays running (Log tab shows `bairelay starting version=X.Y.Z` and no immediate exit).
+7. Confirm MQTT entities appear in HA exactly as `ha-verify.sh` expects (same `homeassistant/.../config` discovery payloads, same entity IDs).
+8. Stop the add-on. Uninstall. Verify clean removal (retained MQTT discovery topics are unpublished).
+
+Issues at this surface are usually:
+
+- `services: ["mqtt:want"]` not picking up the broker — the HA MQTT integration must be installed and started before the add-on.
+- `host_network: true` failing to bind — another process on the host is already on 8554/8555/9999/58200.
+- Options form rejecting input — the regex `^[A-Za-z0-9_-]+$` on camera names doesn't allow dots or slashes; the password field type is `password` (masked) but accepts any string.
+
+---
+
 ## Manual live-camera harness
 
 `tests/scripts/manual-verify.sh` exercises the RTSP server + MQTT bridge against real cameras. On-demand only — not wired into `cargo test`. Discovers installed client tools, parses non-secret bits of the real `config.toml` (cameras, MQTT broker, credentials), spawns bairelay with `RUST_LOG=bairelay=debug,bairelay_rtsp=debug`, runs the probe matrix, tears down. Logs go to `tests/logs/manual-verify/` (gitignored).
