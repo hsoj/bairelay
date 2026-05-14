@@ -1,9 +1,80 @@
 //! Deep-merge a HA-options-derived [`Config`] with a TOML overlay.
 
-use crate::config::Config;
+use crate::config::{CameraConfig, Config};
 
 pub fn parse_overlay(toml_src: &str) -> Result<Config, String> {
 	toml::from_str(toml_src).map_err(|e| format!("overlay parse error: {e}"))
+}
+
+/// Overlay a single non-`name` field from `over` onto `entry`. The variant
+/// suffix picks the override rule appropriate for the field's type.
+macro_rules! overlay_field {
+	($base:expr, $over:expr, $defs:expr, $field:ident) => {
+		if $over.$field != $defs.$field {
+			$base.$field = $over.$field.clone();
+		}
+	};
+	($base:expr, $over:expr, $field:ident @opt) => {
+		if $over.$field.is_some() {
+			$base.$field = $over.$field.clone();
+		}
+	};
+	($base:expr, $over:expr, $field:ident @str_nonempty) => {
+		if !$over.$field.is_empty() {
+			$base.$field = $over.$field.clone();
+		}
+	};
+	($base:expr, $over:expr, $field:ident @vec_nonempty) => {
+		if !$over.$field.is_empty() {
+			$base.$field = $over.$field.clone();
+		}
+	};
+}
+
+/// Merge `overlay` camera entries onto `base` by `name`. Existing entries
+/// merge field-by-field (overlay wins when it deviates from the
+/// per-field default); unmatched overlay entries are appended.
+pub fn merge_cameras(base: Vec<CameraConfig>, overlay: Vec<CameraConfig>) -> Vec<CameraConfig> {
+	let defs = CameraConfig::default();
+	let mut out: Vec<CameraConfig> = base;
+
+	for over in overlay {
+		if let Some(idx) = out.iter().position(|b| b.name == over.name) {
+			let entry = &mut out[idx];
+			// Identity-ish fields (name is the merge key, never overridden).
+			overlay_field!(entry, over, address @opt);
+			overlay_field!(entry, over, uid @opt);
+			overlay_field!(entry, over, username @str_nonempty);
+			overlay_field!(entry, over, password @opt);
+			// Per-camera knobs.
+			overlay_field!(entry, over, defs, channel_id);
+			overlay_field!(entry, over, defs, stream);
+			overlay_field!(entry, over, defs, discovery);
+			overlay_field!(entry, over, defs, max_encryption);
+			overlay_field!(entry, over, defs, idle_disconnect);
+			overlay_field!(entry, over, idle_disconnect_timeout_secs @opt);
+			overlay_field!(entry, over, defs, motion_wake_hold_secs);
+			overlay_field!(entry, over, defs, enabled);
+			overlay_field!(entry, over, defs, mqtt);
+			overlay_field!(entry, over, defs, pause);
+			overlay_field!(entry, over, permitted_users @vec_nonempty);
+			// Neolink-compat fields (warned + ignored at startup; we keep
+			// overlay's intent visible so the warning fires on the merged
+			// config rather than disappearing into the overlay).
+			overlay_field!(entry, over, debug @opt);
+			overlay_field!(entry, over, print_format @opt);
+			overlay_field!(entry, over, update_time @opt);
+			overlay_field!(entry, over, buffer_duration @opt);
+			overlay_field!(entry, over, use_splash @opt);
+			overlay_field!(entry, over, splash_pattern @opt);
+			overlay_field!(entry, over, max_discovery_retries @opt);
+			overlay_field!(entry, over, push_notifications @opt);
+			overlay_field!(entry, over, strict @opt);
+		} else {
+			out.push(over);
+		}
+	}
+	out
 }
 
 /// Merge top-level fields from `overlay` into `base`. Overlay values
@@ -91,6 +162,74 @@ mod tests {
 		assert_eq!(merged.bind_addr, "127.0.0.1", "overlay overrides bind_addr");
 		assert_eq!(merged.bind_port, 8554, "base bind_port preserved");
 		assert_eq!(merged.stream_prune_grace_secs, 60);
+	}
+
+	#[test]
+	fn camera_overlay_merges_by_name_and_adds_new_entries() {
+		use crate::config::CameraConfig;
+		let base_cams = vec![CameraConfig {
+			name: "Hallway".into(),
+			address: Some("ABC123".into()),
+			uid: None,
+			username: "admin".into(),
+			password: Some("secret".into()),
+			..CameraConfig::default()
+		}];
+		let overlay_cams = vec![
+			CameraConfig {
+				name: "Hallway".into(),
+				channel_id: 1,
+				..CameraConfig::default()
+			},
+			CameraConfig {
+				name: "Driveway".into(),
+				address: Some("192.168.1.50".into()),
+				username: "operator".into(),
+				password: Some("dr".into()),
+				..CameraConfig::default()
+			},
+		];
+		let merged = merge_cameras(base_cams, overlay_cams);
+		assert_eq!(merged.len(), 2);
+		let hallway = merged.iter().find(|c| c.name == "Hallway").unwrap();
+		assert_eq!(
+			hallway.address.as_deref(),
+			Some("ABC123"),
+			"base address preserved"
+		);
+		assert_eq!(hallway.channel_id, 1, "overlay channel applied");
+		assert_eq!(
+			hallway.password.as_deref(),
+			Some("secret"),
+			"base password preserved"
+		);
+		let driveway = merged.iter().find(|c| c.name == "Driveway").unwrap();
+		assert_eq!(driveway.address.as_deref(), Some("192.168.1.50"));
+		assert_eq!(driveway.username, "operator");
+	}
+
+	#[test]
+	fn camera_overlay_pause_block_overrides_base() {
+		use crate::config::{CameraConfig, PauseConfig};
+		let base_cams = vec![CameraConfig {
+			name: "Hallway".into(),
+			address: Some("ABC123".into()),
+			username: "admin".into(),
+			password: Some("secret".into()),
+			..CameraConfig::default()
+		}];
+		let custom_pause = PauseConfig {
+			gap_threshold_secs: 5.0,
+			..PauseConfig::default()
+		};
+		let overlay_cams = vec![CameraConfig {
+			name: "Hallway".into(),
+			pause: custom_pause.clone(),
+			..CameraConfig::default()
+		}];
+		let merged = merge_cameras(base_cams, overlay_cams);
+		assert_eq!(merged[0].pause.gap_threshold_secs, 5.0);
+		assert_eq!(merged[0].address.as_deref(), Some("ABC123"));
 	}
 
 	#[test]
