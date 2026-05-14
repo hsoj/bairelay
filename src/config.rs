@@ -262,6 +262,20 @@ pub struct MqttServerConfig {
 	pub discovery: Option<MqttDiscoveryConfig>,
 }
 
+impl Default for MqttServerConfig {
+	fn default() -> Self {
+		Self {
+			broker_addr: String::new(),
+			port: default_mqtt_port(),
+			credentials: None,
+			ca: None,
+			client_auth: None,
+			topic_prefix: default_topic_prefix(),
+			discovery: None,
+		}
+	}
+}
+
 // ── MqttDiscoveryConfig ────────────────────────────────────────────────
 
 /// Configuration for publishing Home Assistant MQTT discovery

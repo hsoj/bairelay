@@ -1,6 +1,6 @@
 //! Deep-merge a HA-options-derived [`Config`] with a TOML overlay.
 
-use crate::config::{CameraConfig, Config};
+use crate::config::{CameraConfig, Config, MqttServerConfig};
 
 pub fn parse_overlay(toml_src: &str) -> Result<Config, String> {
 	toml::from_str(toml_src).map_err(|e| format!("overlay parse error: {e}"))
@@ -89,6 +89,36 @@ pub fn merge(base: Config, overlay: Config) -> Config {
 	merged
 }
 
+/// Field-merge two [`MqttServerConfig`]s. The four `Option` cases
+/// follow the natural "if-some-else-passthrough" rule; in the both-some
+/// case every overlay field that differs from the per-field serde
+/// default overrides base. This avoids the whole-struct swap that
+/// silently clobbered base's `topic_prefix` when the overlay only set
+/// (say) `ca = "/ssl/myca.pem"` — serde would fill `topic_prefix` with
+/// `"bairelay"` and the prior swap propagated that default over the
+/// HA-form's chosen prefix.
+fn merge_mqtt(
+	base: Option<MqttServerConfig>,
+	overlay: Option<MqttServerConfig>,
+) -> Option<MqttServerConfig> {
+	match (base, overlay) {
+		(None, None) => None,
+		(Some(b), None) => Some(b),
+		(None, Some(o)) => Some(o),
+		(Some(mut b), Some(o)) => {
+			let defs = MqttServerConfig::default();
+			overlay_field!(b, o, defs, broker_addr);
+			overlay_field!(b, o, defs, port);
+			overlay_field!(b, o, defs, topic_prefix);
+			overlay_field!(b, o, credentials @opt);
+			overlay_field!(b, o, ca @opt);
+			overlay_field!(b, o, client_auth @opt);
+			overlay_field!(b, o, discovery @opt);
+			Some(b)
+		}
+	}
+}
+
 /// Merge top-level fields from `overlay` into `base`. Overlay values
 /// that differ from the type's default win; defaults are passthrough.
 /// `cameras` is handled separately by [`merge_cameras`].
@@ -116,9 +146,7 @@ pub fn merge_top_level(mut base: Config, overlay: Config) -> Config {
 	if !overlay.users.is_empty() {
 		base.users = overlay.users;
 	}
-	if overlay.mqtt.is_some() {
-		base.mqtt = overlay.mqtt;
-	}
+	base.mqtt = merge_mqtt(base.mqtt, overlay.mqtt);
 	if overlay.wake_server.is_some() {
 		base.wake_server = overlay.wake_server;
 	}
@@ -286,6 +314,78 @@ mod tests {
 		assert_eq!(merged.cameras.len(), 1);
 
 		crate::config::validate_config(&merged).expect("merged config validates");
+	}
+
+	#[test]
+	fn overlay_mqtt_block_preserves_base_topic_prefix() {
+		// Regression: an overlay [mqtt] block specifying only ca = "..."
+		// used to clobber the base's topic_prefix back to "bairelay" via
+		// whole-struct override. Field-merge: overlay-set fields override;
+		// overlay-default fields pass the base through.
+		use crate::config::MqttServerConfig;
+		let base = Config {
+			mqtt: Some(MqttServerConfig {
+				broker_addr: "broker.example".into(),
+				port: 1883,
+				credentials: None,
+				ca: None,
+				client_auth: None,
+				topic_prefix: "neolink".into(),
+				discovery: None,
+			}),
+			..Config::default()
+		};
+		// broker_addr is a required serde field — operator must restate it
+		// when adding any [mqtt] overlay block. Same value as base here so
+		// the test isolates the topic_prefix preservation behaviour.
+		let overlay_src = r#"
+			cameras = []
+
+			[mqtt]
+			broker_addr = "broker.example"
+			ca = "/ssl/myca.pem"
+		"#;
+		let overlay = parse_overlay(overlay_src).unwrap();
+		let merged = merge_top_level(base, overlay);
+		let m = merged.mqtt.as_ref().expect("mqtt merged");
+		assert_eq!(
+			m.topic_prefix, "neolink",
+			"overlay should not clobber base topic_prefix"
+		);
+		assert_eq!(
+			m.ca.as_deref(),
+			Some("/ssl/myca.pem"),
+			"overlay ca overrides"
+		);
+		assert_eq!(
+			m.broker_addr, "broker.example",
+			"base broker_addr preserved"
+		);
+	}
+
+	#[test]
+	fn overlay_mqtt_overlay_only_path_still_works() {
+		// When base has no mqtt at all (Supervisor MQTT integration absent
+		// and HA options form left it empty), overlay's [mqtt] is the sole
+		// source.
+		let base = Config {
+			mqtt: None,
+			..Config::default()
+		};
+		let overlay_src = r#"
+			cameras = []
+
+			[mqtt]
+			broker_addr = "broker.example"
+			port = 8883
+			topic_prefix = "custom"
+		"#;
+		let overlay = parse_overlay(overlay_src).unwrap();
+		let merged = merge_top_level(base, overlay);
+		let m = merged.mqtt.as_ref().expect("overlay-only mqtt");
+		assert_eq!(m.broker_addr, "broker.example");
+		assert_eq!(m.port, 8883);
+		assert_eq!(m.topic_prefix, "custom");
 	}
 
 	#[test]
