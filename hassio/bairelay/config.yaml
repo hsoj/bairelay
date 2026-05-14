@@ -1,0 +1,32 @@
+slug: bairelay
+name: Bairelay
+version: "1.1.0"
+description: RTSP / MQTT bridge for Reolink battery cameras
+url: https://github.com/mgc8/bairelay
+arch:
+  - amd64
+  - aarch64
+init: false
+host_network: true
+services:
+  - mqtt:want
+ports:
+  8554/tcp: 8554
+  8555/tcp: 8555
+  9999/udp: 9999
+  58200/udp: 58200
+map:
+  - config:rw
+  - ssl
+options:
+  topic_prefix: bairelay
+  log_level: info
+  cameras: []
+schema:
+  topic_prefix: str
+  log_level: list(info|debug|trace)
+  cameras:
+    - name: match(^[A-Za-z0-9_-]+$)
+      host_or_uid: str
+      password: password
+image: ghcr.io/mgc8/bairelay-hassio-{arch}
