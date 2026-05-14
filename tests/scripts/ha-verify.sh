@@ -32,6 +32,9 @@
 #     tests/scripts/ha-verify.sh --keep-colima # macOS only: leave colima
 #                                              # running on exit even if
 #                                              # we started it
+#     tests/scripts/ha-verify.sh --bairelay-as-container  # run the HA add-on
+#                                              # image instead of cargo-built
+#                                              # bairelay; see docs/testing.md
 #
 # Prerequisites (one-time — see docs/testing.md):
 #   * Linux: docker (or podman with docker shim) reachable as the
@@ -236,7 +239,7 @@ if [ "$AS_CONTAINER" = 1 ]; then
 		--name bairelay-test \
 		-v "$ADDON_DATA_DIR:/data" \
 		-v "$ADDON_CONFIG_DIR:/config" \
-		"$ADDON_IMAGE" >"$OUT_DIR/addon-container.id" \
+		"$ADDON_IMAGE" >/dev/null \
 		|| { fail "failed to launch add-on container"; exit 2; }
 	# Pipe container logs into bairelay.log so the rest of the script
 	# (which greps "Startup wake cycle complete") still works.
