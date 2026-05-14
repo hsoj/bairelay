@@ -1,0 +1,20 @@
+#!/command/with-contenv bashio
+set -eu
+
+bairelay render-hassio-config \
+	--options-json /data/options.json \
+	--overlay /config/bairelay/config.toml \
+	--mqtt-host "$(bashio::services 'mqtt' 'host' || true)" \
+	--mqtt-port "$(bashio::services 'mqtt' 'port' || true)" \
+	--mqtt-user "$(bashio::services 'mqtt' 'username' || true)" \
+	--mqtt-pass "$(bashio::services 'mqtt' 'password' || true)" \
+	--mqtt-ssl  "$(bashio::services 'mqtt' 'ssl' || echo false)" \
+	--output /tmp/bairelay-config.toml
+
+case "$(bashio::config 'log_level')" in
+	debug) export RUST_LOG=bairelay=debug ;;
+	trace) export RUST_LOG=bairelay=trace ;;
+	*)     export RUST_LOG=bairelay=info ;;
+esac
+
+exec /usr/local/bin/bairelay mqtt-rtsp -c /tmp/bairelay-config.toml

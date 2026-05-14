@@ -1,0 +1,5 @@
+#!/command/with-contenv bashio
+bashio::log.info "bairelay service stopped with exit code $1 / signal $2"
+# Exit code 256 tells s6-overlay to bring the container down rather than
+# restart the service — HA Supervisor handles add-on restart policy.
+exit 256
