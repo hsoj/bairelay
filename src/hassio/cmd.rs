@@ -18,8 +18,8 @@ pub fn run(
 ) -> anyhow::Result<()> {
 	let opts_src = std::fs::read_to_string(options_json)
 		.map_err(|e| anyhow::anyhow!("read options.json at {}: {e}", options_json.display()))?;
-	let opts: options::HassioOptions = serde_json::from_str(&opts_src)
-		.map_err(|e| anyhow::anyhow!("parse options.json: {e}"))?;
+	let opts: options::HassioOptions =
+		serde_json::from_str(&opts_src).map_err(|e| anyhow::anyhow!("parse options.json: {e}"))?;
 
 	let mqtt_flags = options::MqttServiceFlags {
 		host: mqtt_host.filter(|s| !s.is_empty()),
