@@ -1,6 +1,8 @@
 ARG BUILD_FROM=ghcr.io/hassio-addons/base:20.1.1
 FROM ${BUILD_FROM}
 
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+
 ARG BAIRELAY_VERSION
 ARG BAIRELAY_SHA256_AMD64
 ARG BAIRELAY_SHA256_AARCH64
