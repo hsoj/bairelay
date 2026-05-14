@@ -55,6 +55,7 @@ set -o pipefail
 CONFIG=""
 NO_BUILD=0
 KEEP_COLIMA=0
+AS_CONTAINER=0
 HA_URL="${HA_URL:-http://localhost:8123}"
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -63,6 +64,9 @@ OUT_DIR="$REPO_ROOT/tests/logs/ha-verify"
 COLIMA_MARKER="$REPO_ROOT/tests/logs/colima.started-by-us"
 TOKEN_FILE="${HA_TOKEN_FILE:-$REPO_ROOT/tests/ha-token}"
 DEFAULT_TEST_CONFIG="$REPO_ROOT/tests/bairelay-test.toml"
+ADDON_DATA_DIR="${ADDON_DATA_DIR:-$REPO_ROOT/tests/logs/addon-test/data}"
+ADDON_CONFIG_DIR="${ADDON_CONFIG_DIR:-$REPO_ROOT/tests/logs/addon-test/config}"
+ADDON_IMAGE="${ADDON_IMAGE:-bairelay-hassio-test:1.1.0}"
 
 # OS detection: colima only exists on macOS.
 case "$(uname -s)" in
@@ -82,6 +86,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		-c|--config) CONFIG="$2"; shift 2 ;;
 		--no-build) NO_BUILD=1; shift ;;
+		--bairelay-as-container) AS_CONTAINER=1; shift ;;
 		--keep-colima) KEEP_COLIMA=1; shift ;;
 		--help|-h) sed -n '3,50p' "$0"; exit 0 ;;
 		*) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -102,6 +107,10 @@ BAIRELAY_PID=""
 
 cleanup() {
 	local rc=$?
+	if [ "$AS_CONTAINER" = 1 ]; then
+		log "stopping bairelay add-on container..."
+		docker rm -f bairelay-test >/dev/null 2>&1 || true
+	fi
 	if [ -n "$BAIRELAY_PID" ] && kill -0 "$BAIRELAY_PID" 2>/dev/null; then
 		log "stopping bairelay (pid $BAIRELAY_PID)..."
 		kill -INT "$BAIRELAY_PID" 2>/dev/null || true
@@ -215,18 +224,39 @@ fi
 
 # -- Start bairelay ------------------------------------------------------
 
-if [ "$NO_BUILD" = 0 ]; then
-	log "building bairelay (release)..."
-	( cd "$REPO_ROOT" && cargo build --release --bin bairelay ) >>"$LOG" 2>&1 \
-		|| { fail "cargo build failed"; exit 2; }
-fi
+if [ "$AS_CONTAINER" = 1 ]; then
+	[ -f "$ADDON_DATA_DIR/options.json" ] \
+		|| { fail "$ADDON_DATA_DIR/options.json missing (need a hand-written Supervisor options.json — see docs/testing.md § HA Add-on verification)"; exit 2; }
+	[ -f "$ADDON_CONFIG_DIR/bairelay/config.toml" ] \
+		|| { fail "$ADDON_CONFIG_DIR/bairelay/config.toml missing — see docs/testing.md § HA Add-on verification"; exit 2; }
 
-log "starting bairelay mqtt-rtsp..."
-# shellcheck disable=SC2086
-RUST_LOG=${RUST_LOG:-bairelay=info,bairelay_rtsp=warn} \
-	nohup "$REPO_ROOT/target/release/bairelay" mqtt-rtsp -c "$CONFIG" > "$BAIRELAY_LOG" 2>&1 &
-BAIRELAY_PID=$!
-log "bairelay pid $BAIRELAY_PID"
+	log "starting bairelay add-on container ($ADDON_IMAGE)..."
+	docker rm -f bairelay-test >/dev/null 2>&1 || true
+	docker run --rm -d --network host \
+		--name bairelay-test \
+		-v "$ADDON_DATA_DIR:/data" \
+		-v "$ADDON_CONFIG_DIR:/config" \
+		"$ADDON_IMAGE" >"$OUT_DIR/addon-container.id" \
+		|| { fail "failed to launch add-on container"; exit 2; }
+	# Pipe container logs into bairelay.log so the rest of the script
+	# (which greps "Startup wake cycle complete") still works.
+	docker logs -f bairelay-test > "$BAIRELAY_LOG" 2>&1 &
+	BAIRELAY_PID=$!
+	log "bairelay container started; log streamer pid $BAIRELAY_PID"
+else
+	if [ "$NO_BUILD" = 0 ]; then
+		log "building bairelay (release)..."
+		( cd "$REPO_ROOT" && cargo build --release --bin bairelay ) >>"$LOG" 2>&1 \
+			|| { fail "cargo build failed"; exit 2; }
+	fi
+
+	log "starting bairelay mqtt-rtsp..."
+	# shellcheck disable=SC2086
+	RUST_LOG=${RUST_LOG:-bairelay=info,bairelay_rtsp=warn} \
+		nohup "$REPO_ROOT/target/release/bairelay" mqtt-rtsp -c "$CONFIG" > "$BAIRELAY_LOG" 2>&1 &
+	BAIRELAY_PID=$!
+	log "bairelay pid $BAIRELAY_PID"
+fi
 
 # Wait for RTSP listener.
 for i in $(seq 1 30); do
