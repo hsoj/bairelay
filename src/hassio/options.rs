@@ -43,9 +43,9 @@ fn default_log_level() -> String {
 
 /// Map the Supervisor-provided HA options and MQTT service flags onto a
 /// bairelay [`Config`]. This is the minimal base; the operator's TOML
-/// overlay (Task A6+) merges on top to fill in fields the HA options form
-/// doesn't expose (CA cert path for MQTT TLS, per-camera username/uid,
-/// discovery settings, etc.).
+/// overlay merges on top to fill in fields the HA options form doesn't
+/// expose (CA cert path for MQTT TLS, per-camera username/uid, discovery
+/// settings, etc.).
 ///
 /// - `mqtt.host == None` leaves `cfg.mqtt = None` so the overlay can supply
 ///   it. Set both `username` and `password` together to populate
@@ -151,6 +151,16 @@ mod tests {
 		assert_eq!(m.broker_addr, "core-mosquitto");
 		assert_eq!(m.port, 1883);
 		assert_eq!(m.topic_prefix, "bairelay");
+		assert_eq!(cfg.cameras[0].address.as_deref(), Some("ABC123"));
+		assert!(cfg.cameras[0].uid.is_none());
+		assert_eq!(cfg.cameras[0].username, "admin");
+		assert_eq!(cfg.cameras[0].password.as_deref(), Some("secret"));
+		let creds = m.credentials.as_ref().expect("creds set");
+		assert_eq!(creds.0, "addons");
+		assert_eq!(creds.1, "pw");
+
+		// Round-trip through validate_config — catches future drift in required-field invariants for free.
+		crate::config::validate_config(&cfg).expect("base config validates");
 	}
 
 	#[test]
@@ -183,8 +193,8 @@ mod tests {
 		// Supervisor may report ssl=true (HA broker on 8883). The minimal
 		// builder ignores it — TLS to MQTT requires a CA cert path the
 		// overlay TOML must supply (`[mqtt] ca = "..."`). This test pins
-		// that the base builder still produces a valid Config; the TOML
-		// overlay layer (Task A6+) is where TLS materialises.
+		// that the base builder still produces a valid Config; the
+		// overlay step is where TLS materialises.
 		let opts = HassioOptions {
 			topic_prefix: "bairelay".into(),
 			log_level: "info".into(),
@@ -202,5 +212,62 @@ mod tests {
 		assert_eq!(m.broker_addr, "broker.example");
 		assert_eq!(m.port, 8883);
 		assert!(m.ca.is_none(), "TLS deferred to overlay");
+	}
+
+	#[test]
+	fn half_set_mqtt_credentials_yields_none() {
+		// Supervisor reports either both username+password or neither;
+		// a half-set tuple is meaningless to the broker. The builder
+		// collapses (Some, None) and (None, Some) to credentials: None
+		// so bairelay's MQTT client connects anonymously rather than
+		// with a malformed credential pair.
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![],
+		};
+		let user_only = MqttServiceFlags {
+			host: Some("b.example".into()),
+			port: Some(1883),
+			username: Some("u".into()),
+			password: None,
+			ssl: false,
+		};
+		let cfg = build_base_config(&opts, &user_only);
+		assert!(
+			cfg.mqtt.as_ref().unwrap().credentials.is_none(),
+			"user-only injection collapses to None"
+		);
+
+		let pass_only = MqttServiceFlags {
+			host: Some("b.example".into()),
+			port: Some(1883),
+			username: None,
+			password: Some("p".into()),
+			ssl: false,
+		};
+		let cfg = build_base_config(&opts, &pass_only);
+		assert!(
+			cfg.mqtt.as_ref().unwrap().credentials.is_none(),
+			"password-only injection collapses to None"
+		);
+	}
+
+	#[test]
+	fn mqtt_port_unset_defaults_to_1883() {
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![],
+		};
+		let mqtt = MqttServiceFlags {
+			host: Some("b.example".into()),
+			port: None,
+			username: None,
+			password: None,
+			ssl: false,
+		};
+		let cfg = build_base_config(&opts, &mqtt);
+		assert_eq!(cfg.mqtt.as_ref().unwrap().port, 1883);
 	}
 }
