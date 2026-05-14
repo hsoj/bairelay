@@ -1,6 +1,8 @@
 #!/command/with-contenv bashio
 set -eu
 
+# Render config to /tmp (tmpfs in add-on containers; regenerated every
+# start). Persisting to /data would let stale config survive options changes.
 bairelay render-hassio-config \
 	--options-json /data/options.json \
 	--overlay /config/bairelay/config.toml \
