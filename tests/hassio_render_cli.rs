@@ -71,6 +71,54 @@ channel_id = 0
 }
 
 #[test]
+fn render_hassio_config_accepts_port_zero_sentinel() {
+	// The s6 entrypoint passes `--mqtt-port 0` when bashio's MQTT
+	// service lookup fails. Verify the binary accepts this and emits
+	// a config with mqtt unset (overlay can fill it in later).
+	let tmp = TempDir::new().unwrap();
+	let opts = tmp.path().join("options.json");
+	let out = tmp.path().join("merged.toml");
+
+	std::fs::write(
+		&opts,
+		r#"{
+			"topic_prefix": "bairelay",
+			"log_level": "info",
+			"cameras": [{"name": "Hallway", "host_or_uid": "ABC123", "password": "secret"}]
+		}"#,
+	)
+	.unwrap();
+
+	Command::cargo_bin("bairelay")
+		.unwrap()
+		.args([
+			"render-hassio-config",
+			"--options-json",
+			opts.to_str().unwrap(),
+			"--mqtt-host",
+			"",
+			"--mqtt-port",
+			"0",
+			"--mqtt-user",
+			"",
+			"--mqtt-pass",
+			"",
+			"--output",
+			out.to_str().unwrap(),
+		])
+		.assert()
+		.success();
+
+	let rendered = std::fs::read_to_string(&out).unwrap();
+	// No [mqtt] block — overlay must supply broker if needed.
+	assert!(
+		!rendered.contains("[mqtt]"),
+		"mqtt should be absent when no service injection"
+	);
+	assert!(rendered.contains("Hallway"));
+}
+
+#[test]
 fn render_hassio_config_fails_on_missing_options_file() {
 	Command::cargo_bin("bairelay")
 		.unwrap()

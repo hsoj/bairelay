@@ -23,7 +23,10 @@ pub fn run(
 
 	let mqtt_flags = options::MqttServiceFlags {
 		host: mqtt_host.filter(|s| !s.is_empty()),
-		port: mqtt_port,
+		// Treat 0 as "unset" — the s6 entrypoint passes `--mqtt-port 0` when
+		// bashio's MQTT service lookup fails (integration uninstalled). Port 0
+		// is meaningless as a client connection target so it's a safe sentinel.
+		port: mqtt_port.filter(|&p| p != 0),
 		username: mqtt_user.filter(|s| !s.is_empty()),
 		password: mqtt_pass.filter(|s| !s.is_empty()),
 		ssl: mqtt_ssl,

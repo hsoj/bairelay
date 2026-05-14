@@ -254,6 +254,30 @@ mod tests {
 	}
 
 	#[test]
+	fn mqtt_port_zero_is_sentinel_for_unset() {
+		// Port 0 from the s6 entrypoint's bashio-fallback path means "no
+		// MQTT integration injected" — the builder should treat it as if
+		// `host` were also empty and produce cfg.mqtt = None.
+		// (Filter happens in cmd::run before build_base_config; this test
+		// pins the contract that the builder TREATS host=None the same
+		// regardless of port value.)
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![],
+		};
+		let mqtt = MqttServiceFlags {
+			host: None,
+			port: Some(0),
+			username: None,
+			password: None,
+			ssl: false,
+		};
+		let cfg = build_base_config(&opts, &mqtt);
+		assert!(cfg.mqtt.is_none(), "host=None overrides any port value");
+	}
+
+	#[test]
 	fn mqtt_port_unset_defaults_to_1883() {
 		let opts = HassioOptions {
 			topic_prefix: "bairelay".into(),

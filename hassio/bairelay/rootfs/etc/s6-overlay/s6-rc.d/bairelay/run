@@ -5,7 +5,7 @@ bairelay render-hassio-config \
 	--options-json /data/options.json \
 	--overlay /config/bairelay/config.toml \
 	--mqtt-host "$(bashio::services 'mqtt' 'host' || true)" \
-	--mqtt-port "$(bashio::services 'mqtt' 'port' || true)" \
+	--mqtt-port "$(bashio::services 'mqtt' 'port' || echo 0)" \
 	--mqtt-user "$(bashio::services 'mqtt' 'username' || true)" \
 	--mqtt-pass "$(bashio::services 'mqtt' 'password' || true)" \
 	--mqtt-ssl  "$(bashio::services 'mqtt' 'ssl' || echo false)" \
