@@ -2,6 +2,18 @@
 
 use serde::Deserialize;
 
+/// Flags supplied by the entrypoint shim from `bashio::services 'mqtt' '<field>'`.
+/// Each field is `None` when Supervisor's MQTT integration isn't installed —
+/// in that case the user's TOML overlay must carry the broker config.
+#[derive(Debug, Clone, Default)]
+pub struct MqttServiceFlags {
+	pub host: Option<String>,
+	pub port: Option<u16>,
+	pub username: Option<String>,
+	pub password: Option<String>,
+	pub ssl: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HassioOptions {
 	#[serde(default = "default_topic_prefix")]
@@ -47,5 +59,15 @@ mod tests {
 		assert_eq!(opts.cameras[0].name, "Hallway");
 		assert_eq!(opts.cameras[0].host_or_uid, "ABC123");
 		assert_eq!(opts.cameras[0].password, "secret");
+	}
+
+	#[test]
+	fn mqtt_service_flags_defaults_to_unset() {
+		let flags = MqttServiceFlags::default();
+		assert!(flags.host.is_none());
+		assert!(flags.port.is_none());
+		assert!(flags.username.is_none());
+		assert!(flags.password.is_none());
+		assert!(!flags.ssl);
 	}
 }
