@@ -229,6 +229,7 @@ main() {
 		echo "version bump + tag on the internal repo. From the internal clone:"
 		echo "    git checkout main && git pull"
 		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm Cargo.toml.bak"
+		echo "    sed -i.bak -E 's/^version: \"$current\"\$/version: \"$new_version\"/' hassio/bairelay/config.yaml && rm hassio/bairelay/config.yaml.bak"
 		echo "    cargo check --workspace --quiet"
 		echo "    git commit -am 'release: $tag'"
 		echo "    git tag -a $tag -m 'Release $tag'"
