@@ -2,6 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::config::{CameraConfig, Config, MqttServerConfig};
+
 /// Flags supplied by the entrypoint shim from `bashio::services 'mqtt' '<field>'`.
 /// Each field is `None` when Supervisor's MQTT integration isn't installed —
 /// in that case the user's TOML overlay must carry the broker config.
@@ -39,6 +41,59 @@ fn default_log_level() -> String {
 	"info".into()
 }
 
+/// Map the Supervisor-provided HA options and MQTT service flags onto a
+/// bairelay [`Config`]. This is the minimal base; the operator's TOML
+/// overlay (Task A6+) merges on top to fill in fields the HA options form
+/// doesn't expose (CA cert path for MQTT TLS, per-camera username/uid,
+/// discovery settings, etc.).
+///
+/// - `mqtt.host == None` leaves `cfg.mqtt = None` so the overlay can supply
+///   it. Set both `username` and `password` together to populate
+///   `credentials`; missing either leaves the broker unauthenticated.
+/// - `mqtt.ssl` is intentionally ignored here — TLS to MQTT requires a CA
+///   path that Supervisor's `bashio::services 'mqtt'` doesn't surface. The
+///   field stays on [`MqttServiceFlags`] for forward-compat.
+/// - Cameras default `username = "admin"` (Reolink's stock account); custom
+///   accounts are an overlay concern.
+/// - HA's single `host_or_uid` field always lands in `address`. UID-based
+///   discovery (populating `uid` and adjusting `discovery`) is overlay-only.
+pub fn build_base_config(opts: &HassioOptions, mqtt: &MqttServiceFlags) -> Config {
+	let mut cfg = Config::default();
+
+	if let Some(host) = &mqtt.host {
+		let credentials = match (&mqtt.username, &mqtt.password) {
+			(Some(u), Some(p)) => Some((u.clone(), p.clone())),
+			_ => None,
+		};
+		cfg.mqtt = Some(MqttServerConfig {
+			broker_addr: host.clone(),
+			port: mqtt.port.unwrap_or(1883),
+			credentials,
+			ca: None,
+			client_auth: None,
+			topic_prefix: opts.topic_prefix.clone(),
+			discovery: None,
+		});
+	}
+
+	cfg.cameras = opts
+		.cameras
+		.iter()
+		.map(|c| CameraConfig {
+			name: c.name.clone(),
+			address: Some(c.host_or_uid.clone()),
+			uid: None,
+			// Reolink's stock username on fresh cameras; overlay TOML
+			// is the escape hatch for non-default accounts.
+			username: "admin".to_string(),
+			password: Some(c.password.clone()),
+			..CameraConfig::default()
+		})
+		.collect();
+
+	cfg
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -69,5 +124,32 @@ mod tests {
 		assert!(flags.username.is_none());
 		assert!(flags.password.is_none());
 		assert!(!flags.ssl);
+	}
+
+	#[test]
+	fn builds_base_config_with_cameras_and_mqtt() {
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![HassioCamera {
+				name: "Hallway".into(),
+				host_or_uid: "ABC123".into(),
+				password: "secret".into(),
+			}],
+		};
+		let mqtt = MqttServiceFlags {
+			host: Some("core-mosquitto".into()),
+			port: Some(1883),
+			username: Some("addons".into()),
+			password: Some("pw".into()),
+			ssl: false,
+		};
+		let cfg = build_base_config(&opts, &mqtt);
+		assert_eq!(cfg.cameras.len(), 1);
+		assert_eq!(cfg.cameras[0].name, "Hallway");
+		let m = cfg.mqtt.as_ref().expect("mqtt set");
+		assert_eq!(m.broker_addr, "core-mosquitto");
+		assert_eq!(m.port, 1883);
+		assert_eq!(m.topic_prefix, "bairelay");
 	}
 }
