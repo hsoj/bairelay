@@ -77,6 +77,14 @@ pub fn merge_cameras(base: Vec<CameraConfig>, overlay: Vec<CameraConfig>) -> Vec
 	out
 }
 
+/// Top-level merge: combines top-level fields + cameras into one [`Config`].
+pub fn merge(base: Config, overlay: Config) -> Config {
+	let cameras = merge_cameras(base.cameras.clone(), overlay.cameras.clone());
+	let mut merged = merge_top_level(base, overlay);
+	merged.cameras = cameras;
+	merged
+}
+
 /// Merge top-level fields from `overlay` into `base`. Overlay values
 /// that differ from the type's default win; defaults are passthrough.
 /// `cameras` is handled separately by [`merge_cameras`].
@@ -230,6 +238,46 @@ mod tests {
 		let merged = merge_cameras(base_cams, overlay_cams);
 		assert_eq!(merged[0].pause.gap_threshold_secs, 5.0);
 		assert_eq!(merged[0].address.as_deref(), Some("ABC123"));
+	}
+
+	#[test]
+	fn end_to_end_merge_validates_clean() {
+		use crate::hassio::options::{
+			build_base_config, HassioCamera, HassioOptions, MqttServiceFlags,
+		};
+
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![HassioCamera {
+				name: "Hallway".into(),
+				host_or_uid: "ABC123".into(),
+				password: "secret".into(),
+			}],
+		};
+		let mqtt = MqttServiceFlags {
+			host: Some("core-mosquitto".into()),
+			port: Some(1883),
+			username: Some("addons".into()),
+			password: Some("pw".into()),
+			ssl: false,
+		};
+		let overlay = parse_overlay(
+			r#"
+			cameras = []
+
+			[wake_server]
+			enable = true
+		"#,
+		)
+		.unwrap();
+
+		let base = build_base_config(&opts, &mqtt);
+		let merged = merge(base, overlay);
+		assert!(merged.wake_server.is_some());
+		assert_eq!(merged.cameras.len(), 1);
+
+		crate::config::validate_config(&merged).expect("merged config validates");
 	}
 
 	#[test]
