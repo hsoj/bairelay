@@ -1,19 +1,36 @@
 #!/command/with-contenv bashio
 set -eu
 
+# Bashio errors to /dev/null: when the MQTT broker add-on isn't installed,
+# bashio::services prints "Service not enabled" for every call. The script's
+# `|| ...` fallbacks already handle the absent service; the messages are
+# just noise.
+
+MQTT_HOST="$(bashio::services 'mqtt' 'host' 2>/dev/null || true)"
+MQTT_PORT="$(bashio::services 'mqtt' 'port' 2>/dev/null || echo 0)"
+MQTT_USER="$(bashio::services 'mqtt' 'username' 2>/dev/null || true)"
+MQTT_PASS="$(bashio::services 'mqtt' 'password' 2>/dev/null || true)"
+
+# `--mqtt-ssl` is a flag (no value). Pass it only when bashio reports ssl=true.
+SSL_FLAG=""
+if [ "$(bashio::services 'mqtt' 'ssl' 2>/dev/null || true)" = "true" ]; then
+	SSL_FLAG="--mqtt-ssl"
+fi
+
 # Render config to /tmp (tmpfs in add-on containers; regenerated every
 # start). Persisting to /data would let stale config survive options changes.
+# shellcheck disable=SC2086
 bairelay render-hassio-config \
 	--options-json /data/options.json \
 	--overlay /homeassistant_config/bairelay/config.toml \
-	--mqtt-host "$(bashio::services 'mqtt' 'host' || true)" \
-	--mqtt-port "$(bashio::services 'mqtt' 'port' || echo 0)" \
-	--mqtt-user "$(bashio::services 'mqtt' 'username' || true)" \
-	--mqtt-pass "$(bashio::services 'mqtt' 'password' || true)" \
-	--mqtt-ssl  "$(bashio::services 'mqtt' 'ssl' || echo false)" \
+	--mqtt-host "$MQTT_HOST" \
+	--mqtt-port "$MQTT_PORT" \
+	--mqtt-user "$MQTT_USER" \
+	--mqtt-pass "$MQTT_PASS" \
+	$SSL_FLAG \
 	--output /tmp/bairelay-config.toml
 
-case "$(bashio::config 'log_level')" in
+case "$(bashio::config 'log_level' 2>/dev/null || echo info)" in
 	debug) export RUST_LOG=bairelay=debug ;;
 	trace) export RUST_LOG=bairelay=trace ;;
 	*)     export RUST_LOG=bairelay=info ;;
