@@ -10,8 +10,8 @@ ARG TARGETARCH
 
 RUN set -eu \
 	&& case "$TARGETARCH" in \
-		amd64)   SUFFIX="x86_64-linux";  SHA="$BAIRELAY_SHA256_AMD64" ;; \
-		aarch64) SUFFIX="aarch64-linux"; SHA="$BAIRELAY_SHA256_AARCH64" ;; \
+		amd64)         SUFFIX="x86_64-linux";  SHA="$BAIRELAY_SHA256_AMD64" ;; \
+		arm64|aarch64) SUFFIX="aarch64-linux"; SHA="$BAIRELAY_SHA256_AARCH64" ;; \
 		*) echo "unsupported arch: $TARGETARCH"; exit 1 ;; \
 	   esac \
 	&& URL="https://github.com/mgc8/bairelay/releases/download/v${BAIRELAY_VERSION}/bairelay-v${BAIRELAY_VERSION}-${SUFFIX}.tar.gz" \
