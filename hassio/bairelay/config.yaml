@@ -27,6 +27,9 @@ schema:
   log_level: list(info|debug|trace)
   cameras:
     - name: match(^[A-Za-z0-9_-]+$)
-      host_or_uid: str
+      address: str?
+      uid: str?
+      username: str?
       password: password
+      idle_disconnect: bool?
 image: ghcr.io/mgc8/bairelay-hassio-{arch}

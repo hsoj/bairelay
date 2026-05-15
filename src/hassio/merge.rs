@@ -283,8 +283,11 @@ mod tests {
 			log_level: "info".into(),
 			cameras: vec![HassioCamera {
 				name: "Hallway".into(),
-				host_or_uid: "ABC123".into(),
+				address: Some("192.168.1.50".into()),
+				uid: None,
+				username: "admin".into(),
 				password: "secret".into(),
+				idle_disconnect: true,
 			}],
 		};
 		let mqtt = MqttServiceFlags {

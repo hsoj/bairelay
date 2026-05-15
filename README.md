@@ -117,7 +117,7 @@ On a Home Assistant OS or Supervised installation (HA 2026.2+ — add-ons were r
 1. Settings → Apps → **Install app** (bottom-right) → ⋮ (top-right) → Repositories.
 2. Paste `https://github.com/mgc8/bairelay` → Add.
 3. Install the **Bairelay** app that appears in the list.
-4. Configuration tab → set `topic_prefix` (default `bairelay`) and add one entry per camera (`name`, `host_or_uid`, `password`).
+4. Configuration tab → set `topic_prefix` (default `bairelay`) and add one entry per camera (`name`, one of `address` or `uid`, `username`, `password`).
 5. Start. Advanced settings (TLS, wake server, push listener, per-camera floodlight / PIR / pause) live in a `/config/bairelay/config.toml` overlay — see the app's Documentation tab.
 
 The HA MQTT integration is auto-discovered via `services: ["mqtt:want"]`. The app is published per-arch at `ghcr.io/mgc8/bairelay-hassio-{amd64,aarch64}` on every release; HA Container / Core installations without the Supervisor must use the cargo-build path above.

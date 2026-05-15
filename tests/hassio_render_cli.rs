@@ -17,7 +17,7 @@ fn render_hassio_config_produces_valid_config() {
 		r#"{
 			"topic_prefix": "bairelay",
 			"log_level": "info",
-			"cameras": [{"name": "Hallway", "host_or_uid": "ABC123", "password": "secret"}]
+			"cameras": [{"name": "Hallway", "address": "192.168.1.50", "password": "secret"}]
 		}"#,
 	)
 	.unwrap();
@@ -84,7 +84,7 @@ fn render_hassio_config_accepts_port_zero_sentinel() {
 		r#"{
 			"topic_prefix": "bairelay",
 			"log_level": "info",
-			"cameras": [{"name": "Hallway", "host_or_uid": "ABC123", "password": "secret"}]
+			"cameras": [{"name": "Hallway", "address": "192.168.1.50", "password": "secret"}]
 		}"#,
 	)
 	.unwrap();

@@ -475,7 +475,7 @@ Prerequisites:
       "topic_prefix": "bairelay",
       "log_level": "info",
       "cameras": [
-        {"name": "TestCamera", "host_or_uid": "192.168.1.50", "password": "<password>"}
+        {"name": "TestCamera", "address": "192.168.1.50", "password": "<password>"}
       ]
     }
     ```
@@ -502,7 +502,7 @@ Steps:
 1. Boot HA OS in QEMU (see Home Assistant's "Developer install on QEMU" documentation). Alternatively, install HA Supervised on a spare Debian box. HA 2026.2+ uses the "Apps" terminology (formerly "Add-ons"); the steps below assume the current UI.
 2. Settings → Apps → Install app (bottom-right) → ⋮ (top-right) → Repositories → paste `https://github.com/mgc8/bairelay` → Add.
 3. The Bairelay app appears in the list (from the custom repo just added). Click it → Install.
-4. Configuration tab → fill in `topic_prefix`, `log_level`, and at least one camera entry (name, host_or_uid, password). Save.
+4. Configuration tab → fill in `topic_prefix`, `log_level`, and at least one camera entry (`name`, one of `address` / `uid`, `username`, `password`). Save.
 5. Optional: drop a `/config/bairelay/config.toml` overlay via the File editor app or SSH.
 6. Start. Verify the app stays running (Log tab shows `bairelay starting version=X.Y.Z` and no immediate exit).
 7. Confirm MQTT entities appear in HA exactly as `ha-verify.sh` expects (same `homeassistant/.../config` discovery payloads, same entity IDs).

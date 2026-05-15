@@ -29,8 +29,23 @@ pub struct HassioOptions {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HassioCamera {
 	pub name: String,
-	pub host_or_uid: String,
+	#[serde(default)]
+	pub address: Option<String>,
+	#[serde(default)]
+	pub uid: Option<String>,
+	#[serde(default = "default_username")]
+	pub username: String,
 	pub password: String,
+	#[serde(default = "default_idle_disconnect")]
+	pub idle_disconnect: bool,
+}
+
+fn default_username() -> String {
+	"admin".into()
+}
+
+fn default_idle_disconnect() -> bool {
+	true
 }
 
 fn default_topic_prefix() -> String {
@@ -53,10 +68,11 @@ fn default_log_level() -> String {
 /// - `mqtt.ssl` is intentionally ignored here — TLS to MQTT requires a CA
 ///   path that Supervisor's `bashio::services 'mqtt'` doesn't surface. The
 ///   field stays on [`MqttServiceFlags`] for forward-compat.
-/// - Cameras default `username = "admin"` (Reolink's stock account); custom
-///   accounts are an overlay concern.
-/// - HA's single `host_or_uid` field always lands in `address`. UID-based
-///   discovery (populating `uid` and adjusting `discovery`) is overlay-only.
+/// - Each camera carries `address` + `uid` as separate optional fields,
+///   mirroring [`CameraConfig`]. Empty strings collapse to `None` so a
+///   blank form field doesn't masquerade as a configured value.
+/// - `username` defaults to `"admin"` (Reolink's stock account) when the
+///   field isn't supplied.
 pub fn build_base_config(opts: &HassioOptions, mqtt: &MqttServiceFlags) -> Config {
 	let mut cfg = Config::default();
 
@@ -81,12 +97,11 @@ pub fn build_base_config(opts: &HassioOptions, mqtt: &MqttServiceFlags) -> Confi
 		.iter()
 		.map(|c| CameraConfig {
 			name: c.name.clone(),
-			address: Some(c.host_or_uid.clone()),
-			uid: None,
-			// Reolink's stock username on fresh cameras; overlay TOML
-			// is the escape hatch for non-default accounts.
-			username: "admin".to_string(),
+			address: c.address.clone().filter(|s| !s.is_empty()),
+			uid: c.uid.clone().filter(|s| !s.is_empty()),
+			username: c.username.clone(),
 			password: Some(c.password.clone()),
+			idle_disconnect: c.idle_disconnect,
 			..CameraConfig::default()
 		})
 		.collect();
@@ -104,7 +119,7 @@ mod tests {
 			"topic_prefix": "bairelay",
 			"log_level": "info",
 			"cameras": [
-				{"name": "Hallway", "host_or_uid": "ABC123", "password": "secret"}
+				{"name": "Hallway", "address": "192.168.1.50", "password": "secret"}
 			]
 		}"#;
 		let opts: HassioOptions = serde_json::from_str(json).unwrap();
@@ -112,8 +127,26 @@ mod tests {
 		assert_eq!(opts.log_level, "info");
 		assert_eq!(opts.cameras.len(), 1);
 		assert_eq!(opts.cameras[0].name, "Hallway");
-		assert_eq!(opts.cameras[0].host_or_uid, "ABC123");
+		assert_eq!(opts.cameras[0].address.as_deref(), Some("192.168.1.50"));
+		assert!(opts.cameras[0].uid.is_none());
+		assert_eq!(opts.cameras[0].username, "admin");
 		assert_eq!(opts.cameras[0].password, "secret");
+		assert!(opts.cameras[0].idle_disconnect, "default true");
+	}
+
+	#[test]
+	fn parses_options_json_with_uid_and_custom_username() {
+		let json = r#"{
+			"topic_prefix": "bairelay",
+			"log_level": "info",
+			"cameras": [
+				{"name": "Garage", "uid": "9527000ABCDEF123", "username": "operator", "password": "pw"}
+			]
+		}"#;
+		let opts: HassioOptions = serde_json::from_str(json).unwrap();
+		assert!(opts.cameras[0].address.is_none());
+		assert_eq!(opts.cameras[0].uid.as_deref(), Some("9527000ABCDEF123"));
+		assert_eq!(opts.cameras[0].username, "operator");
 	}
 
 	#[test]
@@ -133,8 +166,11 @@ mod tests {
 			log_level: "info".into(),
 			cameras: vec![HassioCamera {
 				name: "Hallway".into(),
-				host_or_uid: "ABC123".into(),
+				address: Some("192.168.1.50".into()),
+				uid: None,
+				username: "admin".into(),
 				password: "secret".into(),
+				idle_disconnect: true,
 			}],
 		};
 		let mqtt = MqttServiceFlags {
@@ -151,7 +187,7 @@ mod tests {
 		assert_eq!(m.broker_addr, "core-mosquitto");
 		assert_eq!(m.port, 1883);
 		assert_eq!(m.topic_prefix, "bairelay");
-		assert_eq!(cfg.cameras[0].address.as_deref(), Some("ABC123"));
+		assert_eq!(cfg.cameras[0].address.as_deref(), Some("192.168.1.50"));
 		assert!(cfg.cameras[0].uid.is_none());
 		assert_eq!(cfg.cameras[0].username, "admin");
 		assert_eq!(cfg.cameras[0].password.as_deref(), Some("secret"));
@@ -161,6 +197,48 @@ mod tests {
 
 		// Round-trip through validate_config — catches future drift in required-field invariants for free.
 		crate::config::validate_config(&cfg).expect("base config validates");
+	}
+
+	#[test]
+	fn uid_camera_routes_to_uid_field_not_address() {
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![HassioCamera {
+				name: "Garage".into(),
+				address: None,
+				uid: Some("9527000ABCDEF123".into()),
+				username: "admin".into(),
+				password: "p".into(),
+				idle_disconnect: true,
+			}],
+		};
+		let cfg = build_base_config(&opts, &MqttServiceFlags::default());
+		assert!(cfg.cameras[0].address.is_none());
+		assert_eq!(cfg.cameras[0].uid.as_deref(), Some("9527000ABCDEF123"));
+		crate::config::validate_config(&cfg).expect("uid-only camera validates");
+	}
+
+	#[test]
+	fn empty_address_and_uid_collapse_to_none() {
+		// HA forms submit empty strings rather than null when a field is
+		// left blank; we filter them so validate_config doesn't see
+		// Some("") (which it accepts but bairelay's connect path can't use).
+		let opts = HassioOptions {
+			topic_prefix: "bairelay".into(),
+			log_level: "info".into(),
+			cameras: vec![HassioCamera {
+				name: "Cam".into(),
+				address: Some("".into()),
+				uid: Some("ABC".into()),
+				username: "admin".into(),
+				password: "p".into(),
+				idle_disconnect: true,
+			}],
+		};
+		let cfg = build_base_config(&opts, &MqttServiceFlags::default());
+		assert!(cfg.cameras[0].address.is_none());
+		assert_eq!(cfg.cameras[0].uid.as_deref(), Some("ABC"));
 	}
 
 	#[test]

@@ -19,19 +19,24 @@ Bairelay bridges Reolink battery cameras (Argus-class) to standard protocols. It
 |-------|------|-------------|
 | `topic_prefix` | string | MQTT topic root, default `bairelay`. Set to `neolink` for drop-in compatibility with an existing neolink deployment. |
 | `log_level` | enum: `info` / `debug` / `trace` | Default `info`. `debug` surfaces protocol-level traces; `trace` is everything. |
-| `cameras` | list | One entry per camera. Each entry has `name`, `host_or_uid`, `password`. |
+| `cameras` | list | One entry per camera. Each entry has the sub-fields below. |
 
 Each camera entry:
 
-| Sub-field | Description |
-|-----------|-------------|
-| `name` | Alphanumeric, underscore, or hyphen. Used as the camera's MQTT topic segment and HA entity name. |
-| `host_or_uid` | The camera's LAN IP (e.g. `192.168.1.50`) or its Reolink P2P UID (16 alphanumeric characters). |
-| `password` | The camera's `admin` account password. |
+| Sub-field | Required | Description |
+|-----------|----------|-------------|
+| `name` | yes | Alphanumeric, underscore, or hyphen. Used as the camera's MQTT topic segment and HA entity name. |
+| `address` | one of address/uid | LAN IP or hostname (e.g. `192.168.1.50`). Leave blank if using `uid`. |
+| `uid` | one of address/uid | Reolink P2P UID (16 alphanumeric characters, e.g. `9527000ABCDEF123`). Leave blank if using `address`. |
+| `username` | no | Camera account username. Defaults to `admin` (Reolink's stock account). |
+| `password` | yes | The camera account password. |
+| `idle_disconnect` | no | Drop the camera connection when no clients are streaming, letting battery cameras sleep. Defaults to `true`. Turn off for always-on cameras you want kept warm. |
+
+Fill in exactly one of `address` or `uid` per camera. If both are present, `uid` is used and `address` is ignored.
 
 ## Configuration: TOML overlay
 
-The HA options form collects only the three fields per camera. Everything else — TLS, wake server, push listener, per-camera floodlight / PIR / pause / gap-bridging, a custom RTSP port, and so on — lives in a TOML overlay file at `/config/bairelay/config.toml`.
+Settings the HA options form doesn't expose — TLS, wake server, push listener, per-camera floodlight / PIR / pause / gap-bridging, discovery mode, a custom RTSP port — live in a TOML overlay file at `/config/bairelay/config.toml`.
 
 - Use the HA **File editor** add-on or SSH to create and edit it.
 - The overlay is merged on top of the HA options. Cameras are matched by `name`; overlay fields override base fields.
