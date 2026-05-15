@@ -228,12 +228,14 @@ main() {
 		echo "Reminder: if you ran this from the public clone, mirror the"
 		echo "version bump + tag on the internal repo. From the internal clone:"
 		echo "    git checkout main && git pull"
-		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm Cargo.toml.bak"
-		echo "    sed -i.bak -E 's/^version: \"$current\"\$/version: \"$new_version\"/' hassio/bairelay/config.yaml && rm hassio/bairelay/config.yaml.bak"
+		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm -f Cargo.toml.bak"
+		echo "    sed -i.bak -E 's/^version: \"$current\"\$/version: \"$new_version\"/' hassio/bairelay/config.yaml && rm -f hassio/bairelay/config.yaml.bak"
 		echo "    cargo check --workspace --quiet"
+		echo "    cp <public> CHANGELOG.md"
 		echo "    git commit -am 'release: $tag'"
 		echo "    git tag -a $tag -m 'Release $tag'"
 		echo "    git push origin main $tag"
+		echo "    scripts/makepatch.sh --mark"
 	else
 		echo
 		echo "Stopped before push. To push later:"
