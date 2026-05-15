@@ -499,14 +499,14 @@ Path: HA OS in QEMU, or HA Supervised on a spare Debian host. Not a CI gate; a m
 
 Steps:
 
-1. Boot HA OS in QEMU (see Home Assistant's "Developer install on QEMU" documentation). Alternatively, install HA Supervised on a spare Debian box.
-2. Settings → Add-ons → Add-on Store → ⋮ → Repositories → paste `https://github.com/mgc8/bairelay` → Add.
-3. The Bairelay add-on appears under "Local add-ons" (when added from a custom repo). Click it → Install.
+1. Boot HA OS in QEMU (see Home Assistant's "Developer install on QEMU" documentation). Alternatively, install HA Supervised on a spare Debian box. HA 2026.2+ uses the "Apps" terminology (formerly "Add-ons"); the steps below assume the current UI.
+2. Settings → Apps → Install app (bottom-right) → ⋮ (top-right) → Repositories → paste `https://github.com/mgc8/bairelay` → Add.
+3. The Bairelay app appears in the list (from the custom repo just added). Click it → Install.
 4. Configuration tab → fill in `topic_prefix`, `log_level`, and at least one camera entry (name, host_or_uid, password). Save.
-5. Optional: drop a `/config/bairelay/config.toml` overlay via the File Editor add-on or SSH.
-6. Start. Verify the add-on stays running (Log tab shows `bairelay starting version=X.Y.Z` and no immediate exit).
+5. Optional: drop a `/config/bairelay/config.toml` overlay via the File editor app or SSH.
+6. Start. Verify the app stays running (Log tab shows `bairelay starting version=X.Y.Z` and no immediate exit).
 7. Confirm MQTT entities appear in HA exactly as `ha-verify.sh` expects (same `homeassistant/.../config` discovery payloads, same entity IDs).
-8. Stop the add-on. Uninstall. Verify clean removal (retained MQTT discovery topics are unpublished).
+8. Stop the app. Uninstall. Verify clean removal (retained MQTT discovery topics are unpublished).
 
 Issues at this surface are usually:
 

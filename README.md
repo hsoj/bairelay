@@ -110,17 +110,17 @@ cargo build --release
 
 The binary lands at `target/release/bairelay`. Copy it wherever you run services from (`~/bin`, `/usr/local/bin`, a systemd unit's `ExecStart`, a Docker image — your choice).
 
-### Install as Home Assistant Add-On
+### Install as a Home Assistant App
 
-On a Home Assistant OS or Supervised installation:
+On a Home Assistant OS or Supervised installation (HA 2026.2+ — add-ons were renamed to apps):
 
-1. Settings → Add-ons → Add-on Store → ⋮ (top right) → Repositories.
+1. Settings → Apps → **Install app** (bottom-right) → ⋮ (top-right) → Repositories.
 2. Paste `https://github.com/mgc8/bairelay` → Add.
-3. Install the **Bairelay** add-on that appears in the list.
+3. Install the **Bairelay** app that appears in the list.
 4. Configuration tab → set `topic_prefix` (default `bairelay`) and add one entry per camera (`name`, `host_or_uid`, `password`).
-5. Start. Advanced settings (TLS, wake server, push listener, per-camera floodlight / PIR / pause) live in a `/config/bairelay/config.toml` overlay — see the add-on's Documentation tab.
+5. Start. Advanced settings (TLS, wake server, push listener, per-camera floodlight / PIR / pause) live in a `/config/bairelay/config.toml` overlay — see the app's Documentation tab.
 
-The HA MQTT integration is auto-discovered via `services: ["mqtt:want"]`. The add-on is published per-arch at `ghcr.io/mgc8/bairelay-hassio-{amd64,aarch64}` on every release; HA Container / Core / Supervised installations without the Supervisor must use the cargo-build path above.
+The HA MQTT integration is auto-discovered via `services: ["mqtt:want"]`. The app is published per-arch at `ghcr.io/mgc8/bairelay-hassio-{amd64,aarch64}` on every release; HA Container / Core installations without the Supervisor must use the cargo-build path above.
 
 ### Run
 

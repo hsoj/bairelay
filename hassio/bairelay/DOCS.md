@@ -6,10 +6,10 @@ Bairelay bridges Reolink battery cameras (Argus-class) to standard protocols. It
 
 ## Installation
 
-- Open the HA Add-on Store: **Settings → Add-ons → Add-on Store**.
+- Go to **Settings → Apps** and click **Install app** (bottom-right).
 - Click the three-dot menu (⋮) → **Repositories**.
 - Paste `https://github.com/mgc8/bairelay` and click **Add**.
-- The Bairelay add-on appears. Click it, then **Install**.
+- The Bairelay app appears in the list. Click it, then **Install**.
 - Switch to the **Configuration** tab and fill in the three options fields (`topic_prefix`, `log_level`, `cameras` list).
 - **Start**. The add-on automatically uses HA's Mosquitto integration; no broker config is needed if MQTT is already set up in HA.
 
