@@ -88,7 +88,18 @@ pub fn build_base_config(opts: &HassioOptions, mqtt: &MqttServiceFlags) -> Confi
 			ca: None,
 			client_auth: None,
 			topic_prefix: opts.topic_prefix.clone(),
-			discovery: None,
+			// HA MQTT discovery is the whole point of running bairelay as
+			// an HA app — auto-enable so entities show up without the
+			// operator hand-editing the overlay. Override by setting a
+			// different `[mqtt.discovery] topic` in the overlay, or
+			// remove the `[mqtt]` block entirely to run RTSP-only.
+			discovery: Some(crate::config::MqttDiscoveryConfig {
+				topic: "homeassistant".into(),
+				features: bairelay_mqtt::discovery::Feature::ALL
+					.iter()
+					.copied()
+					.collect(),
+			}),
 		});
 	}
 

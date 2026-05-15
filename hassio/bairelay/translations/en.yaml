@@ -1,0 +1,35 @@
+configuration:
+  topic_prefix:
+    name: MQTT Topic Prefix
+    description: Root segment for every owned MQTT topic and HA discovery identifier. Defaults to "bairelay"; set to "neolink" for drop-in compatibility with an existing Neolink deployment.
+  log_level:
+    name: Log Level
+    description: Set "debug" to see protocol-level traces, "trace" for per-packet detail. Leave at "info" unless troubleshooting.
+  cameras:
+    name: Cameras
+    description: One entry per camera. Fill in either an Address (LAN-direct connect) or a UID (Reolink P2P). Username and password are the camera's account credentials.
+    fields:
+      name:
+        name: Name
+        description: Alphanumeric, underscore, or hyphen. Used as the camera's MQTT topic segment and Home Assistant entity name.
+      address:
+        name: Address
+        description: LAN IP or hostname of the camera, e.g. "192.168.1.50". Leave blank if using a UID.
+      uid:
+        name: UID
+        description: Reolink P2P UID (16 alphanumeric characters). Leave blank if using an Address.
+      username:
+        name: Username
+        description: Camera account username. Defaults to "admin" (Reolink's stock account).
+      password:
+        name: Password
+        description: Camera account password.
+      idle_disconnect:
+        name: Idle Disconnect
+        description: Drop the camera connection when no RTSP clients are streaming, letting battery cameras sleep. Turn off for always-on cameras you want kept warm.
+
+network:
+  8554/tcp: Plain RTSP port (always on).
+  8555/tcp: TLS RTSP port (active only when a certificate is configured in the overlay).
+  9999/udp: Wake-server middleman listener (active when [wake_server] is enabled in the overlay).
+  58200/udp: Wake-server registration listener (active when [wake_server] is enabled in the overlay).

@@ -3,7 +3,33 @@
 use crate::config::{CameraConfig, Config, MqttServerConfig};
 
 pub fn parse_overlay(toml_src: &str) -> Result<Config, String> {
-	toml::from_str(toml_src).map_err(|e| format!("overlay parse error: {e}"))
+	// `Config::cameras` and `CameraConfig::username` are non-default at the
+	// parser level (they're always supplied by users editing the regular
+	// `config.toml`), but the HA overlay describes only the deltas the
+	// operator wants on top of the form-driven base. Two common cases:
+	//
+	// - A cameras-free overlay (top-level settings only) — inject an empty
+	//   `cameras = []`.
+	// - A `[[cameras]]` entry that overrides one field but doesn't restate
+	//   `username` — inject `username = ""`. The merge logic preserves
+	//   the base's username when the overlay's is empty.
+	let mut doc: toml::Value =
+		toml::from_str(toml_src).map_err(|e| format!("overlay parse error: {e}"))?;
+	if let Some(table) = doc.as_table_mut() {
+		table
+			.entry("cameras")
+			.or_insert_with(|| toml::Value::Array(Vec::new()));
+		if let Some(toml::Value::Array(cams)) = table.get_mut("cameras") {
+			for cam in cams {
+				if let Some(t) = cam.as_table_mut() {
+					t.entry("username")
+						.or_insert_with(|| toml::Value::String(String::new()));
+				}
+			}
+		}
+	}
+	doc.try_into()
+		.map_err(|e| format!("overlay parse error: {e}"))
 }
 
 /// Overlay a single non-`name` field from `over` onto `entry`. The variant
@@ -183,6 +209,37 @@ mod tests {
 	fn rejects_malformed_toml() {
 		let src = "not = valid =";
 		assert!(parse_overlay(src).is_err());
+	}
+
+	#[test]
+	fn overlay_without_cameras_defaults_to_empty() {
+		// HA-app templates carry only top-level settings + commented examples.
+		// The required `cameras` field must be auto-supplied so they parse.
+		let src = r#"
+			bind = "0.0.0.0"
+			[wake_server]
+			enable = true
+		"#;
+		let cfg = parse_overlay(src).expect("parse ok");
+		assert!(cfg.cameras.is_empty());
+		assert!(cfg.wake_server.is_some());
+	}
+
+	#[test]
+	fn overlay_camera_without_username_parses() {
+		// An operator overrides one per-camera field (e.g. discovery) but
+		// doesn't restate `username`. The form base already supplied it;
+		// the overlay must parse + leave the base's value untouched.
+		let src = r#"
+			[[cameras]]
+			name = "Cam1"
+			discovery = "local"
+		"#;
+		let cfg = parse_overlay(src).expect("parse ok");
+		assert_eq!(cfg.cameras.len(), 1);
+		assert_eq!(cfg.cameras[0].name, "Cam1");
+		// Empty username is the injected sentinel; merge preserves base.
+		assert_eq!(cfg.cameras[0].username, "");
 	}
 
 	#[test]

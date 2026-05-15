@@ -10,8 +10,8 @@ Bairelay bridges Reolink battery cameras (Argus-class) to standard protocols. It
 - Click the three-dot menu (⋮) → **Repositories**.
 - Paste `https://github.com/mgc8/bairelay` and click **Add**.
 - The Bairelay app appears in the list. Click it, then **Install**.
-- Switch to the **Configuration** tab and fill in the three options fields (`topic_prefix`, `log_level`, `cameras` list).
-- **Start**. The add-on automatically uses HA's Mosquitto integration; no broker config is needed if MQTT is already set up in HA.
+- Switch to the **Configuration** tab and fill in `topic_prefix`, `log_level`, and one entry per camera.
+- **Start**. The app picks up HA's Mosquitto integration automatically (broker, port, credentials) and auto-publishes Home Assistant MQTT discovery payloads under the `homeassistant/` prefix — entities show up in HA without further configuration.
 
 ## Configuration: options form
 
@@ -34,37 +34,31 @@ Each camera entry:
 
 Fill in exactly one of `address` or `uid` per camera. If both are present, `uid` is used and `address` is ignored.
 
-## Configuration: TOML overlay
+## Configuration: TOML file
 
-Settings the HA options form doesn't expose — TLS, wake server, push listener, per-camera floodlight / PIR / pause / gap-bridging, discovery mode, a custom RTSP port — live in a TOML overlay file at `/config/bairelay/config.toml`.
+The full, editable configuration lives at `/config/bairelay/config.toml`. On the app's first start, bairelay writes an annotated template there with every available option documented inline. After that, the file is yours — bairelay never rewrites it.
 
-- Use the HA **File editor** add-on or SSH to create and edit it.
-- The overlay is merged on top of the HA options. Cameras are matched by `name`; overlay fields override base fields.
-- See `sample_config.toml` in the bairelay repo for the full list of available settings: <https://github.com/mgc8/bairelay/blob/main/sample_config.toml>.
+- Use the **File editor** app, the **Terminal** app, or SSH to edit it.
+- On every start, bairelay merges the options form (base) with this file (overlay). The file overrides the form field-by-field; cameras are matched by `name`.
+- MQTT broker credentials from HA's Mosquitto integration are auto-injected at startup. To use an external broker instead, add a full `[mqtt]` block to the file.
+- HA MQTT discovery is enabled by default with topic prefix `homeassistant`. To opt out or change the prefix, add `[mqtt.discovery] topic = "your-prefix"` or remove the `[mqtt]` block entirely (RTSP-only mode).
+- The exact merged configuration bairelay loaded is written to `/config/bairelay/effective.toml` on every start (read-only diagnostic; defaults stripped so you see only what's actually set). Don't edit that file — your changes will be overwritten next restart.
+- For the canonical reference, see `sample_config.toml` in the bairelay repo: <https://github.com/mgc8/bairelay/blob/main/sample_config.toml>.
 
-## Worked example: TOML overlay
+## Worked example
 
-A minimal overlay that enables the wake server and turns on the floodlight for one camera:
+To enable the wake server and turn on the floodlight on a camera called `Hallway` (already configured in the form), add this to `/config/bairelay/config.toml`:
 
 ```toml
-# /config/bairelay/config.toml — bairelay overlay
-#
-# Override or extend the configuration generated from the HA options form.
-# Per-camera entries match by name; you can specify just the fields you
-# want to change.
-
 [wake_server]
 enable = true
 
 [[cameras]]
-name = "Hallway"
-username = "admin"  # required for any [[cameras]] entry, even if unchanged
+name = "Hallway"            # must match the form's `name` exactly
 enable_floodlight = true
 ```
 
-**Important operator-facing gotcha (do not skip):**
-
-Every `[[cameras]]` block in your overlay must include a `username` line, even when you're only overriding one other field. The base config from the HA options form always sets `username = "admin"` (Reolink's stock account), but the TOML parser sees the overlay file in isolation before the merge step, and `username` has no default at the parser level. You will see a parse error on startup if you forget. A fix to make this field default-friendly is on the bairelay roadmap; for now, restate it.
+The `name` field is the only required key for a `[[cameras]]` override — the merge layer keeps every other base value (username, password, etc.) from the form unless you explicitly restate them here.
 
 ## Troubleshooting
 
@@ -74,7 +68,7 @@ Check that the MQTT integration is installed and enabled in HA: **Settings → D
 
 ### Battery cameras never wake or never connect
 
-The wake server is opt-in via the TOML overlay (`[wake_server] enable = true`) **and** requires a DNS hijack at your LAN's DNS resolver so the cameras' outbound P2P traffic to `p2p*.reolink.com` resolves to your Home Assistant host instead of Reolink's cloud. Configure the resolver to map those hostnames to the HA IP, then restart the cameras. See `docs/cloud-interception.md` Part I in the bairelay repo for wire-level details.
+Bairelay reaches cameras one of two ways: by LAN address (`address = "<ip>"` with `discovery = "remote"`), or by Reolink P2P UID (`uid = "..."` with `discovery = "relay"`). Either path can fail depending on your network — the LAN-direct route needs the camera awake and reachable on the same subnet as Home Assistant, while the P2P route needs both your host and the camera to reach Reolink's cloud servers. If one combination doesn't connect, swap to the other and restart the app.
 
 ### Logs
 

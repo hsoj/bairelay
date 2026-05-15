@@ -1,0 +1,17 @@
+# Local-build variant used for in-development image mutations only.
+# Builds bairelay from source instead of pulling the GH release tarball,
+# so unreleased Rust changes can be tested on real HAOS before cutting a
+# new version. Not invoked by CI.
+ARG BUILD_FROM=ghcr.io/hassio-addons/base:20.1.1
+
+FROM rust:1.93-alpine AS builder
+RUN apk add --no-cache musl-dev pkgconfig
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked --bin bairelay \
+	&& strip target/release/bairelay
+
+FROM ${BUILD_FROM}
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+COPY --from=builder /src/target/release/bairelay /usr/local/bin/bairelay
+COPY hassio/bairelay/rootfs/ /

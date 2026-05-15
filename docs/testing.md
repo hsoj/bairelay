@@ -475,11 +475,17 @@ Prerequisites:
       "topic_prefix": "bairelay",
       "log_level": "info",
       "cameras": [
-        {"name": "TestCamera", "address": "192.168.1.50", "password": "<password>"}
+        {
+          "name": "TestCamera",
+          "address": "192.168.1.50",
+          "username": "admin",
+          "password": "<password>",
+          "idle_disconnect": true
+        }
       ]
     }
     ```
-- `tests/logs/addon-test/config/bairelay/config.toml` — the TOML overlay. Should mirror the existing on-host test config shape so the merged result matches what `tests/bairelay-test.toml` produces. The overlay must include `[mqtt]` (since the container has no Supervisor injecting it) and any per-camera knobs (`username = "admin"`, channel, etc.).
+- `tests/logs/addon-test/config/bairelay/config.toml` — the TOML overlay. Should mirror the existing on-host test config shape so the merged result matches what `tests/bairelay-test.toml` produces. The overlay must include `[mqtt]` (since the container has no Supervisor injecting it) and any per-camera knobs not exposed by the form (channel, discovery method, etc.). `username` is supplied by the form so doesn't need to be restated.
 
 Run:
 

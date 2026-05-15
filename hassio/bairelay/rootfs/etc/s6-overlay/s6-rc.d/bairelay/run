@@ -1,7 +1,7 @@
 #!/command/with-contenv bashio
 set -eu
 
-# Bashio errors to /dev/null: when the MQTT broker add-on isn't installed,
+# Bashio errors to /dev/null: when the MQTT broker app isn't installed,
 # bashio::services prints "Service not enabled" for every call. The script's
 # `|| ...` fallbacks already handle the absent service; the messages are
 # just noise.
@@ -17,18 +17,37 @@ if [ "$(bashio::services 'mqtt' 'ssl' 2>/dev/null || true)" = "true" ]; then
 	SSL_FLAG="--mqtt-ssl"
 fi
 
-# Render config to /tmp (tmpfs in add-on containers; regenerated every
-# start). Persisting to /data would let stale config survive options changes.
+# `homeassistant_config:rw` mounts HA's /config at /homeassistant inside
+# the container. The bind point is the type name, *not* the shortcut name.
+CFG=/homeassistant/bairelay/config.toml
+# The merged result of `config.toml` + the app's options form + injected
+# MQTT broker creds. Written to the visible config dir on every start so
+# operators can confirm exactly what bairelay loaded.
+EFFECTIVE=/homeassistant/bairelay/effective.toml
+mkdir -p /homeassistant/bairelay
+
+# First-run bootstrap: write the full annotated template so operators can
+# see every available option. After this point bairelay never touches the
+# file; the operator owns it.
+if [ ! -f "$CFG" ]; then
+	cp /usr/share/bairelay/template.toml "$CFG"
+	echo "Wrote initial $CFG. Edit it to customize; every option is documented inline."
+fi
+
+# Merge the app's options form (base) with the operator's file (overlay)
+# on every start. Form values are overridden field-by-field by the file;
+# cameras are matched by `name`. MQTT broker creds are injected from
+# HA's Mosquitto integration into the base; the file can override them.
 # shellcheck disable=SC2086
 bairelay render-hassio-config \
 	--options-json /data/options.json \
-	--overlay /homeassistant_config/bairelay/config.toml \
+	--overlay "$CFG" \
 	--mqtt-host "$MQTT_HOST" \
 	--mqtt-port "$MQTT_PORT" \
 	--mqtt-user "$MQTT_USER" \
 	--mqtt-pass "$MQTT_PASS" \
 	$SSL_FLAG \
-	--output /tmp/bairelay-config.toml
+	--output "$EFFECTIVE"
 
 case "$(bashio::config 'log_level' 2>/dev/null || echo info)" in
 	debug) export RUST_LOG=bairelay=debug ;;
@@ -36,4 +55,4 @@ case "$(bashio::config 'log_level' 2>/dev/null || echo info)" in
 	*)     export RUST_LOG=bairelay=info ;;
 esac
 
-exec /usr/local/bin/bairelay mqtt-rtsp -c /tmp/bairelay-config.toml
+exec /usr/local/bin/bairelay mqtt-rtsp -c "$EFFECTIVE"
