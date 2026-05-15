@@ -4,9 +4,12 @@
 #   1. Validates args, branch (main), tracked-tree cleanliness, tag uniqueness.
 #   2. Seeds a new CHANGELOG section with commits since the last v* tag,
 #      opens $EDITOR (falling back to $VISUAL, then `vi`) for review.
-#   3. Bumps `[workspace.package].version` in Cargo.toml; refreshes Cargo.lock.
-#   4. Shows the full diff; on confirmation commits + tags vX.Y.Z.
-#   5. On a second confirmation pushes main + the tag to origin.
+#   3. Mirrors the new section into hassio/bairelay/CHANGELOG.md so the
+#      HA App's Documentation tab carries the same notes.
+#   4. Bumps `[workspace.package].version` in Cargo.toml; refreshes Cargo.lock.
+#      Cascades the version into hassio/bairelay/config.yaml.
+#   5. Shows the full diff; on confirmation commits + tags vX.Y.Z.
+#   6. On a second confirmation pushes main + the tag to origin.
 #
 # The release.yml workflow then takes over: matrix-builds the binary
 # for x86_64-linux-musl, aarch64-linux-musl, aarch64-darwin, and
@@ -119,6 +122,32 @@ strip_placeholder_comments() {
 	mv CHANGELOG.md.new CHANGELOG.md
 }
 
+mirror_addon_changelog() {
+	# Copy the new `## [version] — date` section from the root CHANGELOG
+	# into hassio/bairelay/CHANGELOG.md so HA Supervisor shows the same
+	# notes on the app's Documentation tab. The addon style is `## VER`
+	# (no brackets, no date) so we rewrite the heading on the way in.
+	local version="$1"
+	local body
+	body="$(awk -v ver="$version" '
+		$0 ~ "^## \\[" ver "\\]"   { capture = 1; print "## " ver; next }
+		capture && /^## \[/        { exit }
+		capture                    { print }
+	' CHANGELOG.md)"
+	local insert_line
+	insert_line="$(grep -n '^## ' hassio/bairelay/CHANGELOG.md | head -1 | cut -d: -f1 || true)"
+	if [[ -z "$insert_line" ]]; then
+		printf '\n%s\n' "$body" >> hassio/bairelay/CHANGELOG.md
+		return
+	fi
+	{
+		head -n "$((insert_line - 1))" hassio/bairelay/CHANGELOG.md
+		printf '%s\n' "$body"
+		tail -n "+$insert_line" hassio/bairelay/CHANGELOG.md
+	} > hassio/bairelay/CHANGELOG.md.new
+	mv hassio/bairelay/CHANGELOG.md.new hassio/bairelay/CHANGELOG.md
+}
+
 new_section_is_empty() {
 	local version="$1"
 	local body
@@ -185,13 +214,14 @@ main() {
 	fi
 
 	strip_placeholder_comments
+	mirror_addon_changelog "$new_version"
 
 	echo
 	echo "=== CHANGELOG.md diff ==="
-	git --no-pager diff CHANGELOG.md
+	git --no-pager diff CHANGELOG.md hassio/bairelay/CHANGELOG.md
 	echo
 	confirm "Continue with version bump and Cargo.lock refresh?" \
-		|| { git checkout -- CHANGELOG.md; die "aborted before version bump"; }
+		|| { git checkout -- CHANGELOG.md hassio/bairelay/CHANGELOG.md; die "aborted before version bump"; }
 
 	update_workspace_version "$new_version"
 
@@ -200,15 +230,15 @@ main() {
 	cargo check --workspace --quiet
 
 	echo
-	echo "=== full diff (Cargo.toml + Cargo.lock + CHANGELOG.md + hassio/bairelay/config.yaml) ==="
-	git --no-pager diff Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml
+	echo "=== full diff (Cargo.toml + Cargo.lock + CHANGELOG.md + hassio/bairelay/{config.yaml,CHANGELOG.md}) ==="
+	git --no-pager diff Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml hassio/bairelay/CHANGELOG.md
 	echo
 	confirm "Commit and tag $tag?" || {
-		git checkout -- Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml
+		git checkout -- Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml hassio/bairelay/CHANGELOG.md
 		die "aborted before commit"
 	}
 
-	git add Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml
+	git add Cargo.toml Cargo.lock CHANGELOG.md hassio/bairelay/config.yaml hassio/bairelay/CHANGELOG.md
 	git commit -m "release: $tag"
 	git tag -a "$tag" -m "Release $tag"
 	echo
@@ -231,7 +261,8 @@ main() {
 		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm -f Cargo.toml.bak"
 		echo "    sed -i.bak -E 's/^version: \"$current\"\$/version: \"$new_version\"/' hassio/bairelay/config.yaml && rm -f hassio/bairelay/config.yaml.bak"
 		echo "    cargo check --workspace --quiet"
-		echo "    cp <public> CHANGELOG.md"
+		echo "    cp <public>/CHANGELOG.md CHANGELOG.md"
+		echo "    cp <public>/hassio/bairelay/CHANGELOG.md hassio/bairelay/CHANGELOG.md"
 		echo "    git commit -am 'release: $tag'"
 		echo "    git tag -a $tag -m 'Release $tag'"
 		echo "    git push origin main $tag"
@@ -245,6 +276,6 @@ main() {
 	fi
 }
 
-trap 'rm -f Cargo.toml.new CHANGELOG.md.new' EXIT
+trap 'rm -f Cargo.toml.new CHANGELOG.md.new hassio/bairelay/CHANGELOG.md.new' EXIT
 
 main "$@"
