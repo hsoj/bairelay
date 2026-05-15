@@ -9,14 +9,17 @@
 # "network is unreachable" or "server misbehaving" errors on `docker pull`
 # or `docker build`'s `FROM`.
 #
-# This script copies three systemd units into the VM:
-#   colima-fix-network.service    drops the eth0 default route at boot,
-#                                 writes /etc/gai.conf to prefer IPv4
-#                                 (the VM has no IPv6 transit)
-#   colima-fix-resolv.service     rewrites /etc/resolv.conf to public DNS
-#   colima-fix-resolv.path        re-fires the service whenever Colima's
-#                                 host-side agent resets resolv.conf back
-#                                 to 192.168.5.1
+# Units copied into the VM:
+#   colima-fix-network.service   drops the eth0 default route at boot,
+#                                writes /etc/gai.conf to prefer IPv4
+#                                (the VM has no IPv6 transit)
+#   colima-fix-resolv.service    rewrites /etc/resolv.conf to public DNS
+#   colima-fix-resolv.path       re-fires the resolv service whenever
+#                                Colima's host-side agent resets it
+#   colima-route-watcher.sh      runs ip-monitor-route in a loop and
+#                                deletes the eth0 default route every
+#                                time Colima's agent re-adds it post-boot
+#   colima-route-watcher.service Restart=always daemon for the watcher
 #
 # Re-run after `colima delete` + recreate. Idempotent.
 #
@@ -27,17 +30,21 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-for unit in colima-fix-network.service colima-fix-resolv.service colima-fix-resolv.path; do
+for unit in colima-fix-network.service colima-fix-resolv.service colima-fix-resolv.path colima-route-watcher.service; do
 	echo "Installing $unit ..."
 	colima ssh -- sudo tee "/etc/systemd/system/$unit" < "$SCRIPT_DIR/$unit" > /dev/null
 done
 
+echo "Installing colima-route-watcher.sh ..."
+colima ssh -- sudo tee /usr/local/sbin/colima-route-watcher.sh < "$SCRIPT_DIR/colima-route-watcher.sh" > /dev/null
+colima ssh -- sudo chmod +x /usr/local/sbin/colima-route-watcher.sh
+
 colima ssh -- sudo systemctl daemon-reload
-colima ssh -- sudo systemctl enable colima-fix-network.service colima-fix-resolv.path
+colima ssh -- sudo systemctl enable colima-fix-network.service colima-fix-resolv.path colima-route-watcher.service
 
 echo
 echo "Units installed and enabled. Restart Colima to apply on the next boot:"
 echo "    colima stop && colima start"
 echo
 echo "Or apply immediately without restarting:"
-echo "    colima ssh -- sudo systemctl start colima-fix-network.service colima-fix-resolv.path"
+echo "    colima ssh -- sudo systemctl start colima-fix-network.service colima-fix-resolv.path colima-route-watcher.service"

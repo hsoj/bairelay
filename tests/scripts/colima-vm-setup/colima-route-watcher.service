@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch and delete Colima's broken eth0 default route on every reappearance
+Documentation=https://github.com/abiosoft/colima/issues
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/colima-route-watcher.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
