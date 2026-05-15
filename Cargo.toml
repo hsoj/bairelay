@@ -39,7 +39,7 @@ default-members = [
 # `build.rs` picks up the same value via CARGO_PKG_VERSION_{MAJOR,MINOR}
 # and resets the build counter when the prefix changes.
 [workspace.package]
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/mgc8/bairelay"

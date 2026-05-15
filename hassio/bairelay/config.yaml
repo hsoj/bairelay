@@ -1,6 +1,6 @@
 slug: bairelay
 name: Bairelay
-version: "1.1.0"
+version: "1.1.1"
 description: RTSP / MQTT bridge for Reolink battery cameras
 url: https://github.com/mgc8/bairelay
 arch:
