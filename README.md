@@ -11,7 +11,7 @@ Bairelay stands on the shoulders of [Neolink](https://github.com/QuantumEntangle
 - **[thirtythreeforty](https://github.com/thirtythreeforty/neolink)** — original author, who did the bulk of the protocol reverse-engineering and shipped the first working RTSP bridge.
 - **[QuantumEntangledAndy](https://github.com/QuantumEntangledAndy/neolink)** — long-term maintainer of the active fork, who added MQTT, motion detection, paused streams, and the deeper battery-camera support that bairelay builds on.
 
-Without their multi-year work this project would not exist. The vendored `neolink_core` crate is a modernised descendant of their codebase under the same AGPL-3.0 license.
+Without their multi-year work this project would not exist. The vendored `bairelay_neolink_core` crate is a modernised descendant of their codebase under the same AGPL-3.0 license.
 
 This project's development made use of **AI agentic coding**, especially for test generation, packet capture analysis, and reverse-engineering tasks against pcap dumps of camera ↔ cloud traffic. The protocol work itself is grounded in public reverse-engineering of cameras the operator owns; no Reolink code, firmware, or proprietary documentation was used.
 

@@ -5,7 +5,7 @@
 //! the clap-derived enums in [`crate::cli`] with the action / type
 //! enums the `oneshot` modules consume. Living in the library (rather
 //! than as `From` impls on either side) keeps `crate::oneshot` free of
-//! CLI concerns and `crate::cli` free of `neolink_core` concerns —
+//! CLI concerns and `crate::cli` free of `bairelay_neolink_core` concerns —
 //! each enum stays focused on its own boundary.
 
 use tracing_subscriber::EnvFilter;
@@ -32,7 +32,7 @@ pub fn verbosity_env_filter(verbose: u8) -> EnvFilter {
 	let directive = match verbose {
 		0 => "warn,bairelay=info,rumqttc=warn",
 		1 => "info,bairelay=debug",
-		2 => "debug,bairelay=trace,neolink_core=debug",
+		2 => "debug,bairelay=trace,bairelay_neolink_core=debug",
 		_ => "trace",
 	};
 	EnvFilter::new(directive)
@@ -66,10 +66,12 @@ pub fn clone_ptz_cmd(cmd: &Option<cli::PtzCommand>) -> cli::PtzCommand {
 	}
 }
 
-/// Map a CLI-level PTZ direction onto the neolink_core value.
-pub fn ptz_direction_to_core(d: cli::PtzDirection) -> neolink_core::bc_protocol::Direction {
+/// Map a CLI-level PTZ direction onto the bairelay_neolink_core value.
+pub fn ptz_direction_to_core(
+	d: cli::PtzDirection,
+) -> bairelay_neolink_core::bc_protocol::Direction {
+	use bairelay_neolink_core::bc_protocol::Direction;
 	use cli::PtzDirection;
-	use neolink_core::bc_protocol::Direction;
 	match d {
 		PtzDirection::Up => Direction::Up,
 		PtzDirection::Down => Direction::Down,
@@ -423,7 +425,7 @@ mod tests {
 
 	#[test]
 	fn ptz_direction_to_core_maps_every_variant() {
-		use neolink_core::bc_protocol::Direction;
+		use bairelay_neolink_core::bc_protocol::Direction;
 		assert!(matches!(
 			ptz_direction_to_core(cli::PtzDirection::Up),
 			Direction::Up

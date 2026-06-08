@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
 
+use bairelay_neolink_core::bc_protocol::{BcCamera, CameraDriver};
 use bairelay_rtsp::buffer::LastFrameBuffer;
 use bairelay_rtsp::provider::StreamError;
 use bairelay_rtsp::url::StreamKind as RtspStreamKind;
-use neolink_core::bc_protocol::{BcCamera, CameraDriver};
 
 use crate::audio_presence::AudioPresence;
 use crate::bcmedia_dump::BcMediaDumpConfig;
@@ -1242,7 +1242,7 @@ impl CameraHandle {
 			tracing::info!(camera = %self.config.name, "Connecting...");
 
 			// Wrap connection attempt in a timeout + cancellation guard
-			// so that Ctrl+C works even if neolink_core is stuck
+			// so that Ctrl+C works even if bairelay_neolink_core is stuck
 			let connect_result = tokio::select! {
 				_ = self.cancel.cancelled() => break,
 				result = tokio::time::timeout(Duration::from_secs(30), self.try_connect()) => {
@@ -1342,15 +1342,15 @@ async fn aggregate_preview_state_loop(
 /// should not be retried.
 ///
 /// Walks the anyhow source chain and matches typed
-/// `neolink_core::Error::AuthFailed | CameraLoginFail`. The Debug-
+/// `bairelay_neolink_core::Error::AuthFailed | CameraLoginFail`. The Debug-
 /// substring fallback below catches synthesised `anyhow::anyhow!(...)`
 /// errors used by some test paths and any future intermediate wrapper
 /// that doesn't preserve a downcastable source — keeping it as a
-/// belt-and-braces guard so a future neolink_core error-type rename
+/// belt-and-braces guard so a future bairelay_neolink_core error-type rename
 /// doesn't silently regress to "retry auth failures forever" — the
 /// brute-force scenario flagged during the strict-code audit.
 fn is_login_failure(err: &anyhow::Error) -> bool {
-	use neolink_core::Error as CoreError;
+	use bairelay_neolink_core::Error as CoreError;
 	for cause in err.chain() {
 		if let Some(core) = cause.downcast_ref::<CoreError>() {
 			if matches!(core, CoreError::AuthFailed | CoreError::CameraLoginFail) {
@@ -1893,20 +1893,20 @@ mod tests {
 
 	// ── is_login_failure (typed match + Debug-substring fallback) ───
 
-	/// Pin the production contract: a real `neolink_core::Error::AuthFailed`
+	/// Pin the production contract: a real `bairelay_neolink_core::Error::AuthFailed`
 	/// (the variant `try_connect()` actually returns) must drive the
 	/// permanent-bail. Pre-fix, this would have only worked accidentally
 	/// via the Debug-substring fallback; with typed downcast it's
 	/// guaranteed by the `From` impl in anyhow.
 	#[test]
 	fn is_login_failure_recognises_typed_auth_failed() {
-		let e: anyhow::Error = neolink_core::Error::AuthFailed.into();
+		let e: anyhow::Error = bairelay_neolink_core::Error::AuthFailed.into();
 		assert!(is_login_failure(&e));
 	}
 
 	#[test]
 	fn is_login_failure_recognises_typed_camera_login_fail() {
-		let e: anyhow::Error = neolink_core::Error::CameraLoginFail.into();
+		let e: anyhow::Error = bairelay_neolink_core::Error::CameraLoginFail.into();
 		assert!(is_login_failure(&e));
 	}
 
@@ -1915,7 +1915,7 @@ mod tests {
 	#[test]
 	fn is_login_failure_recognises_typed_auth_failed_through_context() {
 		use anyhow::Context;
-		let e: anyhow::Result<()> = Err(neolink_core::Error::AuthFailed.into());
+		let e: anyhow::Result<()> = Err(bairelay_neolink_core::Error::AuthFailed.into());
 		let wrapped = e.context("connect_with_retry").unwrap_err();
 		assert!(is_login_failure(&wrapped));
 	}
@@ -2483,7 +2483,7 @@ mod tests {
 	#[tokio::test]
 	async fn stream_source_returns_unavailable_without_concrete_bc() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use neolink_core::bc_protocol::FakeCameraBuilder;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 		use tokio_util::sync::CancellationToken;
 
 		let fake = FakeCameraBuilder::new().build();
@@ -2541,7 +2541,7 @@ mod tests {
 	async fn stream_source_fast_path_returns_preregistered_source() {
 		use crate::config::test_helpers::minimal_camera_config;
 		use crate::stream_source::StreamSource;
-		use neolink_core::bc_protocol::FakeCameraBuilder;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 		use tokio_util::sync::CancellationToken;
 
 		let fake = FakeCameraBuilder::new().build();
@@ -2614,8 +2614,8 @@ mod tests {
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn run_connected_session_covers_full_lifecycle() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use neolink_core::bc::xml::{FloodlightStatusList, RfAlarmCfg, Support};
-		use neolink_core::bc_protocol::FakeCameraBuilder;
+		use bairelay_neolink_core::bc::xml::{FloodlightStatusList, RfAlarmCfg, Support};
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 		let mut config = minimal_camera_config("cam-sess");
 		config.mqtt.enable_motion = true;
@@ -2631,11 +2631,11 @@ mod tests {
 		// listen_on_* calls succeed cleanly. The floodlight channel
 		// is closed so its listener exits via `None → break`.
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (_motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(1);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 		let (fl_tx, fl_rx) = tokio::sync::mpsc::channel::<FloodlightStatusList>(1);
 		drop(fl_tx); // close → listener returns
 
@@ -2643,7 +2643,7 @@ mod tests {
 			.with_motion_stream(motion_data)
 			.with_floodlight_stream(fl_rx)
 			.with_battery_info(|| {
-				Ok(neolink_core::bc::xml::BatteryInfo {
+				Ok(bairelay_neolink_core::bc::xml::BatteryInfo {
 					battery_percent: 42,
 					..Default::default()
 				})
@@ -2661,11 +2661,11 @@ mod tests {
 					..Default::default()
 				})
 			})
-			.with_ptz_preset(|| Ok(neolink_core::bc::xml::PtzPreset::default()))
+			.with_ptz_preset(|| Ok(bairelay_neolink_core::bc::xml::PtzPreset::default()))
 			.with_linktype(|| {
 				// Always error → keepalive_loop terminates after
 				// MAX_FAILURES consecutive failures.
-				Err(neolink_core::bc_protocol::Error::Other(
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
 					"scripted link fail",
 				))
 			})
@@ -2733,18 +2733,22 @@ mod tests {
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn run_connected_session_tolerates_get_support_error() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use neolink_core::bc_protocol::FakeCameraBuilder;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 		let config = minimal_camera_config("cam-no-caps");
 		// No MQTT so publish paths short-circuit.
 
 		let fake = FakeCameraBuilder::new()
 			.with_support(|| {
-				Err(neolink_core::bc_protocol::Error::Other(
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
 					"support probe refused",
 				))
 			})
-			.with_linktype(|| Err(neolink_core::bc_protocol::Error::Other("link fail")))
+			.with_linktype(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"link fail",
+				))
+			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
 
@@ -2773,8 +2777,8 @@ mod tests {
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn run_connected_session_idle_disconnect_grace_path() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use neolink_core::bc::xml::Support;
-		use neolink_core::bc_protocol::FakeCameraBuilder;
+		use bairelay_neolink_core::bc::xml::Support;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 		let mut config = minimal_camera_config("cam-idle");
 		config.idle_disconnect = true;
@@ -2782,7 +2786,11 @@ mod tests {
 
 		let fake = FakeCameraBuilder::new()
 			.with_support(|| Ok(Support::default()))
-			.with_linktype(|| Err(neolink_core::bc_protocol::Error::Other("link fail")))
+			.with_linktype(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"link fail",
+				))
+			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
 

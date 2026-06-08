@@ -1,7 +1,7 @@
 //! `BcCameraOpt` builder shared by the camera connect loop and CLI.
 
 use crate::config::{self, CameraConfig};
-use neolink_core::bc_protocol::{
+use bairelay_neolink_core::bc_protocol::{
 	BcCameraOpt, ConnectionProtocol, Credentials, DiscoveryMethods, MaxEncryption,
 };
 use std::net::IpAddr;
@@ -49,7 +49,7 @@ pub fn build_bc_opts(cfg: &CameraConfig) -> BcCameraOpt {
 	}
 }
 
-/// Translate the config-level max-encryption enum into the neolink_core
+/// Translate the config-level max-encryption enum into the bairelay_neolink_core
 /// value that `BcCamera::login_with_maxenc` expects.
 pub fn max_encryption(cfg: &CameraConfig) -> MaxEncryption {
 	match cfg.max_encryption {

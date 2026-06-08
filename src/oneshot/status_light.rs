@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
 
@@ -18,8 +18,8 @@ pub async fn run(cam: &dyn CameraDriver, set: Option<bool>) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::LedState;
-	use neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use bairelay_neolink_core::bc::xml::LedState;
+	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
 
 	fn led_with(light_state: &str) -> LedState {
 		LedState {

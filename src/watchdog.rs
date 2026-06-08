@@ -151,7 +151,7 @@ mod tests {
 		// against. With the grace gate added 2026-05-01, a camera
 		// whose wake-lock was never acquired returns `idle_since =
 		// None` and the watchdog correctly leaves it alone.
-		use neolink_core::bc_protocol::FakeCameraBuilder;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 		let cancel = CancellationToken::new();
 		let mut cfg = minimal_camera_config("cam-idle");

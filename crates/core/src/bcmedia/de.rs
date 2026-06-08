@@ -62,8 +62,8 @@ impl BcMedia {
 	///
 	/// ```no_run
 	/// use bytes::BytesMut;
-	/// use neolink_core::bcmedia::model::BcMedia;
-	/// use neolink_core::Error;
+	/// use bairelay_neolink_core::bcmedia::model::BcMedia;
+	/// use bairelay_neolink_core::Error;
 	///
 	/// # fn main() -> Result<(), Error> {
 	/// let mut buf = BytesMut::new();

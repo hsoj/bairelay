@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::{BcCamera, CameraDriver, StreamKind, VideoStream};
-use neolink_core::bcmedia::model::{BcMedia, VideoType};
+use bairelay_neolink_core::bc_protocol::{BcCamera, CameraDriver, StreamKind, VideoStream};
+use bairelay_neolink_core::bcmedia::model::{BcMedia, VideoType};
 
 use super::errors::UsageError;
 use super::output::Outcome;
@@ -92,7 +92,7 @@ async fn capture_via_stream(cam: &BcCamera, output_path: Option<&Path>) -> Resul
 /// drain error, drain success for H.264 and H.265) without needing a
 /// concrete [`BcCamera`].
 pub(crate) fn finish_stream_capture(
-	drain_result: Result<neolink_core::bcmedia::model::BcMediaIframe>,
+	drain_result: Result<bairelay_neolink_core::bcmedia::model::BcMediaIframe>,
 	output_path: Option<&Path>,
 ) -> Result<Outcome> {
 	let iframe = drain_result?;
@@ -115,7 +115,7 @@ pub(crate) fn finish_stream_capture(
 pub(crate) async fn drain_first_iframe(
 	stream: &mut dyn VideoStream,
 	window: Duration,
-) -> Result<neolink_core::bcmedia::model::BcMediaIframe> {
+) -> Result<bairelay_neolink_core::bcmedia::model::BcMediaIframe> {
 	let deadline = tokio::time::Instant::now() + window;
 	loop {
 		let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -143,7 +143,9 @@ pub(crate) async fn drain_first_iframe(
 }
 
 /// Label the format string for an I-frame's codec.
-pub(crate) fn iframe_format_label(i: &neolink_core::bcmedia::model::BcMediaIframe) -> &'static str {
+pub(crate) fn iframe_format_label(
+	i: &bairelay_neolink_core::bcmedia::model::BcMediaIframe,
+) -> &'static str {
 	match i.video_type {
 		VideoType::H264 => "h264",
 		VideoType::H265 => "h265",
@@ -156,20 +158,23 @@ pub(crate) fn iframe_format_label(i: &neolink_core::bcmedia::model::BcMediaIfram
 /// `timeout()` elapse; `Some(inner)` carries the recv result.
 pub(crate) enum StreamStep {
 	/// Received an I-frame — break the outer loop with this payload.
-	Got(neolink_core::bcmedia::model::BcMediaIframe),
+	Got(bairelay_neolink_core::bcmedia::model::BcMediaIframe),
 	/// Non-I-frame packet (audio / p-frame / parameter-set) — loop again.
 	Continue,
 	/// Inner parse / decode error from the stream.
-	ReadError(neolink_core::Error),
+	ReadError(bairelay_neolink_core::Error),
 	/// Outer mpsc dropped / cancelled error.
-	ReceiveError(neolink_core::Error),
+	ReceiveError(bairelay_neolink_core::Error),
 	/// `tokio::time::timeout` elapsed.
 	TimedOut,
 }
 
 pub(crate) fn classify_stream_step(
 	inner: Option<
-		std::result::Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error>,
+		std::result::Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		>,
 	>,
 ) -> StreamStep {
 	match inner {
@@ -215,8 +220,8 @@ pub(crate) fn write_payload_to<W: Write>(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc_protocol::{Error, FakeCameraBuilder};
-	use neolink_core::bcmedia::model::BcMediaIframe;
+	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use bairelay_neolink_core::bcmedia::model::BcMediaIframe;
 
 	/// Scripted `VideoStream` implementation for `drain_first_iframe`
 	/// coverage. Feeds a fixed sequence of packets (or errors), then
@@ -431,8 +436,8 @@ mod tests {
 
 	// ---- classify_stream_step decision-table tests ----
 
-	fn iframe(vt: VideoType) -> neolink_core::bcmedia::model::BcMediaIframe {
-		neolink_core::bcmedia::model::BcMediaIframe {
+	fn iframe(vt: VideoType) -> bairelay_neolink_core::bcmedia::model::BcMediaIframe {
+		bairelay_neolink_core::bcmedia::model::BcMediaIframe {
 			video_type: vt,
 			microseconds: 0,
 			time: None,
@@ -453,7 +458,7 @@ mod tests {
 	fn classify_stream_step_other_media_continues() {
 		// A non-Iframe BcMedia variant — use Pframe which has minimal
 		// fields.
-		use neolink_core::bcmedia::model::BcMediaPframe;
+		use bairelay_neolink_core::bcmedia::model::BcMediaPframe;
 		let step = classify_stream_step(Some(Ok(Ok(BcMedia::Pframe(BcMediaPframe {
 			video_type: VideoType::H264,
 			microseconds: 0,
@@ -464,13 +469,14 @@ mod tests {
 
 	#[test]
 	fn classify_stream_step_inner_err_is_read_error() {
-		let step = classify_stream_step(Some(Ok(Err(neolink_core::Error::Other("parse")))));
+		let step =
+			classify_stream_step(Some(Ok(Err(bairelay_neolink_core::Error::Other("parse")))));
 		assert!(matches!(step, StreamStep::ReadError(_)));
 	}
 
 	#[test]
 	fn classify_stream_step_outer_err_is_receive_error() {
-		let step = classify_stream_step(Some(Err(neolink_core::Error::DroppedSubscriber)));
+		let step = classify_stream_step(Some(Err(bairelay_neolink_core::Error::DroppedSubscriber)));
 		assert!(matches!(step, StreamStep::ReceiveError(_)));
 	}
 
@@ -537,7 +543,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn drain_skips_pframe_before_iframe() {
-		use neolink_core::bcmedia::model::BcMediaPframe;
+		use bairelay_neolink_core::bcmedia::model::BcMediaPframe;
 		let mut stream = MockVideoStream::new(vec![
 			MockStep::Frame(BcMedia::Pframe(BcMediaPframe {
 				video_type: VideoType::H264,
@@ -614,7 +620,7 @@ mod tests {
 	/// camera at all.
 	#[tokio::test]
 	async fn run_rejects_json_without_path_before_touching_camera() {
-		use neolink_core::bc_protocol::connection::mock::MockConnection;
+		use bairelay_neolink_core::bc_protocol::connection::mock::MockConnection;
 		let mock = MockConnection::new().build().await;
 		let cam = BcCamera::from_mock_connection(mock).await;
 		// mode_json=true, output=None -> UsageError before any camera call.
@@ -626,9 +632,9 @@ mod tests {
 	/// the dispatch arm that calls `capture_via_snap(cam as &dyn …)`.
 	#[tokio::test]
 	async fn run_snap_path_via_mock_connection() {
-		use neolink_core::bc::model::*;
-		use neolink_core::bc::xml::*;
-		use neolink_core::bc_protocol::connection::mock::{reply_200_xml, MockConnection};
+		use bairelay_neolink_core::bc::model::*;
+		use bairelay_neolink_core::bc::xml::*;
+		use bairelay_neolink_core::bc_protocol::connection::mock::{reply_200_xml, MockConnection};
 
 		let tmp = tempfile::NamedTempFile::new().unwrap();
 		let path = tmp.path().to_path_buf();
@@ -663,8 +669,8 @@ mod tests {
 
 		let injector_task = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
-			let push = neolink_core::bc::model::Bc {
-				meta: neolink_core::bc::model::BcMeta {
+			let push = bairelay_neolink_core::bc::model::Bc {
+				meta: bairelay_neolink_core::bc::model::BcMeta {
 					msg_id: MSG_ID_SNAP,
 					channel_id: 0,
 					msg_num: 42,
@@ -672,13 +678,13 @@ mod tests {
 					response_code: 201,
 					class: 0x6414,
 				},
-				body: neolink_core::bc::model::BcBody::ModernMsg(
-					neolink_core::bc::model::ModernMsg {
+				body: bairelay_neolink_core::bc::model::BcBody::ModernMsg(
+					bairelay_neolink_core::bc::model::ModernMsg {
 						extension: Some(Extension {
 							binary_data: Some(1),
 							..Default::default()
 						}),
-						payload: Some(neolink_core::bc::model::BcPayloads::Binary(vec![
+						payload: Some(bairelay_neolink_core::bc::model::BcPayloads::Binary(vec![
 							0xDE, 0xAD, 0xBE,
 						])),
 					},
@@ -706,7 +712,7 @@ mod tests {
 	/// `finish_stream_capture`. Pins the use_stream branch of run().
 	#[tokio::test]
 	async fn run_use_stream_propagates_start_video_error() {
-		use neolink_core::bc_protocol::connection::mock::MockConnection;
+		use bairelay_neolink_core::bc_protocol::connection::mock::MockConnection;
 		let mock = MockConnection::new().build().await;
 		let cam = BcCamera::from_mock_connection(mock).await;
 		// No "preview" ability set → start_video errors with
@@ -717,7 +723,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn drain_skips_multiple_non_iframes_then_succeeds() {
-		use neolink_core::bcmedia::model::{BcMediaAac, BcMediaPframe};
+		use bairelay_neolink_core::bcmedia::model::{BcMediaAac, BcMediaPframe};
 		let mut stream = MockVideoStream::new(vec![
 			MockStep::Frame(BcMedia::Aac(BcMediaAac {
 				data: vec![0x01, 0x02],

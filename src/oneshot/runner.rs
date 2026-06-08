@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use bairelay_neolink_core::bc_protocol::BcCamera;
 use futures::future::BoxFuture;
-use neolink_core::bc_protocol::BcCamera;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 

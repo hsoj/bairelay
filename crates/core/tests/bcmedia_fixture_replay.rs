@@ -16,9 +16,9 @@
 //!     boundaries.)
 //!   - A truncated capture returns `Err`, not `Ok` and not a panic.
 
+use bairelay_neolink_core::bcmedia::model::*;
+use bairelay_neolink_core::Error;
 use bytes::BytesMut;
-use neolink_core::bcmedia::model::*;
-use neolink_core::Error;
 use std::io::ErrorKind;
 
 /// Walk through a fully-assembled capture buffer, returning every

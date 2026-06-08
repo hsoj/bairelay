@@ -5,8 +5,8 @@
 //! `docs/implementation.md` § XML parsing brittleness).
 
 use anyhow::{Context, Result};
-use neolink_core::bc::xml::{AbilityInfo, AbilityInfoToken};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc::xml::{AbilityInfo, AbilityInfoToken};
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::{AbilityEntry, Outcome};
 
@@ -95,8 +95,8 @@ fn flatten(info: &AbilityInfo) -> Vec<AbilityEntry> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::{AbilityInfoSubModule, AbilityInfoToken};
-	use neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use bairelay_neolink_core::bc::xml::{AbilityInfoSubModule, AbilityInfoToken};
+	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
 
 	fn token(values: &[&str]) -> AbilityInfoToken {
 		AbilityInfoToken {

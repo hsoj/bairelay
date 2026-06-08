@@ -17,7 +17,7 @@
 //! matches, then runs the caller's reply closure. The closure gets the
 //! request frame so it can echo `msg_num` / `channel_id` into the reply.
 //!
-//! Compiled unconditionally as part of `neolink_core`'s public API.
+//! Compiled unconditionally as part of `bairelay_neolink_core`'s public API.
 //! Test helpers ship without feature gates because the bairelay
 //! binary's own `#[cfg(test)]` modules import this module across the
 //! crate boundary — `#[cfg(test)]` only fires for the crate being

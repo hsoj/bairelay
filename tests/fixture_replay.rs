@@ -44,8 +44,8 @@ use bairelay_rtsp::server::rtcp::SR_INTERVAL;
 use bairelay_rtsp::server::{RtspServer, ServerConfig};
 use bairelay_rtsp::url::StreamKind as RtspStreamKind;
 
-use neolink_core::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe, VideoType};
-use neolink_core::Error as NeolinkError;
+use bairelay_neolink_core::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe, VideoType};
+use bairelay_neolink_core::Error as NeolinkError;
 
 /// Capacity of the replay broadcast channel. Mirrors production
 /// (`BROADCAST_CAPACITY` in `src/stream_source.rs`) so backpressure

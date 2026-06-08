@@ -8,7 +8,7 @@
 //!
 //! **out of scope.** Out of scope for the current battery-camera
 //! feature set (spec §10). The protocol surface is kept here as part
-//! of the vendored `neolink_core` so a future phase can wire it up
+//! of the vendored `bairelay_neolink_core` so a future phase can wire it up
 //! without a fresh round of reverse-engineering.
 use super::{BcCamera, Error, Result};
 use crate::bc::{model::*, xml::*};

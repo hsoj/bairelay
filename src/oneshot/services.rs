@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::errors::UsageError;
 use super::output::{Outcome, ServiceEntry};
@@ -33,7 +33,7 @@ impl Service {
 /// Port is `u16` (matching the CLI surface in `cli.rs::ServiceAction`).
 /// `0` is rejected at dispatch time as `UsageError` (operator typo
 /// guard); the cast to `u32` happens at the `CameraDriver` boundary
-/// since neolink_core's `set_http(set_on, set_port: Option<u32>)` etc.
+/// since bairelay_neolink_core's `set_http(set_on, set_port: Option<u32>)` etc.
 /// take a wider type.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -182,10 +182,12 @@ async fn read(cam: &dyn CameraDriver, service: Service) -> Result<(u32, Option<b
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::{HttpPort, HttpsPort, OnvifPort, RtmpPort, RtspPort, ServerPort};
-	use neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use bairelay_neolink_core::bc::xml::{
+		HttpPort, HttpsPort, OnvifPort, RtmpPort, RtspPort, ServerPort,
+	};
+	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
 
-	fn all_enabled_fake() -> std::sync::Arc<neolink_core::bc_protocol::FakeCamera> {
+	fn all_enabled_fake() -> std::sync::Arc<bairelay_neolink_core::bc_protocol::FakeCamera> {
 		FakeCameraBuilder::new()
 			.with_serverport(|| {
 				Ok(ServerPort {

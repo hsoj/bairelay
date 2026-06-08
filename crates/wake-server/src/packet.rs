@@ -1,10 +1,10 @@
-//! Thin helpers wrapping `neolink_core::bcudp` framing for the wake server.
+//! Thin helpers wrapping `bairelay_neolink_core::bcudp` framing for the wake server.
 
-use bytes::BytesMut;
-use neolink_core::bcudp::{
+use bairelay_neolink_core::bcudp::{
 	model::{BcUdp, UdpDiscovery},
 	xml::UdpXml,
 };
+use bytes::BytesMut;
 use rand::Rng;
 
 use crate::WakeServerError;
@@ -80,7 +80,7 @@ pub fn random_sid() -> u32 {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bcudp::xml::{C2mQ, IpPort, M2cQr};
+	use bairelay_neolink_core::bcudp::xml::{C2mQ, IpPort, M2cQr};
 
 	#[test]
 	fn encode_decode_round_trip_preserves_payload() {
@@ -102,7 +102,7 @@ mod tests {
 
 	#[test]
 	fn decode_rejects_ack_packet_with_kind_label() {
-		use neolink_core::bcudp::model::{BcUdp, UdpAck};
+		use bairelay_neolink_core::bcudp::model::{BcUdp, UdpAck};
 		let ack = BcUdp::Ack(UdpAck::empty(7));
 		let bytes = ack.serialize(Vec::new()).expect("serialize ack");
 		let err = decode_discovery(&bytes).expect_err("decode should reject ack");
@@ -114,7 +114,7 @@ mod tests {
 
 	#[test]
 	fn decode_rejects_data_packet_with_kind_label() {
-		use neolink_core::bcudp::model::{BcUdp, UdpData};
+		use bairelay_neolink_core::bcudp::model::{BcUdp, UdpData};
 		let data = BcUdp::Data(UdpData {
 			connection_id: 7,
 			packet_id: 1,

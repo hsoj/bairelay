@@ -17,13 +17,13 @@ members = [
 # `fuzz/` is its own detached cargo project (libfuzzer-sys + nightly).
 # Excluding it keeps `cargo build/test --workspace` from walking it
 # and dragging in nightly-only deps. `tests/scripts/decode-bc-pcap/` is
-# similarly detached: a debugging-only tool that opts neolink_core into
+# similarly detached: a debugging-only tool that opts bairelay_neolink_core into
 # the `pcap-decode-api` feature, kept out of the workspace so the feature
 # is never accidentally pulled into a release build.
 exclude = ["fuzz", "tests/scripts/decode-bc-pcap"]
 # Without this, bare `cargo test` / `cargo build` / `cargo clippy`
 # from the workspace root operates only on the root crate and silently
-# skips every member crate (neolink_core's ~686 tests included). The
+# skips every member crate (bairelay_neolink_core's ~686 tests included). The
 # `--workspace` flag works either way; this just makes the bare form
 # do the right thing.
 default-members = [
@@ -67,10 +67,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 ab_glyph = "0.2"
 time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
 
-neolink_core = { path = "crates/core" }
-bairelay_mqtt = { path = "crates/mqtt" }
-bairelay_rtsp = { path = "crates/rtsp" }
-bairelay_wake_server = { path = "crates/wake-server" }
+bairelay-neolink-core = { path = "crates/core" }
+bairelay-mqtt = { path = "crates/mqtt" }
+bairelay-rtsp = { path = "crates/rtsp" }
+bairelay-wake-server = { path = "crates/wake-server" }
 
 rustls = "0.23"
 rustls-pemfile = "2"
@@ -98,12 +98,12 @@ predicates = "3"
 tempfile = "3"
 rcgen = "0.13"
 
-# Enable neolink_core's test scaffolding (`FakeCamera*`, `MockConnection*`,
+# Enable bairelay_neolink_core's test scaffolding (`FakeCamera*`, `MockConnection*`,
 # `BcCamera::from_mock_connection`, `MotionData::test_new`) for the
 # binary's own test suite. The feature is off in production builds, so
 # release `bairelay` cannot accidentally substitute a fake for a real
 # camera.
-neolink_core = { path = "crates/core", features = ["test-util"] }
+bairelay-neolink-core = { path = "crates/core", features = ["test-util"] }
 
 # tests/fixture_replay.rs drives the real RtspServer::serve over a TCP
 # socket and hand-parses RTP/RTCP bytes off the wire. That requires

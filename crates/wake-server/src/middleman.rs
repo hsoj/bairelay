@@ -5,7 +5,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use neolink_core::bcudp::xml::{EmptyTag, IpPort, M2cQr, M2dQr, UdpXml};
+use bairelay_neolink_core::bcudp::xml::{EmptyTag, IpPort, M2cQr, M2dQr, UdpXml};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};

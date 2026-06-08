@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
 
@@ -11,7 +11,7 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc_protocol::FakeCameraBuilder;
+	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn reboot_returns_reboot_variant_and_logs_call() {

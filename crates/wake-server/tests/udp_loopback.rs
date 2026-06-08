@@ -5,9 +5,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use bairelay_neolink_core::bcudp::xml::{C2mQ, IpPort, M2cQr, UdpXml};
 use bairelay_wake_server::config::RuntimeConfig;
 use bairelay_wake_server::packet::{decode_discovery, encode_discovery};
-use neolink_core::bcudp::xml::{C2mQ, IpPort, M2cQr, UdpXml};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
@@ -79,7 +79,7 @@ async fn middleman_replies_to_c2m_q_with_register_addr() {
 	let _ = tokio::time::timeout(Duration::from_millis(500), server_handle).await;
 }
 
-use neolink_core::bcudp::xml::{
+use bairelay_neolink_core::bcudp::xml::{
 	C2dHb, C2rC, C2rCfm, D2rCr, D2rDisc, D2rHb, R2cCr, R2cT, R2dC, R2dDcr, R2dHbr,
 };
 
@@ -1085,7 +1085,7 @@ async fn bad_crc_packet_does_not_crash_listener() {
 /// stuffing oversized UIDs.
 #[tokio::test]
 async fn oversized_uid_in_d2m_q_is_rejected() {
-	use neolink_core::bcudp::xml::D2mQ;
+	use bairelay_neolink_core::bcudp::xml::D2mQ;
 
 	let cancel = CancellationToken::new();
 	let middleman = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
@@ -1152,7 +1152,7 @@ async fn oversized_uid_in_d2m_q_is_rejected() {
 /// state to anyone who could send a `D2R_R` to the wake port.
 #[tokio::test]
 async fn d2r_r_with_no_anchor_is_dropped() {
-	use neolink_core::bcudp::xml::D2rR;
+	use bairelay_neolink_core::bcudp::xml::D2rR;
 
 	let cancel = CancellationToken::new();
 	let middleman = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();

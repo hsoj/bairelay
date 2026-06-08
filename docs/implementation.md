@@ -6,7 +6,7 @@ Static structure and dependency tables live in `docs/architecture.md`.
 
 ---
 
-## `neolink_core` API surface
+## `bairelay_neolink_core` API surface
 
 `BcCamera` is the production type. `CameraDriver` is the dyn-compatible trait the binary holds — production code mostly takes `Arc<dyn CameraDriver>`. `CameraHandle` keeps a parallel private `bc_camera_concrete: Arc<BcCamera>` for the two operations that aren't on the trait (`logout()` during shutdown; `StreamSource::start` for video pull loops).
 
@@ -46,7 +46,7 @@ Every async `BcCamera` method can hang indefinitely if the camera drops the TCP 
 
 ### Calls that spawn internal tasks
 
-`listen_on_motion()` and `listen_on_floodlight()` spawn internal tokio tasks inside `neolink_core` that hold references to the `BcConnection`. Dropping the outer `BcCamera` (Arc refcount → 0) does not clean them up immediately — they're parked on channel reads.
+`listen_on_motion()` and `listen_on_floodlight()` spawn internal tokio tasks inside `bairelay_neolink_core` that hold references to the `BcConnection`. Dropping the outer `BcCamera` (Arc refcount → 0) does not clean them up immediately — they're parked on channel reads.
 
 **Shutdown sequence (per session, inside `CameraHandle::teardown_session_tasks`):**
 
@@ -58,7 +58,7 @@ Every async `BcCamera` method can hang indefinitely if the camera drops the TCP 
 4. `logout()` with a 5 s timeout (`LOGOUT_TIMEOUT`). Uses the local `concrete: Option<Arc<BcCamera>>` parameter — the trait surface intentionally omits `logout()`.
 5. Clear `bc_camera` + `bc_camera_concrete`, drop the local `concrete` Arc, transition to `Disconnected`.
 
-Without the abort deadline, shutdown hangs because internal tasks hold references that prevent cleanup. Without step 4's await, a detached reader keeps `Arc<BcCamera>` alive for up to its own `STOP_VIDEO_TIMEOUT` (5 s), which neolink_core can't reliably handle when the next `BcCamera::new` is already in flight.
+Without the abort deadline, shutdown hangs because internal tasks hold references that prevent cleanup. Without step 4's await, a detached reader keeps `Arc<BcCamera>` alive for up to its own `STOP_VIDEO_TIMEOUT` (5 s), which bairelay_neolink_core can't reliably handle when the next `BcCamera::new` is already in flight.
 
 ### XML parsing brittleness
 
@@ -80,7 +80,7 @@ Reolink fixed-mount cameras (e.g. Argus Altas) report `<ptzMode>none</ptzMode>` 
 
 ### IR LED is write-only
 
-`crates/core/src/bc_protocol/ledstate.rs::irled_light_set` writes the IR night-vision mode but neolink_core has no getter, so bairelay's HA `select` entity (`build_ir`) emits `state_topic: None`. HA shows it as "unknown" forever — fire-and-forget control. Don't confuse with PIR (passive IR motion sensor), which has a separate `get_pirstate` reader.
+`crates/core/src/bc_protocol/ledstate.rs::irled_light_set` writes the IR night-vision mode but bairelay_neolink_core has no getter, so bairelay's HA `select` entity (`build_ir`) emits `state_topic: None`. HA shows it as "unknown" forever — fire-and-forget control. Don't confuse with PIR (passive IR motion sensor), which has a separate `get_pirstate` reader.
 
 ### Time + DST split across two Bc messages
 
@@ -318,9 +318,9 @@ All MQTT publishes log their values at debug level. All control commands log dis
 
 ## Test infrastructure
 
-Test helpers in `neolink_core` (`FakeCameraBuilder`, `MockConnection`, `BcCamera::from_mock_connection`, `BcCamera::test_set_ability`, `MotionData::test_new`) are gated behind a `test-util` Cargo feature so release builds cannot accidentally substitute a fake for a real camera. The crate's own `cfg(test)` unit tests always see them; downstream test crates opt in via `[dev-dependencies] neolink_core = { ..., features = ["test-util"] }` (the binary already does). Helpers in `bairelay_mqtt` (`mock_client()`) and the binary (`PacketSource`, `MockVideoStream`, `CameraHandle::set_driver_for_test`, `StreamSource::start_with_packet_source`) compile unconditionally — they're scoped tightly enough that there's no production-leakage risk.
+Test helpers in `bairelay_neolink_core` (`FakeCameraBuilder`, `MockConnection`, `BcCamera::from_mock_connection`, `BcCamera::test_set_ability`, `MotionData::test_new`) are gated behind a `test-util` Cargo feature so release builds cannot accidentally substitute a fake for a real camera. The crate's own `cfg(test)` unit tests always see them; downstream test crates opt in via `[dev-dependencies] bairelay_neolink_core = { ..., features = ["test-util"] }` (the binary already does). Helpers in `bairelay_mqtt` (`mock_client()`) and the binary (`PacketSource`, `MockVideoStream`, `CameraHandle::set_driver_for_test`, `StreamSource::start_with_packet_source`) compile unconditionally — they're scoped tightly enough that there's no production-leakage risk.
 
-### `FakeCameraBuilder` (`neolink_core::bc_protocol::fake_camera`)
+### `FakeCameraBuilder` (`bairelay_neolink_core::bc_protocol::fake_camera`)
 
 Closure-per-method `CameraDriver` impl:
 
@@ -342,7 +342,7 @@ assert_eq!(fake.calls().pir_set.lock().unwrap().clone(), vec![true]);
 
 Unset reads panic with `FakeCamera: <method> not configured for this test` via a single `unset(method) -> !` helper. `*_pending()` builders return a never-resolving future for testing 30 s timeout error branches under `tokio::time::pause`.
 
-### `MockConnection` (`neolink_core::bc_protocol::connection::mock`)
+### `MockConnection` (`bairelay_neolink_core::bc_protocol::connection::mock`)
 
 Scriptable request → reply harness for testing `BcCamera` command modules without a real socket:
 

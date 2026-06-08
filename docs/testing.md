@@ -70,11 +70,11 @@ tests/
 
 ## Test infrastructure crates expose
 
-`neolink_core`'s test helpers are gated behind the crate's `test-util` Cargo feature; the binary's `[dev-dependencies]` opts in. The other crates' helpers compile unconditionally. See `docs/implementation.md` § Test infrastructure for full API:
+`bairelay_neolink_core`'s test helpers are gated behind the crate's `test-util` Cargo feature; the binary's `[dev-dependencies]` opts in. The other crates' helpers compile unconditionally. See `docs/implementation.md` § Test infrastructure for full API:
 
-- `neolink_core::bc_protocol::FakeCameraBuilder` + `FakeCalls`
-- `neolink_core::bc_protocol::connection::mock::MockConnection`
-- `neolink_core::bc_protocol::connection::discovery::test_support::ScriptedDiscoverer`
+- `bairelay_neolink_core::bc_protocol::FakeCameraBuilder` + `FakeCalls`
+- `bairelay_neolink_core::bc_protocol::connection::mock::MockConnection`
+- `bairelay_neolink_core::bc_protocol::connection::discovery::test_support::ScriptedDiscoverer`
 - `bairelay_mqtt::test_support::mock_client()` + `MockHandle`
 - `bairelay::stream_source::PacketSource` (binary)
 - `bairelay::oneshot::snapshot::MockVideoStream` (binary, test-only)
@@ -83,9 +83,9 @@ tests/
 
 ## Offline Bc-protocol decoder (`tests/scripts/decode-bc-pcap/`)
 
-Replays a `tcpdump` capture of a Reolink Baichuan-over-UDP session through `neolink_core`'s production parsers + AES-CFB primitives and prints each Bc message's header + decrypted payload. Use it to identify message IDs and XML schemas that bairelay does not yet model.
+Replays a `tcpdump` capture of a Reolink Baichuan-over-UDP session through `bairelay_neolink_core`'s production parsers + AES-CFB primitives and prints each Bc message's header + decrypted payload. Use it to identify message IDs and XML schemas that bairelay does not yet model.
 
-Standalone cargo project, excluded from the workspace, opts `neolink_core` into the `pcap-decode-api` feature (off in production builds). Requires `tshark` on PATH for capture extraction.
+Standalone cargo project, excluded from the workspace, opts `bairelay_neolink_core` into the `pcap-decode-api` feature (off in production builds). Requires `tshark` on PATH for capture extraction.
 
 Quick invocation:
 
@@ -154,8 +154,8 @@ Argus emits **H.265 on main, H.264 on sub.** The replay test asserts the codec i
 
 ```rust
 use bytes::BytesMut;
-use neolink_core::bcmedia::model::BcMedia;
-use neolink_core::Error;
+use bairelay_neolink_core::bcmedia::model::BcMedia;
+use bairelay_neolink_core::Error;
 
 let raw = std::fs::read("tests/fixtures/cam1-main.bcmedia")?;
 let mut buf = BytesMut::from(raw.as_slice());

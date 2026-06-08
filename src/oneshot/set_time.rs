@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use crate::local_time;
 
@@ -20,7 +20,7 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc_protocol::FakeCameraBuilder;
+	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn set_time_records_call_and_returns_utc_string() {

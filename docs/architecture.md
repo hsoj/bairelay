@@ -12,7 +12,7 @@ bairelay/
 ├── tarpaulin.toml          # coverage tool defaults
 ├── src/                    # binary: CLI, config, orchestration, lifecycle
 ├── crates/
-│   ├── core/               # neolink_core: Baichuan protocol (vendored)
+│   ├── core/               # bairelay_neolink_core: Baichuan protocol (vendored)
 │   ├── rtsp/               # bairelay_rtsp: RTSP server + RTP packetisation
 │   ├── mqtt/               # bairelay_mqtt: MQTT bridge + HA discovery
 │   └── wake-server/        # bairelay_wake_server: local BcUdp wake server
@@ -39,7 +39,7 @@ Owns the application lifecycle:
 - RTSP `max_connections` semaphore (default 256 in the binary) caps concurrent client handlers.
 - Graceful shutdown via `CancellationToken` + supervisor-orchestrated per-task join with 2 s budget.
 
-### `crates/core/` — `neolink_core`
+### `crates/core/` — `bairelay_neolink_core`
 
 Vendored Baichuan protocol implementation. Modernised to edition 2021 with updated dependencies. Public surface:
 
@@ -84,7 +84,7 @@ MQTT bridge:
 
 Local replacement for Reolink's P2P cloud. Full wire-level reference: `docs/cloud-interception.md` § Part I.
 
-- BcUdp Discovery framing reused from `neolink_core::bcudp` (header + CRC + XOR XML).
+- BcUdp Discovery framing reused from `bairelay_neolink_core::bcudp` (header + CRC + XOR XML).
 - Two `tokio::net::UdpSocket` listeners (`middleman` port 9999, `register` port 58200) sharing one `Arc<CameraRegistry>` plus an `Arc<SessionAnchors>` map keyed by camera UID (issued at `M2D_Q_R`, echoed in `R2D_R_R` — cameras anchor to it).
 - Middleman: `C2M_Q` (clients) → `M2C_Q_R`; `D2M_Q` (cameras on boot) → `M2D_Q_R` issuing a fresh session token + ac.
 - Register: `D2R_R` (camera registration) → `R2D_R_R{rsp:-4, ac}`; `D2R_HB` upserts UID → source-addr at `Instant::now()`; `C2R_C` for a fresh entry spawns 10 × `R2D_C` at 100 ms then replies `R2C_C_R` + `R2C_T`; `D2R_DISC` acked with `R2D_DC_R`.
@@ -238,9 +238,9 @@ Per-camera `PreviewState { Live, Connecting, Sleeping }` published via `watch::S
 
 | Trait              | Location                                            | Purpose                                              |
 |--------------------|-----------------------------------------------------|------------------------------------------------------|
-| `CameraDriver`     | `neolink_core::bc_protocol::camera_driver`          | Subset of `BcCamera` the binary calls                |
-| `CameraDiscoverer` | `neolink_core::bc_protocol::connection::discovery`  | Discovery fallback chain (local/remote/map/relay)    |
-| `VideoStream`      | `neolink_core::bc_protocol::stream`                 | `BcMedia` pull loop over `StreamData`                |
+| `CameraDriver`     | `bairelay_neolink_core::bc_protocol::camera_driver`          | Subset of `BcCamera` the binary calls                |
+| `CameraDiscoverer` | `bairelay_neolink_core::bc_protocol::connection::discovery`  | Discovery fallback chain (local/remote/map/relay)    |
+| `VideoStream`      | `bairelay_neolink_core::bc_protocol::stream`                 | `BcMedia` pull loop over `StreamData`                |
 | `PacketSource`     | `bairelay::stream_source` (binary)                  | `BcMedia` injection for translator-loop tests        |
 | `StreamProvider`   | `bairelay_rtsp::provider`                           | RTSP server's view of a camera                       |
 

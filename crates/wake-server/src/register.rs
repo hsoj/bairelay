@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use neolink_core::bcudp::xml::{
+use bairelay_neolink_core::bcudp::xml::{
 	D2rHb, D2rR, HbTimer, IpPort, R2cCr, R2cT, R2dC, R2dDcr, R2dHbr, R2dRr, UdpXml,
 };
 use tokio::net::UdpSocket;
@@ -146,7 +146,7 @@ async fn handle_connect(
 	stale_after: Duration,
 	src: SocketAddr,
 	tid: u32,
-	c: neolink_core::bcudp::xml::C2rC,
+	c: bairelay_neolink_core::bcudp::xml::C2rC,
 	cancel: &CancellationToken,
 ) {
 	debug!(%src, uid = %c.uid, cid = c.cid, "C2R_C");

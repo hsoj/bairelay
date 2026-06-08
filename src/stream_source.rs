@@ -7,7 +7,7 @@
 //!
 //! Responsibilities:
 //! 1. Spawn a tokio task that pulls `BcMedia` packets from
-//!    [`neolink_core`].
+//!    [`bairelay_neolink_core`].
 //! 2. Split Annex-B NAL streams, detect the video codec, and translate
 //!    each packet into [`bairelay_rtsp::provider::Frame`].
 //! 3. Update the shared [`LastFrameBuffer`] on I-frames / P-frames.
@@ -44,8 +44,8 @@ use bairelay_rtsp::provider::Frame;
 use bairelay_rtsp::sdp::{SdpParams, VideoParams};
 use bairelay_rtsp::url::StreamKind as RtspStreamKind;
 
-use neolink_core::bc_protocol::{BcCamera, StreamKind as CoreStreamKind};
-use neolink_core::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
+use bairelay_neolink_core::bc_protocol::{BcCamera, StreamKind as CoreStreamKind};
+use bairelay_neolink_core::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
 
 use crate::bcmedia_dump::{BcMediaDumpConfig, FrameDumper};
 
@@ -385,7 +385,7 @@ impl StreamSource {
 	/// `camera` is the connected `BcCamera` to pull video from,
 	/// `camera_name` is the logical name (used in the SDP `s=` line),
 	/// `kind` is the bairelay-side stream kind (mapped to the underlying
-	/// `neolink_core::StreamKind` internally), and `last_frame` is the
+	/// `bairelay_neolink_core::StreamKind` internally), and `last_frame` is the
 	/// camera-scoped buffer shared across all sources for this camera.
 	pub fn start(
 		camera: Arc<BcCamera>,
@@ -1404,17 +1404,23 @@ struct TranslatorLoopArgs {
 trait PacketSource: Send {
 	async fn get_data(
 		&mut self,
-	) -> Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error>;
+	) -> Result<
+		std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+		bairelay_neolink_core::Error,
+	>;
 }
 
 /// Production adapter wrapping `BcCamera::StreamData`.
-struct StreamDataSource(neolink_core::bc_protocol::StreamData);
+struct StreamDataSource(bairelay_neolink_core::bc_protocol::StreamData);
 
 #[async_trait::async_trait]
 impl PacketSource for StreamDataSource {
 	async fn get_data(
 		&mut self,
-	) -> Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> {
+	) -> Result<
+		std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+		bairelay_neolink_core::Error,
+	> {
 		self.0.get_data().await
 	}
 }
@@ -1515,7 +1521,10 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 ///   Log + break.
 #[allow(clippy::too_many_arguments)]
 fn process_stream_result(
-	result: Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error>,
+	result: Result<
+		std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+		bairelay_neolink_core::Error,
+	>,
 	camera_name: &str,
 	rtsp_kind: RtspStreamKind,
 	tx: &broadcast::Sender<Frame>,
@@ -2206,7 +2215,7 @@ pub(crate) fn aac_samples_per_au(aot: u8) -> Option<u32> {
 /// invariant details (SDP populates first, `audio_presence` untouched, PTS
 /// counter held so Live resume continues cleanly).
 fn handle_aac(
-	aac: &neolink_core::bcmedia::model::BcMediaAac,
+	aac: &bairelay_neolink_core::bcmedia::model::BcMediaAac,
 	tx: &broadcast::Sender<Frame>,
 	audio_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
 	sdp_params: &Arc<RwLock<SdpParams>>,
@@ -2473,7 +2482,7 @@ fn dispatch_paced_audio(
 /// invariant details (SDP populates first, `audio_presence` untouched, PTS
 /// counter held so Live resume continues cleanly).
 fn handle_adpcm(
-	adpcm: &neolink_core::bcmedia::model::BcMediaAdpcm,
+	adpcm: &bairelay_neolink_core::bcmedia::model::BcMediaAdpcm,
 	tx: &broadcast::Sender<Frame>,
 	audio_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
 	sdp_params: &Arc<RwLock<SdpParams>>,
@@ -2562,7 +2571,7 @@ fn handle_adpcm(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bcmedia::model::{BcMediaIframe, BcMediaPframe, VideoType};
+	use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, BcMediaPframe, VideoType};
 
 	/// Bench helper: a fresh `Mutex<GapState::Live>` for unit tests that
 	/// don't care about gap-bridging. 's audio-drop gate uses
@@ -2916,7 +2925,7 @@ mod tests {
 	#[test]
 	fn handle_aac_drops_frame_during_bridging() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -2969,7 +2978,7 @@ mod tests {
 	#[test]
 	fn handle_adpcm_drops_frame_during_bridging() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAdpcm;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3025,7 +3034,7 @@ mod tests {
 	#[test]
 	fn handle_aac_pts_advances_through_bridging_and_resumes_in_live() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(16);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3360,7 +3369,7 @@ mod tests {
 		// dedicated tests.) Both info variants share the same ignore arm
 		// today, but covering both pins the contract in case the match
 		// arm ever splits.
-		use neolink_core::bcmedia::model::{BcMediaInfoV1, BcMediaInfoV2};
+		use bairelay_neolink_core::bcmedia::model::{BcMediaInfoV1, BcMediaInfoV2};
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3443,9 +3452,9 @@ mod tests {
 	#[test]
 	fn apply_bcmedia_packet_emits_aac_frame_and_updates_sdp_and_presence() {
 		use crate::audio_presence::AudioPresence;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 		use bairelay_rtsp::codec::AudioCodec;
 		use bairelay_rtsp::provider::AudioPayload;
-		use neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3520,9 +3529,9 @@ mod tests {
 	#[test]
 	fn apply_bcmedia_packet_transcodes_adpcm_to_g711_and_updates_presence() {
 		use crate::audio_presence::AudioPresence;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
 		use bairelay_rtsp::codec::AudioCodec;
 		use bairelay_rtsp::provider::AudioPayload;
-		use neolink_core::bcmedia::model::BcMediaAdpcm;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3602,7 +3611,7 @@ mod tests {
 		//   3. NOT upgrade audio_presence — presence tracks frames that
 		//      actually reached the broadcast; we dropped this one.
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3672,7 +3681,7 @@ mod tests {
 		// access units carry 1024 samples each; the RTP clock equals the
 		// audio sample rate; so each emitted frame must advance the
 		// counter by exactly 1024 ticks. This test pins the contract.
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3725,7 +3734,7 @@ mod tests {
 		// `pts: 0` on every frame. G.711 uses a static 8 kHz RTP clock
 		// (RFC 3551 PT 0) and encodes one tick per output sample, so the
 		// counter must advance by the per-frame sample count.
-		use neolink_core::bcmedia::model::BcMediaAdpcm;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3912,7 +3921,7 @@ mod tests {
 		// is the capability A3 added. The actual reader_task re-spawn
 		// wiring (if any is needed for the production path) is verified
 		// empirically by V2 live-verify on the Argus fleet.
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, _rx) = broadcast::channel::<Frame>(16);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -4015,7 +4024,7 @@ mod tests {
 		// `aot - 1`. AOT=1 → profile=0 → byte2 top two bits cleared.
 		// Copying the AOT=2 fixture ADTS header and flipping those two
 		// bits keeps sr_idx / channels / frame_length unchanged.
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -4100,7 +4109,7 @@ mod tests {
 	#[test]
 	fn handle_aac_drops_on_malformed_adts_header() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4135,7 +4144,7 @@ mod tests {
 	#[test]
 	fn handle_adpcm_drops_on_empty_data() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAdpcm;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4394,8 +4403,8 @@ mod tests {
 	fn handle_pframe_returns_none_before_first_iframe() {
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H264,
+		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![0x00, 0x00, 0x01, 0x41, 0xAA],
 		};
@@ -4408,8 +4417,8 @@ mod tests {
 	fn handle_pframe_returns_none_on_empty_nal_split() {
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H264,
+		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![],
 		};
@@ -4432,8 +4441,8 @@ mod tests {
 			video: None,
 			audio: None,
 		}));
-		let iframe = neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H264,
+		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![],
 			time: None,
@@ -4457,8 +4466,8 @@ mod tests {
 			audio: None,
 		}));
 		// 0x80: forbidden_zero_bit set → detect_codec returns None.
-		let iframe = neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H264,
+		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![0x00, 0x00, 0x01, 0x80, 0x00],
 			time: None,
@@ -4485,8 +4494,8 @@ mod tests {
 			video: None,
 			audio: None,
 		}));
-		let iframe = neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H265,
+		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H265,
 			microseconds: 0,
 			data: vec![
 				// VPS (type 32, byte 0x40, byte 1 0x01)
@@ -4543,8 +4552,8 @@ mod tests {
 	fn handle_pframe_drops_h265_unspec62_nals() {
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H265,
+		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H265,
 			microseconds: 0,
 			data: vec![
 				// UNSPEC62 (Reolink proprietary) — must be dropped.
@@ -4583,8 +4592,8 @@ mod tests {
 		// dropped (no broadcast, no `last_live_frame_at` update upstream).
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H265,
+		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H265,
 			microseconds: 0,
 			data: vec![0x00, 0x00, 0x01, 0x7C, 0x01, 0xAB, 0xCD],
 		};
@@ -4611,8 +4620,8 @@ mod tests {
 		}));
 		// SPS NAL (type 7) 2 bytes + PPS NAL (type 8) 2 bytes + IDR slice.
 		// 0x67 = SPS; only 2 bytes (short). 0x68 = PPS; 0x65 = IDR.
-		let iframe = neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: neolink_core::bcmedia::model::VideoType::H264,
+		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
+			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![
 				0x00, 0x00, 0x01, 0x67, 0x42, // SPS only 2 bytes
@@ -4663,7 +4672,7 @@ mod tests {
 		// parse_adts to hand back >7 — structurally impossible today.
 		// So skip the line-1539 attempt; see the test-as-doc below.
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4708,7 +4717,7 @@ mod tests {
 		// index 12-14 are reserved/invalid → build_audio_specific_config_hex
 		// should return None. Let's use sr_idx=13 (reserved).
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4751,7 +4760,7 @@ mod tests {
 	#[test]
 	fn handle_aac_drops_when_frame_length_below_adts_header() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAac;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4792,7 +4801,7 @@ mod tests {
 		// Build a minimal iframe packet and feed it through the helper.
 		// After the call, gap_state should be Live and last_emitted_pts
 		// should match the packet's 90kHz ts.
-		use neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
+		use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4823,8 +4832,10 @@ mod tests {
 				0x00, 0x00, 0x01, 0x65, 0xaa, 0xbb, 0xcc, // IDR
 			],
 		});
-		let result: Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> =
-			Ok(Ok(packet));
+		let result: Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		> = Ok(Ok(packet));
 		let keep_going = process_stream_result(
 			result,
 			"cam1",
@@ -4855,7 +4866,7 @@ mod tests {
 	#[test]
 	fn process_stream_result_ok_audio_does_not_update_live_markers() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAdpcm;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4877,8 +4888,10 @@ mod tests {
 		let cancel = CancellationToken::new();
 		// Empty ADPCM (handle_adpcm returns None) — gap_state stays Bridging.
 		let packet = BcMedia::Adpcm(BcMediaAdpcm { data: vec![] });
-		let result: Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> =
-			Ok(Ok(packet));
+		let result: Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		> = Ok(Ok(packet));
 		let keep = process_stream_result(
 			result,
 			"cam1",
@@ -4907,7 +4920,7 @@ mod tests {
 
 	#[test]
 	fn process_stream_result_decode_error_continues() {
-		use neolink_core::Error;
+		use bairelay_neolink_core::Error;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4927,8 +4940,10 @@ mod tests {
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
 		// Inner Err — decode error.
-		let result: Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> =
-			Ok(Err(Error::Other("decode fail")));
+		let result: Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		> = Ok(Err(Error::Other("decode fail")));
 		let keep = process_stream_result(
 			result,
 			"cam1",
@@ -4954,7 +4969,7 @@ mod tests {
 
 	#[test]
 	fn process_stream_result_outer_error_breaks_loop() {
-		use neolink_core::Error;
+		use bairelay_neolink_core::Error;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4974,8 +4989,10 @@ mod tests {
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
 		// Outer Err — stream finished unexpectedly.
-		let result: Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> =
-			Err(Error::StreamFinished);
+		let result: Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		> = Err(Error::StreamFinished);
 		let keep = process_stream_result(
 			result,
 			"cam1",
@@ -5003,7 +5020,7 @@ mod tests {
 	fn process_stream_result_outer_error_on_cancel_is_quiet() {
 		// Same as above but with cancel.is_cancelled() = true, hitting the
 		// debug-level log path instead of warn.
-		use neolink_core::Error;
+		use bairelay_neolink_core::Error;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -5023,8 +5040,10 @@ mod tests {
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
 		cancel.cancel();
-		let result: Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> =
-			Err(Error::StreamFinished);
+		let result: Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		> = Err(Error::StreamFinished);
 		let keep = process_stream_result(
 			result,
 			"cam1",
@@ -5051,7 +5070,7 @@ mod tests {
 	#[test]
 	fn handle_adpcm_drops_on_short_block_after_decimation() {
 		use crate::audio_presence::AudioPresence;
-		use neolink_core::bcmedia::model::BcMediaAdpcm;
+		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -5098,7 +5117,10 @@ mod tests {
 	/// Scripted [`PacketSource`] backed by a `VecDeque` of results.
 	struct ScriptedSource {
 		queue: std::collections::VecDeque<
-			Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error>,
+			Result<
+				std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+				bairelay_neolink_core::Error,
+			>,
 		>,
 	}
 
@@ -5106,7 +5128,10 @@ mod tests {
 	impl PacketSource for ScriptedSource {
 		async fn get_data(
 			&mut self,
-		) -> Result<std::result::Result<BcMedia, neolink_core::Error>, neolink_core::Error> {
+		) -> Result<
+			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
+			bairelay_neolink_core::Error,
+		> {
 			match self.queue.pop_front() {
 				Some(r) => r,
 				// Pending forever once script exhausted — the test drives
@@ -5183,7 +5208,7 @@ mod tests {
 			cancel,
 		);
 		let mut queue = std::collections::VecDeque::new();
-		queue.push_back(Err(neolink_core::Error::StreamFinished));
+		queue.push_back(Err(bairelay_neolink_core::Error::StreamFinished));
 		let mut source = ScriptedSource { queue };
 		tokio::time::timeout(
 			Duration::from_millis(500),
@@ -5206,7 +5231,7 @@ mod tests {
 			cancel.clone(),
 		);
 		let mut queue = std::collections::VecDeque::new();
-		queue.push_back(Ok(Err(neolink_core::Error::Other("decode"))));
+		queue.push_back(Ok(Err(bairelay_neolink_core::Error::Other("decode"))));
 		let mut source = ScriptedSource { queue };
 		let cancel_cp = cancel.clone();
 		tokio::spawn(async move {
@@ -5227,7 +5252,7 @@ mod tests {
 		// translator loop plumbing with a scripted PacketSource. This
 		// covers the Self-construction code path in production's
 		// `start` without needing a real BcCamera.
-		use neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
+		use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let packet = BcMedia::Iframe(BcMediaIframe {
 			video_type: VideoType::H264,
@@ -5261,7 +5286,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn drive_translator_loop_forwards_video_frame_and_updates_markers() {
-		use neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
+		use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let cancel = CancellationToken::new();
 		let args = translator_args(

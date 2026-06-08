@@ -67,7 +67,7 @@ pub struct Cli {
 	pub json: bool,
 
 	/// Increase log verbosity. -v info→debug, -vv debug→trace +
-	/// neolink_core=debug, -vvv trace. RUST_LOG wins if set.
+	/// bairelay_neolink_core=debug, -vvv trace. RUST_LOG wins if set.
 	#[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
 	pub verbose: u8,
 

@@ -2,7 +2,7 @@
 //!
 //! Reads a tcpdump capture, demuxes UDP datagrams between the camera and
 //! one peer (bairelay or the official client), drives
-//! `neolink_core`'s `pcap_decode_api::Session` to reassemble + decrypt the
+//! `bairelay_neolink_core`'s `pcap_decode_api::Session` to reassemble + decrypt the
 //! Bc message stream, and prints the decoded XML for each message.
 //!
 //! Used to identify Bc message IDs and XML schemas bairelay does not
@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use log::{Log, Metadata, Record};
-use neolink_core::pcap_decode_api::{Credentials, DecodedMessage, Direction, Session};
+use bairelay_neolink_core::pcap_decode_api::{Credentials, DecodedMessage, Direction, Session};
 
 const USAGE: &str = "\
 decode-bc-pcap — offline decoder for captured Baichuan-over-UDP sessions.
@@ -124,7 +124,7 @@ fn parse_args() -> Result<Args, String> {
 	})
 }
 
-/// Captures `log::trace!` records from neolink_core's BcCodex and
+/// Captures `log::trace!` records from bairelay_neolink_core's BcCodex and
 /// surfaces them via a side channel: the most recent payload XML
 /// (per-thread). The decoder pulls this back after each Bc decode call
 /// to attach the raw decrypted XML to the corresponding output line.
@@ -155,7 +155,7 @@ impl Log for CaptureLogger {
 	}
 	fn log(&self, record: &Record) {
 		let msg = format!("{}", record.args());
-		// neolink_core's de.rs format strings:
+		// bairelay_neolink_core's de.rs format strings:
 		//   "Extension Txt: {:?}"
 		//   "Payload Txt: {:?}"
 		// where `{:?}` Debug-formats a `String` (so the inner value is
@@ -419,10 +419,10 @@ fn print_message(
 	} else {
 		// Either body had no payload, or the payload was binary, or trace
 		// capture missed it (shouldn't happen for XML payloads).
-		use neolink_core::bc::model::BcBody;
+		use bairelay_neolink_core::bc::model::BcBody;
 		match &msg.bc.body {
 			BcBody::ModernMsg(modern) => match &modern.payload {
-				Some(neolink_core::bc::xml::BcPayloads::Binary(b)) => {
+				Some(bairelay_neolink_core::bc::xml::BcPayloads::Binary(b)) => {
 					println!("--- Payload binary, {} bytes ---", b.len());
 					print_hex_ascii(b);
 					// Surface a UTF-8 XML view if the raw wire bytes are
@@ -451,7 +451,7 @@ fn print_message(
 						}
 					}
 				}
-				Some(neolink_core::bc::xml::BcPayloads::BcXml(_)) => {
+				Some(bairelay_neolink_core::bc::xml::BcPayloads::BcXml(_)) => {
 					if !brief {
 						println!("--- Payload (parsed only, raw not captured) ---");
 						println!("{:#?}", modern.payload);

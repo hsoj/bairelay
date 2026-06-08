@@ -1,5 +1,5 @@
 [package]
-name = "bairelay_wake_server"
+name = "bairelay-wake-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ homepage.workspace = true
 description = "Local replacement for Reolink's P2P cloud servers; wakes battery cameras over the LAN."
 
 [dependencies]
-neolink_core = { path = "../core" }
+bairelay-neolink-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"

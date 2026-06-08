@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
 
@@ -55,8 +55,8 @@ async fn read_current_state(cam: &dyn CameraDriver) -> Result<bool> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
-	use neolink_core::bc_protocol::FakeCameraBuilder;
+	use bairelay_neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
+	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 	use tokio::sync::mpsc;
 	use tokio::time::Instant;
 

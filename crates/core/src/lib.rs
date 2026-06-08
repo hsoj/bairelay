@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
-//! use neolink_core::bc_protocol::{BcCamera, BcCameraOpt, DiscoveryMethods, ConnectionProtocol, Credentials};
+//! use bairelay_neolink_core::bc_protocol::{BcCamera, BcCameraOpt, DiscoveryMethods, ConnectionProtocol, Credentials};
 //! let options = BcCameraOpt {
 //!     name: "CamName".to_string(),
 //!     channel_id: 0,
@@ -34,7 +34,7 @@
 //!
 //! ```no_run
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
-//! # use neolink_core::bc_protocol::{BcCamera, BcCameraOpt, DiscoveryMethods, ConnectionProtocol, Credentials};
+//! # use bairelay_neolink_core::bc_protocol::{BcCamera, BcCameraOpt, DiscoveryMethods, ConnectionProtocol, Credentials};
 //! # let options = BcCameraOpt {
 //! #    name: "CamName".to_string(),
 //! #    channel_id: 0,
@@ -325,7 +325,7 @@ pub mod pcap_decode_api {
 		/// complete Bc message that becomes decodable from the new bytes,
 		/// `on_msg` is called in arrival order — once per message,
 		/// before the next is decoded. The callback shape is critical
-		/// for tools that capture neolink_core's `log::trace!` output
+		/// for tools that capture bairelay_neolink_core's `log::trace!` output
 		/// to attach raw decrypted payloads to specific messages: the
 		/// trace channel is a shared global, so the caller must drain
 		/// it between successive decodes.

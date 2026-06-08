@@ -1,10 +1,10 @@
 # decode-bc-pcap — offline Baichuan-over-UDP session decoder
 
-Replay a tcpdump capture of a Reolink Baichuan-over-UDP session through `neolink_core`'s parsers + AES-CFB primitives, printing each Bc message's header + decrypted payload (XML or binary). Use it to identify Bc message IDs and XML schemas bairelay does not yet model.
+Replay a tcpdump capture of a Reolink Baichuan-over-UDP session through `bairelay_neolink_core`'s parsers + AES-CFB primitives, printing each Bc message's header + decrypted payload (XML or binary). Use it to identify Bc message IDs and XML schemas bairelay does not yet model.
 
 ## Status
 
-Standalone cargo project, excluded from the workspace. Compiled on demand. `neolink_core` is opted into the `pcap-decode-api` feature only when this tool builds — production builds never see the decoder surface.
+Standalone cargo project, excluded from the workspace. Compiled on demand. `bairelay_neolink_core` is opted into the `pcap-decode-api` feature only when this tool builds — production builds never see the decoder surface.
 
 ## Requirements
 
@@ -63,14 +63,14 @@ The "raw decrypted, before serde parse" view is load-bearing: it includes XML el
 
 ## How it works
 
-The tool pipes `tshark`'s extracted UDP payloads (one packet per line, hex-encoded `udp.payload` field) into `neolink_core::pcap_decode_api::Session`. The session:
+The tool pipes `tshark`'s extracted UDP payloads (one packet per line, hex-encoded `udp.payload` field) into `bairelay_neolink_core::pcap_decode_api::Session`. The session:
 
 1. Per direction, reassembles `BcUdp::Data` packets in `packet_id` order.
 2. Drives `Bc::deserialize` on the assembled stream — production parser, production decryption.
 3. Tracks encryption-protocol negotiation across login (`msg_id=1`, `response_code >> 8 == 0xdd`) — same logic the live `BcCodex` runs.
 4. Calls a per-message callback so the tool can grab `log::trace!("Payload Txt: ...")` output between successive decodes (the trace channel is a global; collecting all decodes first and draining later attributes the last message's trace to the first).
 
-`neolink_core` exposes the minimum surface needed via the `pcap-decode-api` Cargo feature — `Session`, `Direction`, `DecodedMessage`, `Credentials`, `Error`. None of those compile into release builds.
+`bairelay_neolink_core` exposes the minimum surface needed via the `pcap-decode-api` Cargo feature — `Session`, `Direction`, `DecodedMessage`, `Credentials`, `Error`. None of those compile into release builds.
 
 ## Caveats
 

@@ -9,7 +9,7 @@ use tokio::time::timeout;
 use bairelay_mqtt::control::{ControlCommand, IrMode, PtzDirection};
 use bairelay_mqtt::{topics, SharedMqttClient, StatusPublisher};
 
-use neolink_core::bc_protocol::{Direction, LightState};
+use bairelay_neolink_core::bc_protocol::{Direction, LightState};
 
 use crate::camera::CameraHandle;
 
@@ -192,7 +192,7 @@ pub async fn dispatch_control(
 				// `query/ptz/preset`; a miss means either a typo or a
 				// stale dashboard.
 				tracing::warn!(camera = %camera, name = %name, "PTZ preset name not in cache");
-				Err(neolink_core::bc_protocol::Error::Other(
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
 					"PTZ preset name not in cache",
 				))
 			}
@@ -311,7 +311,7 @@ pub async fn dispatch_control(
 async fn wait_for_bc_camera(
 	cam: &Arc<CameraHandle>,
 	deadline: Duration,
-) -> Option<Arc<dyn neolink_core::bc_protocol::CameraDriver>> {
+) -> Option<Arc<dyn bairelay_neolink_core::bc_protocol::CameraDriver>> {
 	let cancel = cam.cancel_token().clone();
 	let cam_clone = Arc::clone(cam);
 	let inner = async move {
@@ -335,11 +335,15 @@ async fn wait_for_bc_camera(
 /// need a fake camera that hangs 30 s.
 pub(crate) fn timeout_to_result<T>(
 	outcome: std::result::Result<
-		std::result::Result<T, neolink_core::bc_protocol::Error>,
+		std::result::Result<T, bairelay_neolink_core::bc_protocol::Error>,
 		tokio::time::error::Elapsed,
 	>,
-) -> std::result::Result<T, neolink_core::bc_protocol::Error> {
-	outcome.unwrap_or_else(|_| Err(neolink_core::bc_protocol::Error::Other("Command timed out")))
+) -> std::result::Result<T, bairelay_neolink_core::bc_protocol::Error> {
+	outcome.unwrap_or_else(|_| {
+		Err(bairelay_neolink_core::bc_protocol::Error::Other(
+			"Command timed out",
+		))
+	})
 }
 
 /// Serialize a serde-compatible struct to XML string (matches neolink's
@@ -356,24 +360,26 @@ mod tests {
 	use super::*;
 	use crate::camera::CameraHandle;
 	use crate::config::test_helpers::minimal_camera_config;
-	use neolink_core::bc_protocol::{CameraDriver, FakeCamera, FakeCameraBuilder};
+	use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCamera, FakeCameraBuilder};
 	use std::sync::Arc as StdArc;
 	use tokio_util::sync::CancellationToken;
 
 	#[test]
 	fn timeout_to_result_forwards_ok_value() {
-		let r: std::result::Result<u32, neolink_core::bc_protocol::Error> =
+		let r: std::result::Result<u32, bairelay_neolink_core::bc_protocol::Error> =
 			timeout_to_result(Ok(Ok(42)));
 		assert_eq!(r.unwrap(), 42);
 	}
 
 	#[test]
 	fn timeout_to_result_forwards_inner_error() {
-		let r: std::result::Result<u32, neolink_core::bc_protocol::Error> =
-			timeout_to_result(Ok(Err(neolink_core::bc_protocol::Error::AuthFailed)));
+		let r: std::result::Result<u32, bairelay_neolink_core::bc_protocol::Error> =
+			timeout_to_result(Ok(Err(
+				bairelay_neolink_core::bc_protocol::Error::AuthFailed,
+			)));
 		assert!(matches!(
 			r.unwrap_err(),
-			neolink_core::bc_protocol::Error::AuthFailed
+			bairelay_neolink_core::bc_protocol::Error::AuthFailed
 		));
 	}
 
@@ -381,11 +387,13 @@ mod tests {
 	async fn timeout_to_result_elapsed_becomes_other_command_timed_out() {
 		let elapsed = tokio::time::timeout(
 			Duration::from_millis(1),
-			std::future::pending::<std::result::Result<(), neolink_core::bc_protocol::Error>>(),
+			std::future::pending::<
+				std::result::Result<(), bairelay_neolink_core::bc_protocol::Error>,
+			>(),
 		)
 		.await
 		.unwrap_err();
-		let r: std::result::Result<(), neolink_core::bc_protocol::Error> =
+		let r: std::result::Result<(), bairelay_neolink_core::bc_protocol::Error> =
 			timeout_to_result(Err(elapsed));
 		let err = r.unwrap_err();
 		assert!(format!("{err}").contains("Command timed out"));
@@ -657,7 +665,7 @@ mod tests {
 	/// zero so the test doesn't wait on a real clock.
 	#[tokio::test]
 	async fn dispatch_ptz_directional_move_sends_direction_then_stop() {
-		use neolink_core::bc_protocol::Direction;
+		use bairelay_neolink_core::bc_protocol::Direction;
 
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pd", fake);
@@ -688,7 +696,7 @@ mod tests {
 	/// before the command failed should not be left running.
 	#[tokio::test]
 	async fn dispatch_ptz_directional_still_stops_on_error() {
-		use neolink_core::bc_protocol::Direction;
+		use bairelay_neolink_core::bc_protocol::Direction;
 
 		// FakeCamera::send_ptz always returns Ok in the scaffolding, so
 		// simulate error via a single-attempt counter-closure is not
@@ -768,7 +776,7 @@ mod tests {
 	/// `LightState` and calls `irled_light_set`.
 	#[tokio::test]
 	async fn dispatch_ir_maps_each_mode_variant() {
-		use neolink_core::bc_protocol::LightState;
+		use bairelay_neolink_core::bc_protocol::LightState;
 		let cases = [
 			(IrMode::On, LightState::On),
 			(IrMode::Off, LightState::Off),
@@ -877,7 +885,7 @@ mod tests {
 	/// serialized XML payload to `status/battery`.
 	#[tokio::test]
 	async fn dispatch_query_battery_publishes_xml() {
-		use neolink_core::bc::xml::BatteryInfo;
+		use bairelay_neolink_core::bc::xml::BatteryInfo;
 		let fake = FakeCameraBuilder::new()
 			.with_battery_info(|| {
 				Ok(BatteryInfo {
@@ -910,7 +918,11 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_battery_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| Err(neolink_core::bc_protocol::Error::Other("battery refused")))
+			.with_battery_info(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"battery refused",
+				))
+			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qbe", fake);
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
@@ -985,7 +997,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_preview_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_snapshot(|| Err(neolink_core::bc_protocol::Error::Other("no snap")))
+			.with_snapshot(|| Err(bairelay_neolink_core::bc_protocol::Error::Other("no snap")))
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpe", fake);
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
@@ -1053,7 +1065,7 @@ mod tests {
 	/// `QueryPir` publishes the camera's PIR state on `status/pir`.
 	#[tokio::test]
 	async fn dispatch_query_pir_publishes_xml() {
-		use neolink_core::bc::xml::RfAlarmCfg;
+		use bairelay_neolink_core::bc::xml::RfAlarmCfg;
 		let fake = FakeCameraBuilder::new()
 			.with_pirstate(|| {
 				Ok(RfAlarmCfg {
@@ -1084,7 +1096,11 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_pir_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| Err(neolink_core::bc_protocol::Error::Other("pir refused")))
+			.with_pirstate(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"pir refused",
+				))
+			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpe", fake);
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
@@ -1110,7 +1126,7 @@ mod tests {
 	/// is a silent no-op so we only assert the cache + reply here.
 	#[tokio::test]
 	async fn dispatch_query_ptz_preset_refreshes_cache_and_replies_ok() {
-		use neolink_core::bc::xml::{Preset, PresetList, PtzPreset};
+		use bairelay_neolink_core::bc::xml::{Preset, PresetList, PtzPreset};
 		let fake = FakeCameraBuilder::new()
 			.with_ptz_preset(|| {
 				Ok(PtzPreset {
@@ -1164,7 +1180,11 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_ptz_preset_driver_error_preserves_cache() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| Err(neolink_core::bc_protocol::Error::Other("ptz refused")))
+			.with_ptz_preset(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"ptz refused",
+				))
+			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qptze", fake);
 		cameras
@@ -1227,7 +1247,7 @@ mod tests {
 	/// move with amount > 0 so the sleep branch runs.)
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_ptz_with_positive_amount_sleeps_before_stop() {
-		use neolink_core::bc_protocol::Direction;
+		use bairelay_neolink_core::bc_protocol::Direction;
 
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pds", fake);
@@ -1335,7 +1355,7 @@ mod tests {
 	/// records the call before suspending.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_ptz_directional_timeout_still_stops() {
-		use neolink_core::bc_protocol::Direction;
+		use bairelay_neolink_core::bc_protocol::Direction;
 		let fake = FakeCameraBuilder::new().with_send_ptz_pending().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-ptt", fake);
 		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();

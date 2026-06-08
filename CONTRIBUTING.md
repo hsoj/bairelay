@@ -29,7 +29,7 @@ Linux and macOS are first-class platforms; both are exercised in CI on every pus
 bairelay/
 ├── src/                # binary: CLI, config, orchestrator, lifecycle
 ├── crates/
-│   ├── core/           # neolink_core: Baichuan protocol (vendored)
+│   ├── core/           # bairelay_neolink_core: Baichuan protocol (vendored)
 │   ├── rtsp/           # bairelay_rtsp: pure-Rust RTSP server + RTP packetisers
 │   ├── mqtt/           # bairelay_mqtt: MQTT bridge + HA discovery
 │   └── wake-server/    # bairelay_wake_server: local BcUdp wake server

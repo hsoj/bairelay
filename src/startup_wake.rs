@@ -193,7 +193,7 @@ async fn warm_one(
 /// untouched. Lifted out of [`warm_one`] so behaviour tests can drive
 /// it against a `FakeCamera` without the stream / audio dependencies.
 pub(crate) async fn capture_snapshot_into_buffer(
-	camera: &std::sync::Arc<dyn neolink_core::bc_protocol::CameraDriver>,
+	camera: &std::sync::Arc<dyn bairelay_neolink_core::bc_protocol::CameraDriver>,
 	name: &str,
 	last_frame: &bairelay_rtsp::buffer::LastFrameBuffer,
 ) {
@@ -289,8 +289,8 @@ mod tests {
 	/// those exact bytes into the shared `LastFrameBuffer`.
 	#[tokio::test]
 	async fn capture_snapshot_into_buffer_warms_last_frame() {
+		use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 		use bairelay_rtsp::buffer::LastFrameBuffer;
-		use neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 
 		let jpeg_bytes: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xAA, 0xBB];
 		let expected = jpeg_bytes.clone();
@@ -313,12 +313,12 @@ mod tests {
 	/// where an error path silently writes garbage into the buffer.
 	#[tokio::test]
 	async fn capture_snapshot_into_buffer_leaves_buffer_empty_on_error() {
+		use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 		use bairelay_rtsp::buffer::LastFrameBuffer;
-		use neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 
 		let fake = FakeCameraBuilder::new()
 			.with_snapshot(|| {
-				Err(neolink_core::bc_protocol::Error::Other(
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
 					"camera declined snapshot",
 				))
 			})
@@ -424,8 +424,8 @@ mod tests {
 		use crate::camera::CameraHandle;
 		use crate::config::test_helpers::minimal_camera_config;
 		use crate::stream_source::StreamSource;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 		use bairelay_rtsp::url::StreamKind;
-		use neolink_core::bc_protocol::FakeCameraBuilder;
 		use std::collections::HashMap;
 		use std::sync::Arc as StdArc;
 
@@ -436,7 +436,7 @@ mod tests {
 			.build();
 		// Prove the fake is dyn-compatible (same pattern the driver
 		// uses elsewhere).
-		let _: StdArc<dyn neolink_core::bc_protocol::CameraDriver> = fake.clone();
+		let _: StdArc<dyn bairelay_neolink_core::bc_protocol::CameraDriver> = fake.clone();
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
@@ -467,10 +467,10 @@ mod tests {
 		use crate::camera::CameraHandle;
 		use crate::config::test_helpers::minimal_camera_config;
 		use crate::stream_source::StreamSource;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 		use bairelay_rtsp::buffer::VideoBurst;
 		use bairelay_rtsp::codec::VideoCodec;
 		use bairelay_rtsp::url::StreamKind;
-		use neolink_core::bc_protocol::FakeCameraBuilder;
 		use std::collections::HashMap;
 		use std::time::Instant as StdInstant;
 
@@ -547,16 +547,20 @@ mod tests {
 	/// case above.
 	#[tokio::test]
 	async fn capture_snapshot_error_does_not_clobber_prior_frame() {
+		use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 		use bairelay_rtsp::buffer::LastFrameBuffer;
 		use bytes::Bytes;
-		use neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 
 		let good: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0xCA, 0xFE];
 		let lfb = LastFrameBuffer::new();
 		lfb.set_jpeg(Bytes::from(good.clone()));
 
 		let fake = FakeCameraBuilder::new()
-			.with_snapshot(|| Err(neolink_core::bc_protocol::Error::Other("snapshot declined")))
+			.with_snapshot(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"snapshot declined",
+				))
+			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
 		capture_snapshot_into_buffer(&driver, "cam1", &lfb).await;

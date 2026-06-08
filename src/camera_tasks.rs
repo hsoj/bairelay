@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use neolink_core::bc_protocol::{CameraDriver, MotionStatus};
+use bairelay_neolink_core::bc_protocol::{CameraDriver, MotionStatus};
 
 use bairelay_mqtt::{SharedMqttClient, StatusPublisher};
 use bairelay_rtsp::buffer::LastFrameBuffer;
@@ -381,8 +381,8 @@ pub async fn publish_pir_state(
 mod tests {
 	use super::*;
 	use bairelay_mqtt::test_support::MockHandle;
+	use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 	use bytes::Bytes;
-	use neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 
 	/// Helper: every status-publishing task takes an `Arc<StatusCache>`
 	/// as its final argument. Tests that don't assert on cache contents
@@ -423,11 +423,11 @@ mod tests {
 		// Script a motion stream: tx stays with the test, rx goes into
 		// the fake so the listener pulls from our channel.
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
@@ -452,7 +452,7 @@ mod tests {
 		// Push a Start event and wait briefly for the publish to
 		// flow through.
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -478,7 +478,7 @@ mod tests {
 	/// on the retained topic + clamped numeric payload, then cancels.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_publishes_level_on_success() {
-		use neolink_core::bc::xml::BatteryInfo;
+		use bairelay_neolink_core::bc::xml::BatteryInfo;
 
 		let fake = FakeCameraBuilder::new()
 			.with_battery_info(|| {
@@ -523,7 +523,7 @@ mod tests {
 	/// The poller swallows `Err` at debug and keeps ticking.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_tolerates_transient_error_and_recovers() {
-		use neolink_core::bc::xml::BatteryInfo;
+		use bairelay_neolink_core::bc::xml::BatteryInfo;
 		use std::sync::atomic::{AtomicU32, Ordering};
 
 		let call = Arc::new(AtomicU32::new(0));
@@ -533,7 +533,7 @@ mod tests {
 			.with_battery_info(move || {
 				let n = call_c.fetch_add(1, Ordering::AcqRel);
 				if n == 0 {
-					Err(neolink_core::bc_protocol::Error::Other(
+					Err(bairelay_neolink_core::bc_protocol::Error::Other(
 						"transient test failure",
 					))
 				} else {
@@ -584,7 +584,7 @@ mod tests {
 	/// status=1 and assert `status/floodlight = {"state":"on"}`.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn floodlight_listener_publishes_on_event() {
-		use neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
+		use bairelay_neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
 
 		let (tx, rx) = tokio::sync::mpsc::channel::<FloodlightStatusList>(4);
 		let fake = FakeCameraBuilder::new().with_floodlight_stream(rx).build();
@@ -669,7 +669,7 @@ mod tests {
 	/// is 1.
 	#[tokio::test]
 	async fn publish_pir_state_publishes_enabled() {
-		use neolink_core::bc::xml::RfAlarmCfg;
+		use bairelay_neolink_core::bc::xml::RfAlarmCfg;
 
 		let fake = FakeCameraBuilder::new()
 			.with_pirstate(|| {
@@ -848,11 +848,11 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_publishes_motion_off_on_stop_event() {
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
@@ -875,13 +875,13 @@ mod tests {
 
 		// Start then Stop in quick succession.
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
 			.unwrap();
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Stop(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Stop(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -905,11 +905,11 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_holds_wake_lock_through_hold_down() {
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
@@ -935,7 +935,7 @@ mod tests {
 
 		// Start → wake lock acquired.
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -945,7 +945,7 @@ mod tests {
 
 		// Stop → lock still held during hold-down window.
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Stop(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Stop(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -976,11 +976,11 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_start_during_hold_down_cancels_release() {
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
@@ -1005,21 +1005,21 @@ mod tests {
 
 		// Start → Stop → Start, all within the hold-down window.
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(50)).await;
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Stop(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Stop(
 				std::time::Instant::now(),
 			)))
 			.await
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(50)).await;
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1044,11 +1044,11 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_ignores_nochange_and_continues() {
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
@@ -1070,13 +1070,15 @@ mod tests {
 		));
 
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::NoChange(
-				std::time::Instant::now(),
-			)))
+			.send(Ok(
+				bairelay_neolink_core::bc_protocol::MotionStatus::NoChange(
+					std::time::Instant::now(),
+				),
+			))
 			.await
 			.unwrap();
 		motion_tx
-			.send(Ok(neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1100,11 +1102,11 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_breaks_inner_loop_on_next_motion_error() {
 		type MotionItem = std::result::Result<
-			neolink_core::bc_protocol::MotionStatus,
-			neolink_core::bc_protocol::Error,
+			bairelay_neolink_core::bc_protocol::MotionStatus,
+			bairelay_neolink_core::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
@@ -1128,7 +1130,7 @@ mod tests {
 		// Push one Err into the motion channel. The listener will log
 		// and break; we cancel before the 1s retry sleep finishes.
 		motion_tx
-			.send(Err(neolink_core::bc_protocol::Error::Other(
+			.send(Err(bairelay_neolink_core::bc_protocol::Error::Other(
 				"scripted next_motion failure",
 			)))
 			.await
@@ -1150,7 +1152,8 @@ mod tests {
 		// drained channel instead so the `listen_on_floodlight` call
 		// succeeds and `rx.recv()` returns None immediately — matches
 		// the "None → break" path on line 300.)
-		let (tx, rx) = tokio::sync::mpsc::channel::<neolink_core::bc::xml::FloodlightStatusList>(1);
+		let (tx, rx) =
+			tokio::sync::mpsc::channel::<bairelay_neolink_core::bc::xml::FloodlightStatusList>(1);
 		drop(tx); // close the sender so rx.recv() returns None.
 		let fake = FakeCameraBuilder::new().with_floodlight_stream(rx).build();
 		let driver: Arc<dyn CameraDriver> = fake;
@@ -1177,7 +1180,11 @@ mod tests {
 	#[tokio::test]
 	async fn publish_pir_state_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| Err(neolink_core::bc_protocol::Error::Other("pir refused")))
+			.with_pirstate(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"pir refused",
+				))
+			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
@@ -1205,7 +1212,9 @@ mod tests {
 	async fn floodlight_poller_tolerates_err_without_publishing() {
 		let fake = FakeCameraBuilder::new()
 			.with_is_floodlight_tasks_enabled(|| {
-				Err(neolink_core::bc_protocol::Error::Other("tasks refused"))
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"tasks refused",
+				))
 			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
@@ -1244,7 +1253,7 @@ mod tests {
 
 		let fresh_jpeg = fake_jpeg();
 		let fresh_clone = fresh_jpeg.clone();
-		let fake = neolink_core::bc_protocol::FakeCameraBuilder::new()
+		let fake = bairelay_neolink_core::bc_protocol::FakeCameraBuilder::new()
 			.with_snapshot(move || Ok(fresh_clone.to_vec()))
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
@@ -1301,8 +1310,12 @@ mod tests {
 		use crate::camera::CameraHandle;
 		use crate::config::test_helpers::minimal_camera_config;
 
-		let fake = neolink_core::bc_protocol::FakeCameraBuilder::new()
-			.with_snapshot(|| Err(neolink_core::bc_protocol::Error::Other("snap denied")))
+		let fake = bairelay_neolink_core::bc_protocol::FakeCameraBuilder::new()
+			.with_snapshot(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"snap denied",
+				))
+			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
 
@@ -1388,7 +1401,7 @@ mod tests {
 	async fn motion_listener_retries_after_subscribe_error() {
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream_error(|| {
-				neolink_core::bc_protocol::Error::Other("scripted subscribe failure")
+				bairelay_neolink_core::bc_protocol::Error::Other("scripted subscribe failure")
 			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;
@@ -1425,7 +1438,7 @@ mod tests {
 	async fn floodlight_listener_returns_on_subscribe_error() {
 		let fake = FakeCameraBuilder::new()
 			.with_floodlight_stream_error(|| {
-				neolink_core::bc_protocol::Error::Other("floodlight unsupported")
+				bairelay_neolink_core::bc_protocol::Error::Other("floodlight unsupported")
 			})
 			.build();
 		let driver: Arc<dyn CameraDriver> = fake;

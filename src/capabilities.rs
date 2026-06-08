@@ -1,7 +1,7 @@
 //! Per-camera capability cache.
 //!
 //! Capabilities are discovered by calling
-//! [`neolink_core::bc_protocol::BcCamera::get_support`] once per
+//! [`bairelay_neolink_core::bc_protocol::BcCamera::get_support`] once per
 //! successful connect and caching the relevant booleans on
 //! [`crate::camera::CameraHandle`]. The HA MQTT discovery publisher
 //! consults this cache to gate capability-dependent entities (PT

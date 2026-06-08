@@ -1,5 +1,5 @@
 [package]
-name = "neolink_core"
+name = "bairelay-neolink-core"
 description = "Core services and structure for Reolink IP cameras"
 version.workspace = true
 authors = ["George Hilliard <thirtythreeforty@gmail.com>", "Andrew King <sheepchaan@gmail.com>"]
@@ -42,7 +42,7 @@ zeroize = "1.8"
 # substitute a fake for a real camera. The crate's own `cfg(test)`
 # unit tests are unaffected — they always see the test scaffolding.
 # Downstream test crates opt in via `[dev-dependencies]
-# neolink_core = { ..., features = ["test-util"] }`.
+# bairelay_neolink_core = { ..., features = ["test-util"] }`.
 test-util = []
 
 # Exposes a small `fuzz_api` module with public shims around otherwise

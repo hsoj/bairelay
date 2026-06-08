@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::{CameraDriver, Direction};
+use bairelay_neolink_core::bc_protocol::{CameraDriver, Direction};
 
 use super::output::{Outcome, Preset};
 
@@ -79,8 +79,8 @@ fn direction_label(dir: Direction) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::{Preset as XmlPreset, PresetList, PtzPreset};
-	use neolink_core::bc_protocol::FakeCameraBuilder;
+	use bairelay_neolink_core::bc::xml::{Preset as XmlPreset, PresetList, PtzPreset};
+	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn preset_move_to_logs_call_and_returns_moveto() {

@@ -29,7 +29,7 @@ pub enum WakeServerError {
 
 	/// Signals corrupt or truncated BcUdp framing so we can drop the packet instead of crashing.
 	#[error("BcUdp framing error: {0}")]
-	Frame(#[from] neolink_core::Error),
+	Frame(#[from] bairelay_neolink_core::Error),
 
 	/// Signals XML payloads that don't match the BcUdp schema so malformed peers never panic the loop.
 	#[error("BcUdp XML error: {0}")]

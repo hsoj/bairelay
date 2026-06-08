@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
 
@@ -20,8 +20,8 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::BatteryInfo;
-	use neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use bairelay_neolink_core::bc::xml::BatteryInfo;
+	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
 
 	#[tokio::test]
 	async fn battery_happy_path_maps_fields() {

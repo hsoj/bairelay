@@ -1,5 +1,5 @@
 [package]
-name = "bairelay_rtsp"
+name = "bairelay-rtsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

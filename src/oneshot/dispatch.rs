@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use crate::cli::{Command, FloodlightState, OnOff, PtzCommand};
 use crate::cli_convert::{
@@ -201,11 +201,11 @@ mod tests {
 	use crate::cli::{
 		OneShotArgs, PtzCommand, PtzDirection, ServiceAction, ServiceName, UserAction,
 	};
-	use neolink_core::bc::xml::{
+	use bairelay_neolink_core::bc::xml::{
 		BatteryInfo, HttpPort, HttpsPort, LedState, OnvifPort, PtzPreset, RfAlarmCfg, RtmpPort,
 		RtspPort, ServerPort, UserList, VersionInfo,
 	};
-	use neolink_core::bc_protocol::FakeCameraBuilder;
+	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 
 	fn args() -> OneShotArgs {
 		OneShotArgs {
@@ -342,7 +342,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatch_floodlight_read_runs_read_branch() {
-		use neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
+		use bairelay_neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
 		let (tx, rx) = tokio::sync::mpsc::channel(1);
 		tx.send(FloodlightStatusList {
 			floodlight_status_list: vec![FloodlightStatus {
@@ -364,7 +364,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatch_floodlight_on_runs_set_branch() {
-		use neolink_core::bc::xml::FloodlightStatusList;
+		use bairelay_neolink_core::bc::xml::FloodlightStatusList;
 		let (tx, rx) = tokio::sync::mpsc::channel(1);
 		tx.send(FloodlightStatusList::default()).await.unwrap();
 		let fake = FakeCameraBuilder::new().with_floodlight_stream(rx).build();
@@ -541,7 +541,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatch_abilities_runs_abilities_branch() {
-		use neolink_core::bc::xml::{AbilityInfo, AbilityInfoSubModule, AbilityInfoToken};
+		use bairelay_neolink_core::bc::xml::{AbilityInfo, AbilityInfoSubModule, AbilityInfoToken};
 		let fake = FakeCameraBuilder::new()
 			.with_abilityinfo(|| {
 				Ok(AbilityInfo {
@@ -589,7 +589,7 @@ mod tests {
 			.with_users(|| {
 				Ok(UserList {
 					version: "1.1".into(),
-					user_list: Some(vec![neolink_core::bc::xml::User {
+					user_list: Some(vec![bairelay_neolink_core::bc::xml::User {
 						user_name: "alice".into(),
 						user_level: 1,
 						..Default::default()

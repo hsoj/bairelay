@@ -20,7 +20,7 @@ pub enum Outcome {
 	Battery {
 		percent: u32,
 		/// Battery voltage in raw integer millivolts. Carried on the wire
-		/// as `BatteryInfo.voltage: i32` (millivolts) by neolink_core; we
+		/// as `BatteryInfo.voltage: i32` (millivolts) by bairelay_neolink_core; we
 		/// preserve it that way so JSON output is stable. Earlier
 		/// versions emitted `voltage_v: f32` which serialised as
 		/// `3.941000061035156` in `--json` output for some integer-mV

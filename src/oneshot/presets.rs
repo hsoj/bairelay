@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use neolink_core::bc_protocol::CameraDriver;
+use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::{Outcome, Preset};
 
@@ -23,8 +23,8 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use neolink_core::bc::xml::{Preset as XmlPreset, PresetList, PtzPreset};
-	use neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use bairelay_neolink_core::bc::xml::{Preset as XmlPreset, PresetList, PtzPreset};
+	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
 
 	#[tokio::test]
 	async fn presets_maps_xml_list_to_outcome() {

@@ -331,7 +331,7 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 		runner::run(&cam_cfg, cancel, move |cam| {
 			async move {
 				dispatch_oneshot(
-					cam as &dyn neolink_core::bc_protocol::CameraDriver,
+					cam as &dyn bairelay_neolink_core::bc_protocol::CameraDriver,
 					&cmd,
 					json,
 				)

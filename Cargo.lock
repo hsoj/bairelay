@@ -168,14 +168,14 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
- "bairelay_mqtt",
- "bairelay_rtsp",
- "bairelay_wake_server",
+ "bairelay-mqtt",
+ "bairelay-neolink-core",
+ "bairelay-rtsp",
+ "bairelay-wake-server",
  "bytes",
  "clap",
  "futures",
  "image",
- "neolink_core",
  "predicates",
  "quick-xml",
  "rcgen",
@@ -195,7 +195,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bairelay_mqtt"
+name = "bairelay-mqtt"
 version = "1.1.1"
 dependencies = [
  "base64",
@@ -208,7 +208,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "bairelay_rtsp"
+name = "bairelay-neolink-core"
+version = "1.1.1"
+dependencies = [
+ "aes",
+ "assert_matches",
+ "async-trait",
+ "bytes",
+ "cfb-mode",
+ "cookie-factory",
+ "crc32fast",
+ "crossbeam-channel",
+ "delegate",
+ "env_logger",
+ "futures",
+ "get_if_addrs",
+ "indoc",
+ "lazy_static",
+ "log",
+ "md5",
+ "nom",
+ "proptest",
+ "quick-xml",
+ "rand 0.8.6",
+ "regex",
+ "serde",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "zeroize",
+]
+
+[[package]]
+name = "bairelay-rtsp"
 version = "1.1.1"
 dependencies = [
  "async-trait",
@@ -231,11 +265,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "bairelay_wake_server"
+name = "bairelay-wake-server"
 version = "1.1.1"
 dependencies = [
+ "bairelay-neolink-core",
  "bytes",
- "neolink_core",
  "quick-xml",
  "rand 0.8.6",
  "serde",
@@ -1249,40 +1283,6 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "neolink_core"
-version = "1.1.1"
-dependencies = [
- "aes",
- "assert_matches",
- "async-trait",
- "bytes",
- "cfb-mode",
- "cookie-factory",
- "crc32fast",
- "crossbeam-channel",
- "delegate",
- "env_logger",
- "futures",
- "get_if_addrs",
- "indoc",
- "lazy_static",
- "log",
- "md5",
- "nom",
- "proptest",
- "quick-xml",
- "rand 0.8.6",
- "regex",
- "serde",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "zeroize",
 ]
 
 [[package]]
