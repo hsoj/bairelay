@@ -26,33 +26,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # CodeQL Rust uses source-level analysis; no compile step.
           - language: rust
-            build-mode: manual
+            build-mode: none
 
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: codeql-${{ matrix.language }}
-
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
-
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
 
-      # Manual build: CodeQL Rust analysis needs the same compile path
-      # as `cargo build`, with the same C-build deps the binary's
-      # aws-lc-rs pull requires (mirrors release.yml::build).
-      - name: Build workspace
-        run: cargo build --workspace --locked
-
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
