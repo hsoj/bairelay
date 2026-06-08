@@ -1,7 +1,8 @@
 [package]
 name = "bairelay-mqtt"
-description = "MQTT bridge + Home Assistant discovery primitives for bairelay."
+description = "MQTT bridge + Home Assistant discovery primitives for bairelay. Topic scheme and HA discovery payloads derive from the MQTT bridge added to neolink by QuantumEntangledAndy (https://github.com/QuantumEntangledAndy/neolink)."
 version.workspace = true
+authors = ["Andrew King <sheepchaan@gmail.com>"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
