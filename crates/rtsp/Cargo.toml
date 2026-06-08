@@ -2,10 +2,13 @@
 name = "bairelay-rtsp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Pure-Rust RTSP server primitives for bairelay"
+keywords.workspace = true
+categories.workspace = true
+description = "Pure-Rust RTSP server primitives for bairelay."
 
 [dependencies]
 async-trait = "0.1"

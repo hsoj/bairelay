@@ -2,6 +2,7 @@
 name = "bairelay"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -41,11 +42,24 @@ default-members = [
 [workspace.package]
 version = "1.1.1"
 edition = "2021"
+rust-version = "1.93"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/mgc8/bairelay"
 homepage = "https://github.com/mgc8/bairelay"
 keywords = ["reolink", "rtsp", "mqtt", "baichuan", "home-assistant"]
 categories = ["multimedia::video", "network-programming"]
+
+# Internal path deps in one place. The `version` field is what
+# crates.io consults on `cargo publish`; the `path` field is what
+# local dev resolves against. `release.sh::update_workspace_version`
+# bumps these four version strings in lockstep with the workspace
+# `version` above — keep the `version = "X.Y.Z"` shape so the sed
+# pattern keeps matching.
+[workspace.dependencies]
+bairelay-neolink-core = { path = "crates/core", version = "1.1.1" }
+bairelay-mqtt = { path = "crates/mqtt", version = "1.1.1" }
+bairelay-rtsp = { path = "crates/rtsp", version = "1.1.1" }
+bairelay-wake-server = { path = "crates/wake-server", version = "1.1.1" }
 
 [dependencies]
 anyhow = "1"
@@ -67,10 +81,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 ab_glyph = "0.2"
 time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
 
-bairelay-neolink-core = { path = "crates/core" }
-bairelay-mqtt = { path = "crates/mqtt" }
-bairelay-rtsp = { path = "crates/rtsp" }
-bairelay-wake-server = { path = "crates/wake-server" }
+bairelay-neolink-core.workspace = true
+bairelay-mqtt.workspace = true
+bairelay-rtsp.workspace = true
+bairelay-wake-server.workspace = true
 
 rustls = "0.23"
 rustls-pemfile = "2"
@@ -103,7 +117,7 @@ rcgen = "0.13"
 # binary's own test suite. The feature is off in production builds, so
 # release `bairelay` cannot accidentally substitute a fake for a real
 # camera.
-bairelay-neolink-core = { path = "crates/core", features = ["test-util"] }
+bairelay-neolink-core = { workspace = true, features = ["test-util"] }
 
 # tests/fixture_replay.rs drives the real RtspServer::serve over a TCP
 # socket and hand-parses RTP/RTCP bytes off the wire. That requires

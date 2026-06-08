@@ -1,12 +1,15 @@
 [package]
 name = "bairelay-neolink-core"
-description = "Core services and structure for Reolink IP cameras"
+description = "Reolink Baichuan protocol core for bairelay. Modernised vendor of the original neolink_core by thirtythreeforty + QuantumEntangledAndy (https://github.com/QuantumEntangledAndy/neolink)."
 version.workspace = true
 authors = ["George Hilliard <thirtythreeforty@gmail.com>", "Andrew King <sheepchaan@gmail.com>"]
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 aes = "0.8.2"

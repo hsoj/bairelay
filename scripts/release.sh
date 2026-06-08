@@ -58,10 +58,19 @@ read_workspace_version() {
 update_workspace_version() {
 	local new_v="$1"
 	awk -v new_v="$new_v" '
-		/^\[workspace\.package\]/ { in_section = 1; print; next }
-		/^\[/                     { in_section = 0 }
-		in_section && /^version[[:space:]]*=/ {
+		/^\[workspace\.package\]/      { in_pkg = 1; in_deps = 0; print; next }
+		/^\[workspace\.dependencies\]/ { in_deps = 1; in_pkg = 0; print; next }
+		/^\[/                          { in_pkg = 0; in_deps = 0 }
+		in_pkg && /^version[[:space:]]*=/ {
 			print "version = \"" new_v "\""
+			next
+		}
+		# Bairelay-internal path deps in [workspace.dependencies] carry
+		# an explicit version that crates.io consults on publish. Bump
+		# them in lockstep with [workspace.package].version above.
+		in_deps && /^bairelay-[a-z-]+[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=/ {
+			sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" new_v "\"")
+			print
 			next
 		}
 		{ print }
