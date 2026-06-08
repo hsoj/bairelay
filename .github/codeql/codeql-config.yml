@@ -1,0 +1,17 @@
+name: "Bairelay CodeQL Config"
+
+# Run the standard security + quality suite. Same default scope GitHub
+# uses on default setup; the only difference is the exclusion below.
+queries:
+  - uses: security-and-quality
+
+query-filters:
+  # rust/hard-coded-cryptographic-value flags every literal string
+  # flowing into a parameter named like a secret. In bairelay this
+  # only matches fixture credentials inside #[cfg(test)] mod tests
+  # blocks at the bottom of source files — CodeQL doesn't model
+  # conditional compilation for Rust, so it can't distinguish test
+  # code from production. Production credential handling is operator-
+  # supplied at runtime (rpassword / config / clap), never literals.
+  - exclude:
+      id: rust/hard-coded-cryptographic-value

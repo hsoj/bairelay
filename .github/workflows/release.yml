@@ -6,8 +6,12 @@ on:
   release:
     types: [published]
 
+# Workflow-level default. Only the `release` job (which creates the
+# GH draft) and the `docker` job (which pushes to ghcr.io) need write
+# scopes — both already declare them explicitly. Everything else is
+# read-only and inherits this minimal default.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +23,8 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     if: github.event_name == 'push'
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -261,6 +267,8 @@ jobs:
     name: publish to crates.io
     if: github.event_name == 'release' && !github.event.release.draft
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
 
