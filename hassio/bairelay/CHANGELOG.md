@@ -1,5 +1,24 @@
 # Bairelay HA Add-On — Changelog
 
+## 1.1.2
+
+Maintenance release:
+- Renamed crates to avoid clashing namespaces
+- Published to crates.io
+- Updated CI to fix code review issues
+- Added automattic crates.io publishing
+
+### Changes
+
+- codeql: build-mode none + v4 actions
+- ci: explicit workflow permissions + codeql advanced setup
+- ci: auto-publish to crates.io on release publish
+- bairelay: fix cargo exclude patterns with leading slash
+- bairelay-neolink-core: pin env_logger dev-dep for crates.io
+- crates: exclude unneeded files.
+- crates: update documentation, add publish-crates.sh
+- crates: workspace.dependencies, polish, release.sh bump
+- rename: bairelay-* namespace for crates.io publishing
 ## 1.1.1
 
 HAOS App fixes and improvements:

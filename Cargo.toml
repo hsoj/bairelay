@@ -60,7 +60,7 @@ default-members = [
 # `build.rs` picks up the same value via CARGO_PKG_VERSION_{MAJOR,MINOR}
 # and resets the build counter when the prefix changes.
 [workspace.package]
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 rust-version = "1.93"
 license = "AGPL-3.0-or-later"
@@ -76,10 +76,10 @@ categories = ["multimedia::video", "network-programming"]
 # `version` above — keep the `version = "X.Y.Z"` shape so the sed
 # pattern keeps matching.
 [workspace.dependencies]
-bairelay-neolink-core = { path = "crates/core", version = "1.1.1" }
-bairelay-mqtt = { path = "crates/mqtt", version = "1.1.1" }
-bairelay-rtsp = { path = "crates/rtsp", version = "1.1.1" }
-bairelay-wake-server = { path = "crates/wake-server", version = "1.1.1" }
+bairelay-neolink-core = { path = "crates/core", version = "1.1.2" }
+bairelay-mqtt = { path = "crates/mqtt", version = "1.1.2" }
+bairelay-rtsp = { path = "crates/rtsp", version = "1.1.2" }
+bairelay-wake-server = { path = "crates/wake-server", version = "1.1.2" }
 
 [dependencies]
 anyhow = "1"

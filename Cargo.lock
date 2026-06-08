@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "bairelay"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "bairelay-mqtt"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "base64",
  "rumqttc",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "bairelay-neolink-core"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "aes",
  "assert_matches",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "bairelay-rtsp"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "bairelay-wake-server"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "bairelay-neolink-core",
  "bytes",
