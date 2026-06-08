@@ -62,7 +62,7 @@ pcap-decode-api = []
 
 [dev-dependencies]
 assert_matches = "1.5.0"
-env_logger = "*"
+env_logger = "0.11"
 indoc = "2.0.1"
 # test-util brings in the virtual clock (`tokio::time::pause`,
 # `tokio::time::advance`, `#[tokio::test(start_paused = true)]`) that
