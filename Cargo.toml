@@ -11,6 +11,26 @@ categories.workspace = true
 description = "RTSP Relay for Reolink Baichuan cameras"
 readme = "README.md"
 
+# Trim the .crate for crates.io users. Everything below is dev/repo
+# infrastructure or distributed via separate channels (HAOS add-on
+# via ghcr.io). `cargo install bairelay` only needs src/, the
+# integration tests, and the operator-facing docs.
+exclude = [
+	".github/",
+	".gitignore",
+	"codecov.yml",
+	"hassio/",
+	"repository.yaml",
+	"rust-toolchain.toml",
+	"rustfmt.toml",
+	"scripts/",
+	"tarpaulin.toml",
+	"tests/fixtures/",
+	"tests/ha-token",
+	"tests/logs/",
+	"tests/scripts/",
+]
+
 [workspace]
 members = [
 	"crates/*",
