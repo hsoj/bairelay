@@ -256,3 +256,28 @@ jobs:
             BAIRELAY_VERSION=${{ env.BAIRELAY_VERSION }}
             BAIRELAY_SHA256_AMD64=${{ env.SHA_AMD64 }}
             BAIRELAY_SHA256_AARCH64=${{ env.SHA_AARCH64 }}
+
+  publish-crates:
+    name: publish to crates.io
+    if: github.event_name == 'release' && !github.event.release.draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-crates
+
+      # The binary's verify-compile needs the same C build chain as the
+      # release matrix's x86_64-linux-musl cell, since aws-lc-rs (pulled
+      # via rustls 0.23) compiles C inline. Mirror what release.yml::build
+      # installs for that cell.
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
+
+      - name: Publish bairelay-* + bairelay to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: scripts/publish-crates.sh --yes
