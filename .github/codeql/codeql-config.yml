@@ -15,3 +15,10 @@ query-filters:
   # supplied at runtime (rpassword / config / clap), never literals.
   - exclude:
       id: rust/hard-coded-cryptographic-value
+
+  # rust/unused-variable misfires on destructuring patterns inside
+  # nested matches and async closures. rustc + clippy track this
+  # correctly and the CI gate already runs both under -D warnings,
+  # so any real unused binding would fail the build before merge.
+  - exclude:
+      id: rust/unused-variable
