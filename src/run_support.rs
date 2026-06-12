@@ -360,13 +360,17 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 
 /// Production wrapper: passes the real `stdout` / `stderr` to
 /// [`run_oneshot_to`]. Tests use the `_to` variant with `Vec<u8>`.
+///
+/// Plain handles, NOT `.lock()` guards: this future is driven by
+/// `block_on` on the main thread and parks while camera I/O is in
+/// flight. A `StdoutLock`/`StderrLock` held across those awaits
+/// deadlocks the whole runtime as soon as any spawned task emits a
+/// log record — the tracing fmt writer blocks on the stderr lock
+/// owned by the parked main thread. (Stdio locks are reentrant, so
+/// main-thread logging masks the bug; only worker-thread records
+/// trip it.) The plain handles lock per `write` call instead.
 pub async fn run_oneshot(cli: &Cli) -> i32 {
-	run_oneshot_to(
-		cli,
-		&mut std::io::stdout().lock(),
-		&mut std::io::stderr().lock(),
-	)
-	.await
+	run_oneshot_to(cli, &mut std::io::stdout(), &mut std::io::stderr()).await
 }
 
 #[cfg(test)]
