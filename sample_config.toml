@@ -83,6 +83,7 @@ address = "192.168.1.187:9000"
 # motion_wake_hold_secs = 30  # wake-lock hold after motion stops
 # enabled = true
 # permitted_users = ["me"]
+# debug = false               # trace-dump decrypted protocol payloads; logs credential hashes
 
 # [cameras.mqtt]
 # enable_motion     = true

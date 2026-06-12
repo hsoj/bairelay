@@ -1629,7 +1629,6 @@ fn neolink_per_camera_compat_fields_all_parse() {
 		username = "admin"
 		password = "x"
 		address = "192.168.1.1:9000"
-		debug = true
 		print_format = "human"
 		update_time = true
 		buffer_duration = 5000
@@ -1641,7 +1640,6 @@ fn neolink_per_camera_compat_fields_all_parse() {
 	"#;
 	let cfg = parse_config(toml_str).expect("parses");
 	let cam = &cfg.cameras[0];
-	assert_eq!(cam.debug, Some(true));
 	assert_eq!(cam.print_format.as_deref(), Some("human"));
 	assert_eq!(cam.update_time, Some(true));
 	assert_eq!(cam.buffer_duration, Some(5000));
@@ -1725,7 +1723,6 @@ fn warn_neolink_compat_fields_runs_for_every_field() {
 		..Default::default()
 	};
 	let cam = &mut cfg.cameras[0];
-	cam.debug = Some(true);
 	cam.print_format = Some("human".into());
 	cam.update_time = Some(true);
 	cam.buffer_duration = Some(3000);
@@ -1750,6 +1747,50 @@ fn warn_neolink_compat_fields_noop_when_clean() {
 		..Default::default()
 	};
 	warn_neolink_compat_fields(&cfg);
+}
+
+// ── Per-camera wire-debug knob ──────────────────────────────────────
+
+#[test]
+fn camera_debug_knob_parses_and_defaults_off() {
+	let toml_str = r#"
+		[[cameras]]
+		name = "front"
+		username = "admin"
+		password = "x"
+		address = "192.168.1.1:9000"
+		debug = true
+	"#;
+	let cfg = parse_config(toml_str).expect("parses");
+	assert_eq!(cfg.cameras[0].debug, Some(true));
+
+	let clean = r#"
+		[[cameras]]
+		name = "front"
+		username = "admin"
+		password = "x"
+		address = "192.168.1.1:9000"
+	"#;
+	let cfg = parse_config(clean).expect("parses");
+	assert_eq!(cfg.cameras[0].debug, None);
+}
+
+#[test]
+fn warn_wire_debug_enabled_covers_set_and_unset() {
+	use bairelay::config::warn_wire_debug_enabled;
+	let mut cfg = Config {
+		cameras: vec![
+			test_helpers::minimal_camera_config("cam1"),
+			test_helpers::minimal_camera_config("cam2"),
+			test_helpers::minimal_camera_config("cam3"),
+		],
+		..Default::default()
+	};
+	cfg.cameras[0].debug = Some(true); // warns
+	cfg.cameras[1].debug = Some(false); // silent
+									 // cameras[2] stays None — silent.
+									 // Exercises every branch; tracing output isn't captured.
+	warn_wire_debug_enabled(&cfg);
 }
 
 // ── deny_unknown_fields enforcement on previously-lax structs ───────

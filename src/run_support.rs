@@ -219,6 +219,7 @@ pub fn run_check_config_to<W1: std::io::Write, W2: std::io::Write>(
 	// cleanly, so machine-readable consumers are unaffected.
 	crate::config::warn_deprecated_pause_fields(&config);
 	crate::config::warn_neolink_compat_fields(&config);
+	crate::config::warn_wire_debug_enabled(&config);
 	crate::config::warn_idle_timeout_below_prune_floor(&config);
 	// Success — short summary so operators get a quick affirmation.
 	let summary = format!(

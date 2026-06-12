@@ -13,6 +13,7 @@ use bairelay::cli::{Cli, Command};
 use bairelay::cli_convert::{should_emit_ansi, verbosity_env_filter};
 use bairelay::config::{
 	warn_deprecated_pause_fields, warn_idle_timeout_below_prune_floor, warn_neolink_compat_fields,
+	warn_wire_debug_enabled,
 };
 use bairelay::local_time::LocalTimer;
 use bairelay::mqtt_dispatch::dispatch_control;
@@ -114,6 +115,9 @@ async fn async_main() -> Result<()> {
 	// field bairelay accepts but does not honour gets a single-line
 	// pointer to the bairelay equivalent.
 	warn_neolink_compat_fields(&config);
+	// Surface any camera with wire-level protocol debugging live —
+	// the trace dumps it unlocks contain credential hashes.
+	warn_wire_debug_enabled(&config);
 	// Surface any per-camera `idle_disconnect_timeout_secs` shorter
 	// than the global `stream_prune_grace_secs`; the runtime clamps
 	// silently, this warning makes the override visible.

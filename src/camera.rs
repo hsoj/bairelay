@@ -1265,7 +1265,7 @@ impl CameraHandle {
 				}
 				Err(e) => {
 					if is_login_failure(&e) {
-						tracing::error!(camera = %self.config.name, "Authentication failed — check credentials. Stopping retries.");
+						tracing::error!(camera = %self.config.name, error = %format!("{:#}", e), "Authentication failed — check credentials. Stopping retries.");
 						self.set_state(CameraState::Disconnected);
 						break;
 					}

@@ -178,6 +178,10 @@ impl BcCamera {
 			sub_login.send(modern_login).await?;
 			let modern_reply = sub_login.recv().await?;
 			if modern_reply.meta.response_code != 200 {
+				log::warn!(
+					"login rejected: camera replied response_code={} to the modern login",
+					modern_reply.meta.response_code
+				);
 				return Err(Error::CameraLoginFail);
 			}
 
@@ -197,7 +201,12 @@ impl BcCamera {
 				BcBody::ModernMsg(ModernMsg {
 					extension: None,
 					payload: None,
-				}) => return Err(Error::AuthFailed),
+				}) => {
+					log::warn!(
+						"login rejected: camera replied 200 with an empty body (no DeviceInfo)"
+					);
+					return Err(Error::AuthFailed);
+				}
 				other => {
 					return Err(Error::UnintelligibleReply {
 						reply: std::sync::Arc::new(Bc {

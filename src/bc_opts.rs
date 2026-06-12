@@ -45,7 +45,7 @@ pub fn build_bc_opts(cfg: &CameraConfig) -> BcCameraOpt {
 			username: cfg.username.clone(),
 			password: cfg.password.clone(),
 		},
-		debug: false,
+		debug: cfg.debug.unwrap_or(false),
 	}
 }
 
@@ -133,6 +133,42 @@ mod tests {
 		)
 		.unwrap();
 		assert!(matches!(max_encryption(&bc_cfg), MaxEncryption::BcEncrypt));
+	}
+
+	#[test]
+	fn build_bc_opts_wires_debug_knob() {
+		let cfg: CameraConfig = toml::from_str(
+			r#"
+			name = "c"
+			username = "u"
+			address = "1.2.3.4:9000"
+			channel_id = 0
+			stream = "all"
+			discovery = "local"
+			max_encryption = "none"
+			debug = true
+			"#,
+		)
+		.unwrap();
+		assert!(build_bc_opts(&cfg).debug);
+	}
+
+	#[test]
+	fn build_bc_opts_wires_debug_via_verbose_alias() {
+		let cfg: CameraConfig = toml::from_str(
+			r#"
+			name = "c"
+			username = "u"
+			address = "1.2.3.4:9000"
+			channel_id = 0
+			stream = "all"
+			discovery = "local"
+			max_encryption = "none"
+			verbose = true
+			"#,
+		)
+		.unwrap();
+		assert!(build_bc_opts(&cfg).debug);
 	}
 
 	#[test]

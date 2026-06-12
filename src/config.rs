@@ -364,13 +364,19 @@ pub struct CameraConfig {
 	#[serde(default)]
 	pub permitted_users: Vec<String>,
 
+	/// Wire-level protocol debugging. When `true`, the Baichuan codec
+	/// dumps each decrypted control payload (login replies included) at
+	/// trace level — set `RUST_LOG=bairelay_neolink_core=trace` to see
+	/// them. The dumps contain credential hashes and camera UIDs; don't
+	/// share them publicly. `verbose` is the neolink-compat alias.
+	#[serde(default, skip_serializing_if = "Option::is_none", alias = "verbose")]
+	pub debug: Option<bool>,
+
 	// ── Neolink migration compat (deprecated; warn + ignore) ──────────
 	// Each Option<_> exists only so old configs parse cleanly under
 	// `deny_unknown_fields`. `warn_neolink_compat_fields` emits a one-
 	// line message per set field at startup pointing operators at the
 	// bairelay equivalent (or stating that the knob is out of scope).
-	#[serde(default, skip_serializing_if = "Option::is_none", alias = "verbose")]
-	pub debug: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none", alias = "print")]
 	pub print_format: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none", alias = "time")]
@@ -818,7 +824,7 @@ pub fn warn_deprecated_pause_fields(config: &Config) {
 /// pointer to the bairelay equivalent. Called once at startup after
 /// [`warn_deprecated_pause_fields`].
 ///
-/// Top-level `tokio_console` and per-camera `debug` / `print_format` /
+/// Top-level `tokio_console` and per-camera `print_format` /
 /// `update_time` / `buffer_duration` / `use_splash` / `splash_pattern` /
 /// `max_discovery_retries` / `push_notifications` / `strict` are all
 /// no-ops in bairelay; the per-camera `[cameras.mqtt] discovery` block
@@ -830,12 +836,6 @@ pub fn warn_neolink_compat_fields(config: &Config) {
 		);
 	}
 	for cam in &config.cameras {
-		if cam.debug.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] debug/verbose is a neolink per-camera flag; bairelay uses a global RUST_LOG (or -v / -vv / -vvv). Remove this field."
-			);
-		}
 		if cam.print_format.is_some() {
 			tracing::warn!(
 				camera = %cam.name,
@@ -888,6 +888,22 @@ pub fn warn_neolink_compat_fields(config: &Config) {
 			tracing::warn!(
 				camera = %cam.name,
 				"config: [cameras.mqtt] discovery is a neolink per-camera HA discovery override; bairelay uses a single global [mqtt.discovery] table. Move topic/features there. Remove this field."
+			);
+		}
+	}
+}
+
+/// Log a one-line notice for each camera with wire-level protocol
+/// debugging enabled (`[cameras] debug = true`). The trace-level
+/// payload dumps it unlocks include credential hashes and camera UIDs,
+/// so the operator should know the knob is live before sharing logs.
+/// Called once at startup alongside [`warn_neolink_compat_fields`].
+pub fn warn_wire_debug_enabled(config: &Config) {
+	for cam in &config.cameras {
+		if cam.debug == Some(true) {
+			tracing::warn!(
+				camera = %cam.name,
+				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=bairelay_neolink_core=trace to see them); they include credential hashes — do not share these logs publicly"
 			);
 		}
 	}

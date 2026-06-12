@@ -280,6 +280,8 @@ The session task does not emit periodic Sender Reports. The receiver falls back 
 
 If `login_with_maxenc()` returns an authentication error (`AuthFailed`, `CameraLoginFail`, `Credential error`), **stop the retry loop permanently**. Don't hammer the camera with bad credentials every 2 – 60 seconds forever.
 
+Two distinct rejection shapes hide behind that one outcome, and both log a `warn` in `crates/core/src/bc_protocol/login.rs` naming which one fired: `CameraLoginFail` (modern login answered with a non-200 `response_code` — the code is included in the warn) and `AuthFailed` (200 with an empty body, no `DeviceInfo`). The binary's `Authentication failed` error line includes the full error chain, so service logs distinguish them too. The one-shot CLI prints the chain via `error: {:#}` — `bairelay battery <cam>` is the cheapest way for an operator to surface the variant.
+
 Reconnect on transient network failures still uses `ReconnectBackoff::sleep_with_cancel` (initial 2 s, doubling, capped at 60 s) — the same path production uses and the `drive_reconnect_with_backoff` test seam exercises.
 
 ---
@@ -313,6 +315,8 @@ Default filter: `info` for bairelay, `warn` for `rumqttc`. Override with `RUST_L
 All MQTT publishes log their values at debug level. All control commands log dispatch and OK / FAIL result.
 
 `-v` / `-vv` / `-vvv` on the CLI maps to `info` / `debug` / `trace` via `run_support::cli_output_mode`.
+
+Per-camera `debug = true` (`verbose` is the neolink alias) sets `BcCameraOpt::debug`, which unlocks the Baichuan codec's trace-level dumps of decrypted control payloads (`Payload Txt:` in `crates/core/src/bc/de.rs`) — combine with `RUST_LOG=bairelay_neolink_core=trace`. The dumps include credential hashes and camera UIDs; `warn_wire_debug_enabled` reminds the operator at startup. Use for wire-level diagnosis (login rejections on new firmware, unmodelled XML), then turn it back off.
 
 ---
 
