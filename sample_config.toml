@@ -101,8 +101,8 @@ address = "192.168.1.187:9000"
 # frame so RTSP clients don't see a spinner. Default true.
 # bridge_gaps = true
 # Seconds without a live frame before a gap starts. Raise for
-# sub streams with naturally low fps. Default 1.0.
-# gap_threshold_secs = 1.0
+# sub streams with naturally low fps. Default 3.0.
+# gap_threshold_secs = 3.0
 # Draw a CONNECTING/SLEEPING caption on the MQTT preview JPEG.
 # Default true.
 # preview_overlay = true
