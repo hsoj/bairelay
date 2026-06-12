@@ -268,6 +268,7 @@ main() {
 		echo "version bump + tag on the internal repo. From the internal clone:"
 		echo "    git checkout main && git pull"
 		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm -f Cargo.toml.bak"
+		echo "    sed -i.bak -E 's/(bairelay-[a-z-]+ = \\{ path = \"[^\"]+\", version = )\"$current\"/\\1\"$new_version\"/g' Cargo.toml && rm -f Cargo.toml.bak"
 		echo "    sed -i.bak -E 's/^version: \"$current\"\$/version: \"$new_version\"/' hassio/bairelay/config.yaml && rm -f hassio/bairelay/config.yaml.bak"
 		echo "    cargo check --workspace --quiet"
 		echo "    cp <public>/CHANGELOG.md CHANGELOG.md"
