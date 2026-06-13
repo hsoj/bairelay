@@ -366,10 +366,13 @@ pub struct CameraConfig {
 
 	/// Wire-level protocol debugging. When `true`, the Baichuan codec
 	/// dumps each decrypted control payload (login replies included) at
-	/// trace level — set `RUST_LOG=bairelay_neolink_core::bc::de=trace`
-	/// to see them. The dumps contain credential hashes and camera
-	/// UIDs; don't share them publicly. `verbose` is the neolink-compat
-	/// alias.
+	/// trace level — set `RUST_LOG=info,bairelay_neolink_core::bc::de=trace`
+	/// to see them. The leading `info,` is load-bearing: a bare
+	/// `bairelay_neolink_core::bc::de=trace` is a single-target allowlist
+	/// that silences every other line (a silent console), so keep a
+	/// baseline level before the comma. The dumps contain credential
+	/// hashes and camera UIDs; don't share them publicly. `verbose` is
+	/// the neolink-compat alias.
 	#[serde(default, skip_serializing_if = "Option::is_none", alias = "verbose")]
 	pub debug: Option<bool>,
 
@@ -904,7 +907,7 @@ pub fn warn_wire_debug_enabled(config: &Config) {
 		if cam.debug == Some(true) {
 			tracing::warn!(
 				camera = %cam.name,
-				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=bairelay_neolink_core::bc::de=trace to see them); they include credential hashes — do not share these logs publicly"
+				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=info,bairelay_neolink_core::bc::de=trace to see them — the leading info, is required or the console goes silent); they include credential hashes — do not share these logs publicly"
 			);
 		}
 	}
