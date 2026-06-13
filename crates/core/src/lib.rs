@@ -333,7 +333,7 @@ pub mod pcap_decode_api {
 			&mut self,
 			direction: Direction,
 			datagram: &[u8],
-			mut on_msg: F,
+			on_msg: F,
 		) -> Result<(), Error>
 		where
 			F: FnMut(DecodedMessage),
@@ -345,116 +345,139 @@ pub mod pcap_decode_api {
 				Err(e) => return Err(e),
 			};
 
+			match bcudp {
+				BcUdp::Data(data) => {
+					match direction {
+						Direction::ClientToCamera => self.c2d.feed(data),
+						Direction::CameraToClient => self.d2c.feed(data),
+					}
+					return self.drain(direction, on_msg);
+				}
+				BcUdp::Discovery(_) | BcUdp::Ack(_) => {}
+			}
+			Ok(())
+		}
+
+		/// Shared Bc-decode loop over one direction's reassembled buffer,
+		/// mirroring BcCodex's login-negotiation + binary bookkeeping.
+		fn drain<F>(&mut self, direction: Direction, mut on_msg: F) -> Result<(), Error>
+		where
+			F: FnMut(DecodedMessage),
+		{
 			let dir_state = match direction {
 				Direction::ClientToCamera => &mut self.c2d,
 				Direction::CameraToClient => &mut self.d2c,
 			};
-
-			match bcudp {
-				BcUdp::Data(data) => {
-					dir_state.feed(data);
-					loop {
-						match Bc::deserialize(&self.ctx, &mut dir_state.bc_buf) {
-							Ok(bc) => {
-								// Mirror the BcCodex login-response
-								// negotiation logic — without this the
-								// follow-on messages don't decrypt.
-								if let Bc {
-									meta:
-										BcMeta {
-											msg_id: 1,
-											response_code,
-											..
-										},
-									body:
-										BcBody::ModernMsg(ModernMsg {
-											payload:
-												Some(BcPayloads::BcXml(BcXml {
-													encryption: Some(Encryption { ref nonce, .. }),
-													..
-												})),
-											..
-										}),
-								} = bc
-								{
-									if response_code >> 8 == 0xdd {
-										let kind = (response_code & 0xff) as u8;
-										let new_proto = match kind {
-											0x00 => EncryptionProtocol::Unencrypted,
-											0x01 => EncryptionProtocol::BCEncrypt,
-											0x02 => EncryptionProtocol::aes(
-												self.ctx.credentials.make_aeskey(nonce),
-											),
-											0x12 => EncryptionProtocol::full_aes(
-												self.ctx.credentials.make_aeskey(nonce),
-											),
-											other => {
-												return Err(Error::UnknownEncryption(
-													other as usize,
-												));
-											}
-										};
-										self.ctx.set_encrypted(new_proto);
-									}
-								}
-
-								// Mirror BcCodex's binary-mode bookkeeping
-								// so streaming msg_nums (3 / 4) don't get
-								// mis-parsed as XML on subsequent packets.
-								if let BcBody::ModernMsg(ModernMsg {
-									extension:
-										Some(crate::bc::xml::Extension {
-											binary_data: Some(on_off),
-											..
-										}),
+			loop {
+				match Bc::deserialize(&self.ctx, &mut dir_state.bc_buf) {
+					Ok(bc) => {
+						// Mirror the BcCodex login-response
+						// negotiation logic — without this the
+						// follow-on messages don't decrypt.
+						if let Bc {
+							meta:
+								BcMeta {
+									msg_id: 1,
+									response_code,
 									..
-								}) = bc.body
-								{
-									if on_off == 0 {
-										self.ctx.binary_off(bc.meta.msg_num);
-									} else {
-										self.ctx.binary_on(bc.meta.msg_num);
+								},
+							body:
+								BcBody::ModernMsg(ModernMsg {
+									payload:
+										Some(BcPayloads::BcXml(BcXml {
+											encryption: Some(Encryption { ref nonce, .. }),
+											..
+										})),
+									..
+								}),
+						} = bc
+						{
+							if response_code >> 8 == 0xdd {
+								let kind = (response_code & 0xff) as u8;
+								let new_proto = match kind {
+									0x00 => EncryptionProtocol::Unencrypted,
+									0x01 => EncryptionProtocol::BCEncrypt,
+									0x02 => EncryptionProtocol::aes(
+										self.ctx.credentials.make_aeskey(nonce),
+									),
+									0x12 => EncryptionProtocol::full_aes(
+										self.ctx.credentials.make_aeskey(nonce),
+									),
+									other => {
+										return Err(Error::UnknownEncryption(other as usize));
 									}
-								}
-
-								// Compute a "would-be plaintext" view for binary
-								// payloads when the session is in FullAes —
-								// see DecodedMessage's field doc for why.
-								let manually_decrypted_binary =
-									match (&self.ctx.encryption_protocol, &bc.body) {
-										(
-											EncryptionProtocol::FullAes { .. },
-											BcBody::ModernMsg(ModernMsg {
-												payload: Some(BcPayloads::Binary(bytes)),
-												..
-											}),
-										) => {
-											Some(self.ctx.encryption_protocol.decrypt(
-												bc.meta.channel_id as u32,
-												bytes.as_slice(),
-											))
-										}
-										_ => None,
-									};
-								on_msg(DecodedMessage {
-									direction,
-									bc,
-									manually_decrypted_binary,
-								});
+								};
+								self.ctx.set_encrypted(new_proto);
 							}
-							Err(Error::NomIncomplete(_)) => break,
-							Err(e) => return Err(e),
 						}
+
+						// Mirror BcCodex's binary-mode bookkeeping
+						// so streaming msg_nums (3 / 4) don't get
+						// mis-parsed as XML on subsequent packets.
+						if let BcBody::ModernMsg(ModernMsg {
+							extension:
+								Some(crate::bc::xml::Extension {
+									binary_data: Some(on_off),
+									..
+								}),
+							..
+						}) = bc.body
+						{
+							if on_off == 0 {
+								self.ctx.binary_off(bc.meta.msg_num);
+							} else {
+								self.ctx.binary_on(bc.meta.msg_num);
+							}
+						}
+
+						// Compute a "would-be plaintext" view for binary
+						// payloads when the session is in FullAes —
+						// see DecodedMessage's field doc for why.
+						let manually_decrypted_binary =
+							match (&self.ctx.encryption_protocol, &bc.body) {
+								(
+									EncryptionProtocol::FullAes { .. },
+									BcBody::ModernMsg(ModernMsg {
+										payload: Some(BcPayloads::Binary(bytes)),
+										..
+									}),
+								) => Some(
+									self.ctx
+										.encryption_protocol
+										.decrypt(bc.meta.channel_id as u32, bytes.as_slice()),
+								),
+								_ => None,
+							};
+						on_msg(DecodedMessage {
+							direction,
+							bc,
+							manually_decrypted_binary,
+						});
 					}
-				}
-				BcUdp::Discovery(_) | BcUdp::Ack(_) => {
-					// These don't carry Bc messages; ignore for the
-					// reassembled-stream view. (Discovery payloads are
-					// XOR-encrypted XML and worth rendering separately
-					// if needed; today's caller only wants Bc traffic.)
+					Err(Error::NomIncomplete(_)) => break,
+					Err(e) => return Err(e),
 				}
 			}
 			Ok(())
+		}
+
+		/// Append raw TCP payload bytes for one direction and decode any
+		/// complete Bc frames. Baichuan-over-TCP carries Bc frames back to
+		/// back with no BcUdp wrapper, so bytes go straight into the buffer.
+		pub fn feed_tcp_payload<F>(
+			&mut self,
+			direction: Direction,
+			payload: &[u8],
+			on_msg: F,
+		) -> Result<(), Error>
+		where
+			F: FnMut(DecodedMessage),
+		{
+			match direction {
+				Direction::ClientToCamera => self.c2d.bc_buf.extend_from_slice(payload),
+				Direction::CameraToClient => self.d2c.bc_buf.extend_from_slice(payload),
+			}
+			self.drain(direction, on_msg)
 		}
 	}
 }

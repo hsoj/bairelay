@@ -16,8 +16,8 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use log::{Log, Metadata, Record};
 use bairelay_neolink_core::pcap_decode_api::{Credentials, DecodedMessage, Direction, Session};
+use log::{Log, Metadata, Record};
 
 const USAGE: &str = "\
 decode-bc-pcap — offline decoder for captured Baichuan-over-UDP sessions.
@@ -60,6 +60,7 @@ struct Args {
 	password: String,
 	filter: Option<Vec<u32>>,
 	brief: bool,
+	tcp: bool,
 }
 
 const PASSWORD_ENV: &str = "BAIRELAY_DECODE_PASSWORD";
@@ -69,6 +70,7 @@ fn parse_args() -> Result<Args, String> {
 	let mut username = String::from("admin");
 	let mut filter: Option<Vec<u32>> = None;
 	let mut brief = false;
+	let mut tcp = false;
 	let mut iter = std::env::args().skip(1);
 	while let Some(arg) = iter.next() {
 		match arg.as_str() {
@@ -86,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
 				filter = Some(ids.map_err(|e| format!("--filter: {e}"))?);
 			}
 			"--brief" => brief = true,
+			"--tcp" => tcp = true,
 			s if s.starts_with('-') => return Err(format!("unknown flag: {s}")),
 			_ => positional.push(arg),
 		}
@@ -121,6 +124,7 @@ fn parse_args() -> Result<Args, String> {
 		password,
 		filter,
 		brief,
+		tcp,
 	})
 }
 
@@ -223,39 +227,45 @@ fn main() {
 
 fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 	// tshark `-Y` is a display filter (Wireshark syntax), not BPF.
+	// `proto` selects the transport: UDP-wrapped BcUdp (battery cameras)
+	// or Baichuan-over-TCP on port 9000 (always-on cameras / official
+	// client). The TCP path adds a `tcp.seq` column so out-of-order /
+	// retransmitted segments can be dropped before reassembly.
+	let proto = if args.tcp { "tcp" } else { "udp" };
 	let bpf = match args.camera_port {
 		Some(p) => format!(
-			"udp and ip.addr == {} and udp.port == {}",
+			"{proto} and ip.addr == {} and {proto}.port == {}",
 			args.camera_ip, p
 		),
-		None => format!("udp and ip.addr == {}", args.camera_ip),
+		None => format!("{proto} and ip.addr == {}", args.camera_ip),
 	};
-	let mut child = Command::new("tshark")
-		.arg("-r")
+	let mut fields = vec![
+		"frame.time_relative".to_string(),
+		"ip.src".to_string(),
+		format!("{proto}.srcport"),
+		"ip.dst".to_string(),
+		format!("{proto}.dstport"),
+	];
+	if args.tcp {
+		fields.push("tcp.seq".to_string());
+	}
+	fields.push(format!("{proto}.payload"));
+	let mut cmd = Command::new("tshark");
+	cmd.arg("-r")
 		.arg(&args.pcap)
 		.arg("-Y")
 		.arg(&bpf)
 		.arg("-T")
-		.arg("fields")
-		.arg("-e")
-		.arg("frame.time_relative")
-		.arg("-e")
-		.arg("ip.src")
-		.arg("-e")
-		.arg("udp.srcport")
-		.arg("-e")
-		.arg("ip.dst")
-		.arg("-e")
-		.arg("udp.dstport")
-		.arg("-e")
-		.arg("udp.payload")
+		.arg("fields");
+	for f in &fields {
+		cmd.arg("-e").arg(f);
+	}
+	let mut child = cmd
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
 		.map_err(|e| {
-			format!(
-				"failed to spawn tshark: {e}. Is Wireshark/tshark installed and on PATH?"
-			)
+			format!("failed to spawn tshark: {e}. Is Wireshark/tshark installed and on PATH?")
 		})?;
 
 	let stdout = child
@@ -271,11 +281,21 @@ fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 	let mut session = Session::new(creds);
 	let mut total = 0usize;
 	let mut decoded = 0usize;
+	// TCP-only: highest contiguous seq consumed per direction, to drop
+	// retransmits / out-of-order segments before they corrupt the byte
+	// stream (UDP ordering is handled inside Session by packet_id).
+	let mut next_seq: std::collections::HashMap<bool, u64> = std::collections::HashMap::new();
+	// Column layout differs: TCP inserts a tcp.seq column before payload.
+	let (seq_idx, pay_idx, min_cols) = if args.tcp {
+		(Some(5usize), 6usize, 7)
+	} else {
+		(None, 5usize, 6)
+	};
 
 	for line in reader.lines() {
 		let line = line.map_err(|e| format!("read tshark stdout: {e}"))?;
 		let parts: Vec<&str> = line.split('\t').collect();
-		if parts.len() < 6 {
+		if parts.len() < min_cols {
 			continue;
 		}
 		let ts: f64 = parts[0].parse().unwrap_or(0.0);
@@ -283,7 +303,7 @@ fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 		let _src_port = parts[2];
 		let dst = parts[3];
 		let dst_port = parts[4];
-		let hex = parts[5];
+		let hex = parts[pay_idx];
 		if hex.is_empty() {
 			continue;
 		}
@@ -309,6 +329,19 @@ fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 			}
 		}
 
+		// TCP retransmit / reorder guard: skip a segment whose relative
+		// seq is behind what we've already consumed for its direction.
+		if let Some(si) = seq_idx {
+			let is_c2d = matches!(dir, Direction::ClientToCamera);
+			if let Ok(seq) = parts[si].parse::<u64>() {
+				let expected = next_seq.entry(is_c2d).or_insert(seq);
+				if seq < *expected {
+					continue;
+				}
+				*expected = seq + bytes.len() as u64;
+			}
+		}
+
 		total += 1;
 
 		// Drain any stale captured XML from before this datagram so
@@ -325,7 +358,7 @@ fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 		let filter = args.filter.clone();
 		let brief = args.brief;
 		let mut local_decoded = 0usize;
-		let res = session.feed_datagram(dir, &bytes, |msg| {
+		let on_msg = |msg: DecodedMessage| {
 			let payload_xml = log.take_payload();
 			let extension_xml = log.take_extension();
 			if let Some(filter) = &filter {
@@ -335,7 +368,12 @@ fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 			}
 			local_decoded += 1;
 			print_message(ts, &msg, payload_xml, extension_xml, brief);
-		});
+		};
+		let res = if args.tcp {
+			session.feed_tcp_payload(dir, &bytes, on_msg)
+		} else {
+			session.feed_datagram(dir, &bytes, on_msg)
+		};
 		decoded += local_decoded;
 		if let Err(e) = res {
 			eprintln!("[t={ts:.3}s] decode error: {e}");
@@ -354,9 +392,7 @@ fn run(args: Args, log: &'static CaptureLogger) -> Result<(), String> {
 		));
 	}
 
-	eprintln!(
-		"\n--- Summary: scanned {total} datagrams, decoded {decoded} Bc messages ---"
-	);
+	eprintln!("\n--- Summary: scanned {total} datagrams, decoded {decoded} Bc messages ---");
 	Ok(())
 }
 

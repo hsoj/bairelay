@@ -18,7 +18,7 @@ Standalone cargo project, excluded from the workspace. Compiled on demand. `bair
 BAIRELAY_DECODE_PASSWORD='...' \
   cargo run --manifest-path tests/scripts/decode-bc-pcap/Cargo.toml --quiet -- \
   <pcap-path> <camera-ip>[:port] [--user <username>] \
-  [--filter <msg_id>[,<msg_id>...]] [--brief]
+  [--filter <msg_id>[,<msg_id>...]] [--brief] [--tcp]
 ```
 
 ### Arguments
@@ -35,6 +35,7 @@ BAIRELAY_DECODE_PASSWORD='...' \
 | `--user <name>` | Camera username. Default: `admin`. |
 | `--filter <ids>` | Comma-separated `msg_id` list — print only these messages. Useful with chatty captures where live preview pulls drown out control traffic. |
 | `--brief` | Hide the parsed-struct Debug dump; print only header + raw decrypted payload. Cleanest output for diffing C2D vs D2C captures. |
+| `--tcp` | Decode Baichuan-over-**TCP** (default port 9000) instead of UDP-wrapped BcUdp. Always-on cameras and the official desktop client speak raw Bc over TCP; the Bc frames ride the TCP byte stream with no BcUdp wrapper. Retransmitted / out-of-order segments are dropped by `tcp.seq` before reassembly. |
 
 ### Credentials
 
