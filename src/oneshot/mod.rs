@@ -1,6 +1,7 @@
 pub mod abilities;
 pub mod battery;
 pub mod classify;
+pub mod cloud_authorise;
 pub mod dispatch;
 pub mod errors;
 pub mod floodlight;

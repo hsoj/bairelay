@@ -249,6 +249,33 @@ Bairelay assumes a **trusted LAN** as its deployment context. That assumption sh
 - **RTSP authentication is opt-in.** Without a `[[users]]` block, the RTSP server accepts anonymous connections. Add a `[[users]]` with name + pass (and optional per-camera `permitted_users` allow-list) to require Digest / Basic auth. Digest enforces a 5-minute nonce TTL and binds the digest URI to the request line per RFC 7616; Basic is offered alongside on plain transport for drop-in compatibility with permissive clients but is, of course, plaintext.
 - **Push listener trusts source IP.** Any TCP connection from a registered camera's IP is treated as motion. This is correct on a trusted LAN behind NAT, and the listener intentionally rejects when `[push_listener]` is enabled without `[wake_server] enable = true` (the registry would otherwise be empty).
 
+### Cloud ("account device") cameras
+
+A camera added to a Reolink account stops accepting local-password logins and demands Reolink's cloud-signed **sigV3** login. Bairelay supports this, but it's **discouraged**: it makes a local-only bridge depend on Reolink's cloud (internet needed at every connect, a short-lived token Reolink can revoke, no fallback if the API changes). **Prefer unbinding the camera from the Reolink account** so it logs in with a normal local password.
+
+If you can't unbind, put the account credentials once at the top level and mark each cloud camera `discovery = "cloud"` (no per-camera `password` needed — the cloud token authenticates it):
+
+```toml
+cloud_account  = "you@example.com"
+cloud_password = "your-reolink-password"
+
+[[cameras]]
+name      = "backyard"
+uid       = "ABCDEF0123456789"
+username  = "admin"
+discovery = "cloud"
+```
+
+If the login errors out with `8208 "the extra identification is required"`, run the one-time per-host authorisation:
+
+```bash
+bairelay cloud-authorise
+```
+
+This will prompt Reolink to send an authorisation code (emailed code by default; `--method totp` / `--method backup_code` also work) and afterwards will store a long-lived credential beside the config (`config-cloud-auth.json`) so the host connects headlessly afterwards.
+
+More details can be found in the documentation under [`docs/cloud-account.md`](docs/cloud-account.md).
+
 ---
 
 ## Command-line usage
@@ -286,8 +313,9 @@ Camera commands:
   abilities      Dump the camera's abilityInfo XML + parsed permissions
 
 Other:
-  check-config   Validate the config file and exit (no camera connection)
-  help           Print help for the given subcommand
+  check-config    Validate the config file and exit (no camera connection)
+  cloud-authorise Perform cloud login authorisation (MFA) for this host
+  help            Print help for the given subcommand
 ```
 
 Every camera command takes a camera name (matched against `[[cameras]]` in the config) and exits with a coarse exit code: 0 success, 1 generic, 2 usage, 3 config, 4 connection / auth, 5 protocol, 6 unsupported (`MissingAbility`), 130 Ctrl+C — so shell scripts can branch without parsing stdout.

@@ -179,6 +179,13 @@ pub async fn dispatch_oneshot(
 				"internal: check-config routed through camera dispatch"
 			))
 		}
+		Command::CloudAuthorise { .. } => {
+			// `run_oneshot` short-circuits `cloud-authorise` (no camera)
+			// before dispatch; reaching here means that was bypassed.
+			Err(anyhow::anyhow!(
+				"internal: cloud-authorise routed through camera dispatch"
+			))
+		}
 		Command::RenderHassioConfig { .. } => {
 			// `main::async_main` dispatches `render-hassio-config`
 			// before the one-shot pipeline runs; reaching this arm

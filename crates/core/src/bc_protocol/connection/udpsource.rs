@@ -1293,6 +1293,8 @@ mod tests {
 			addr: server_addr,
 			client_id: 11,
 			camera_id: 22,
+			nc: None,
+			pl: None,
 		};
 		let _src = tokio::time::timeout(
 			T,

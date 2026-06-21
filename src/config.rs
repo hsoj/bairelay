@@ -37,6 +37,9 @@ pub enum DiscoveryMethod {
 	#[default]
 	Relay,
 	Cellular,
+	/// Account ("cloud") camera — bound to a Reolink account and reachable only
+	/// via the sigV3 login. Requires top-level `cloud_account`/`cloud_password`.
+	Cloud,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +140,15 @@ pub struct Config {
 	#[serde(default = "default_prune_grace_secs")]
 	pub stream_prune_grace_secs: u64,
 
+	/// Reolink account e-mail, used to mint sigV3 token bundles for cameras with
+	/// `discovery = "cloud"`. Document-root level; shared by all cloud cameras.
+	#[serde(default)]
+	pub cloud_account: Option<String>,
+
+	/// Reolink account password, paired with `cloud_account`.
+	#[serde(default)]
+	pub cloud_password: Option<String>,
+
 	pub cameras: Vec<CameraConfig>,
 }
 
@@ -155,6 +167,8 @@ impl Default for Config {
 			push_listener: None,
 			tokio_console: None,
 			stream_prune_grace_secs: default_prune_grace_secs(),
+			cloud_account: None,
+			cloud_password: None,
 			cameras: Vec::new(),
 		}
 	}
@@ -319,6 +333,22 @@ pub struct CameraConfig {
 	#[serde(alias = "pass", default)]
 	pub password: Option<String>,
 
+	/// Reolink account credentials for `discovery = "cloud"` cameras. Not parsed
+	/// from the `[[cameras]]` table — copied from the document-root
+	/// `cloud_account` / `cloud_password` by [`parse_config`].
+	#[serde(skip)]
+	pub cloud_account: Option<String>,
+	#[serde(skip)]
+	pub cloud_password: Option<String>,
+	/// Host's MFA trust token from a `cloud-authorise` bootstrap. Not parsed
+	/// from TOML — loaded from the sibling `config-cloud-auth.json` by
+	/// [`apply_cloud_auth`] and consulted only for `discovery = "cloud"`.
+	#[serde(skip)]
+	pub cloud_mfa_trust_token: Option<String>,
+	/// Host's refresh token from the same bootstrap (refresh-grant fallback).
+	#[serde(skip)]
+	pub cloud_refresh_token: Option<String>,
+
 	#[serde(default, alias = "channel")]
 	pub channel_id: u8,
 
@@ -422,6 +452,10 @@ impl Default for CameraConfig {
 			uid: None,
 			username: String::new(),
 			password: None,
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			channel_id: 0,
 			stream: StreamConfig::default(),
 			discovery: DiscoveryMethod::default(),
@@ -731,9 +765,64 @@ pub fn parse_config(toml_str: &str) -> Result<Config, String> {
 	let value: toml::Value =
 		toml::from_str(toml_str).map_err(|e| format!("Failed to parse config: {e}"))?;
 	validate_top_level_key_placement(&value)?;
-	value
+	let mut config: Config = value
 		.try_into()
-		.map_err(|e: toml::de::Error| format!("Failed to parse config: {e}"))
+		.map_err(|e: toml::de::Error| format!("Failed to parse config: {e}"))?;
+	// The Reolink account for "cloud" cameras lives at the document root; copy
+	// it onto each camera so the per-camera connect path can mint a bundle.
+	for cam in &mut config.cameras {
+		cam.cloud_account = config.cloud_account.clone();
+		cam.cloud_password = config.cloud_password.clone();
+	}
+	Ok(config)
+}
+
+/// Filename of the host's MFA trust-token store, written by `cloud-authorise`
+/// and read here. Lives beside the config file.
+pub const CLOUD_AUTH_FILE: &str = "config-cloud-auth.json";
+
+/// Attach the host's stored MFA trust token (from `config-cloud-auth.json`
+/// beside `config_path`) to each `discovery = "cloud"` camera, so the cloud
+/// mint can clear Reolink's login verification headlessly. A missing file is
+/// the normal case (host not bootstrapped); an account-mismatched or expired
+/// token is ignored with a warning pointing at `cloud-authorise`.
+pub fn apply_cloud_auth(config: &mut Config, config_path: &std::path::Path) {
+	let auth_path = config_path.with_file_name(CLOUD_AUTH_FILE);
+	let raw = match std::fs::read_to_string(&auth_path) {
+		Ok(s) => s,
+		Err(_) => return,
+	};
+	let auth: bairelay_neolink_core::cloud::CloudAuth = match serde_json::from_str(&raw) {
+		Ok(a) => a,
+		Err(e) => {
+			tracing::warn!("ignoring {}: {e}", auth_path.display());
+			return;
+		}
+	};
+	if config.cloud_account.as_deref() != Some(auth.account.as_str()) {
+		tracing::warn!(
+			"{} is for a different Reolink account than cloud_account; ignoring it",
+			auth_path.display()
+		);
+		return;
+	}
+	let now = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_secs() as i64)
+		.unwrap_or(0);
+	if !auth.is_valid(now) {
+		tracing::warn!(
+			"cloud credential in {} has expired/empty — run `cloud-authorise` to re-authorise this host",
+			auth_path.display()
+		);
+		return;
+	}
+	for cam in &mut config.cameras {
+		if matches!(cam.discovery, DiscoveryMethod::Cloud) {
+			cam.cloud_mfa_trust_token = auth.mfa_trust_token.clone();
+			cam.cloud_refresh_token = auth.refresh_token.clone();
+		}
+	}
 }
 
 // ── Validation ─────────────────────────────────────────────────────────
@@ -1111,9 +1200,27 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 			return Err(format!("Duplicate camera name: '{}'", cam.name));
 		}
 
-		// Password is required
-		if cam.password.is_none() {
+		// A local password is required — except for "cloud" cameras, which
+		// authenticate with a cloud-minted sigV3 token, not a device password.
+		if cam.password.is_none() && cam.discovery != DiscoveryMethod::Cloud {
 			return Err(format!("Camera '{}': password is required", cam.name));
+		}
+		// Cloud cameras need the account credentials to mint that token.
+		if cam.discovery == DiscoveryMethod::Cloud
+			&& (cam.cloud_account.is_none() || cam.cloud_password.is_none())
+		{
+			return Err(format!(
+				"Camera '{}': discovery = \"cloud\" requires top-level \
+				 cloud_account and cloud_password",
+				cam.name
+			));
+		}
+		// The cloud token is minted per-UID, so a cloud camera must have one.
+		if cam.discovery == DiscoveryMethod::Cloud && cam.uid.is_none() {
+			return Err(format!(
+				"Camera '{}': discovery = \"cloud\" requires a uid",
+				cam.name
+			));
 		}
 
 		// Camera must have address or uid
@@ -1243,6 +1350,112 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 mod tests {
 	use super::*;
 
+	fn now_s() -> i64 {
+		std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map(|d| d.as_secs() as i64)
+			.unwrap_or(0)
+	}
+
+	/// Build a config + sibling auth file in a fresh temp dir; returns the
+	/// (config_path, dir) so the caller can run `apply_cloud_auth` + clean up.
+	fn auth_fixture(
+		tag: &str,
+		account: &str,
+		auth_json: &str,
+	) -> (std::path::PathBuf, std::path::PathBuf) {
+		let dir =
+			std::env::temp_dir().join(format!("bairelay-cfgauth-{}-{tag}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(dir.join(CLOUD_AUTH_FILE), auth_json).unwrap();
+		let cfg_path = dir.join("config.toml");
+		let _ = &account;
+		(cfg_path, dir)
+	}
+
+	fn cloud_config(account: &str) -> Config {
+		let mut config = Config {
+			cloud_account: Some(account.into()),
+			..Config::default()
+		};
+		let cloud = CameraConfig {
+			name: "Cloud".into(),
+			discovery: DiscoveryMethod::Cloud,
+			..CameraConfig::default()
+		};
+		let local = CameraConfig {
+			name: "Local".into(),
+			discovery: DiscoveryMethod::Local,
+			..CameraConfig::default()
+		};
+		config.cameras = vec![cloud, local];
+		config
+	}
+
+	#[test]
+	fn apply_cloud_auth_attaches_valid_token_to_cloud_cameras_only() {
+		let json = format!(
+			r#"{{"account":"owner@example.com","mfa_trust_token":"TT","expiry_unix_s":{}}}"#,
+			now_s() + 30 * 86_400
+		);
+		let (cfg_path, dir) = auth_fixture("valid", "owner@example.com", &json);
+		let mut config = cloud_config("owner@example.com");
+		apply_cloud_auth(&mut config, &cfg_path);
+		assert_eq!(
+			config.cameras[0].cloud_mfa_trust_token.as_deref(),
+			Some("TT")
+		);
+		// Non-cloud camera must NOT receive the token.
+		assert_eq!(config.cameras[1].cloud_mfa_trust_token, None);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn apply_cloud_auth_ignores_expired_token() {
+		let json = format!(
+			r#"{{"account":"owner@example.com","mfa_trust_token":"TT","expiry_unix_s":{}}}"#,
+			now_s() - 10
+		);
+		let (cfg_path, dir) = auth_fixture("expired", "owner@example.com", &json);
+		let mut config = cloud_config("owner@example.com");
+		apply_cloud_auth(&mut config, &cfg_path);
+		assert_eq!(config.cameras[0].cloud_mfa_trust_token, None);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn apply_cloud_auth_ignores_account_mismatch() {
+		let json = format!(
+			r#"{{"account":"someone-else@example.com","mfa_trust_token":"TT","expiry_unix_s":{}}}"#,
+			now_s() + 30 * 86_400
+		);
+		let (cfg_path, dir) = auth_fixture("mismatch", "owner@example.com", &json);
+		let mut config = cloud_config("owner@example.com");
+		apply_cloud_auth(&mut config, &cfg_path);
+		assert_eq!(config.cameras[0].cloud_mfa_trust_token, None);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn apply_cloud_auth_ignores_malformed_json() {
+		let (cfg_path, dir) = auth_fixture("malformed", "owner@example.com", "{not valid json");
+		let mut config = cloud_config("owner@example.com");
+		apply_cloud_auth(&mut config, &cfg_path);
+		assert_eq!(config.cameras[0].cloud_mfa_trust_token, None);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn apply_cloud_auth_missing_file_is_noop() {
+		let dir =
+			std::env::temp_dir().join(format!("bairelay-cfgauth-{}-none", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let mut config = cloud_config("owner@example.com");
+		apply_cloud_auth(&mut config, &dir.join("config.toml"));
+		assert_eq!(config.cameras[0].cloud_mfa_trust_token, None);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
 	#[test]
 	fn wake_server_block_parses_with_enable_true() {
 		let toml = r#"
@@ -1262,6 +1475,78 @@ mod tests {
 		let ws = cfg.wake_server.expect("wake_server present");
 		assert!(ws.enable);
 		assert_eq!(ws.middleman_port, 9999);
+	}
+
+	#[test]
+	fn cloud_camera_propagates_account_and_validates() {
+		let toml = r#"
+			bind = "0.0.0.0"
+			cloud_account = "owner@example.com"
+			cloud_password = "secret"
+
+			[[cameras]]
+			name = "hallway"
+			uid = "9527000TESTCAM00"
+			username = "admin"
+			discovery = "cloud"
+		"#;
+		let cfg = parse_config(toml).expect("parse");
+		let cam = &cfg.cameras[0];
+		// Top-level creds copied onto the camera; no local password required.
+		assert_eq!(cam.cloud_account.as_deref(), Some("owner@example.com"));
+		assert_eq!(cam.cloud_password.as_deref(), Some("secret"));
+		assert!(cam.password.is_none());
+		validate_config(&cfg).expect("cloud camera with account is valid");
+	}
+
+	#[test]
+	fn cloud_camera_without_uid_is_rejected() {
+		let toml = r#"
+			bind = "0.0.0.0"
+			cloud_account = "owner@example.com"
+			cloud_password = "secret"
+
+			[[cameras]]
+			name = "hallway"
+			address = "192.168.1.50:9000"
+			username = "admin"
+			discovery = "cloud"
+		"#;
+		let cfg = parse_config(toml).expect("parse");
+		let err = validate_config(&cfg).expect_err("cloud needs a uid");
+		assert!(err.contains("requires a uid"), "got: {err}");
+	}
+
+	#[test]
+	fn cloud_camera_without_account_is_rejected() {
+		let toml = r#"
+			bind = "0.0.0.0"
+
+			[[cameras]]
+			name = "hallway"
+			uid = "9527000TESTCAM00"
+			username = "admin"
+			discovery = "cloud"
+		"#;
+		let cfg = parse_config(toml).expect("parse");
+		let err = validate_config(&cfg).expect_err("cloud needs an account");
+		assert!(err.contains("cloud_account"), "got: {err}");
+	}
+
+	#[test]
+	fn non_cloud_camera_still_requires_password() {
+		let toml = r#"
+			bind = "0.0.0.0"
+
+			[[cameras]]
+			name = "front"
+			address = "10.0.0.10"
+			username = "admin"
+			discovery = "relay"
+		"#;
+		let cfg = parse_config(toml).expect("parse");
+		let err = validate_config(&cfg).expect_err("relay camera needs a password");
+		assert!(err.contains("password is required"), "got: {err}");
 	}
 
 	#[test]

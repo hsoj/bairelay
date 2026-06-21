@@ -220,6 +220,9 @@ pub fn clone_command(cmd: &cli::Command) -> cli::Command {
 			action: action.as_ref().map(clone_user_sub),
 		},
 		Command::CheckConfig => Command::CheckConfig,
+		Command::CloudAuthorise { method } => Command::CloudAuthorise {
+			method: method.clone(),
+		},
 		Command::RenderHassioConfig {
 			options_json,
 			overlay,

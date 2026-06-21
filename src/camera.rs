@@ -875,6 +875,15 @@ impl CameraHandle {
 	/// Interval between keepalive probes. 5 s matches neolink and is
 	/// well below the camera's own idle threshold for sleep-mode
 	/// battery devices.
+	/// Backstop for a single connect attempt (discovery + socket setup).
+	/// The inner discovery retry loop owns the real timing — 5 rounds,
+	/// each bounded by `REGISTRATION_ROUND_TIMEOUT`, with exponential
+	/// backoff — and self-terminates with a named-relay error in ~80 s.
+	/// This deadline sits above that budget so it never preempts a retry
+	/// (the old 30 s cut the loop off after ~3 rounds); Ctrl+C stays
+	/// responsive via the cancel arm regardless. A still-failing attempt
+	/// then falls to the outer `ReconnectBackoff`.
+	const CONNECT_TIMEOUT: Duration = Duration::from_secs(100);
 	pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 	/// Per-probe timeout: strictly below [`Self::KEEPALIVE_INTERVAL`]
 	/// so a slow probe doesn't consume the entire tick budget, AND
@@ -1245,11 +1254,11 @@ impl CameraHandle {
 			// so that Ctrl+C works even if bairelay_neolink_core is stuck
 			let connect_result = tokio::select! {
 				_ = self.cancel.cancelled() => break,
-				result = tokio::time::timeout(Duration::from_secs(30), self.try_connect()) => {
+				result = tokio::time::timeout(Self::CONNECT_TIMEOUT, self.try_connect()) => {
 					match result {
 						Ok(r) => r,
 						Err(_) => {
-							tracing::warn!(camera = %self.config.name, "Connection timed out (30s)");
+							tracing::warn!(camera = %self.config.name, "Connection timed out ({}s)", Self::CONNECT_TIMEOUT.as_secs());
 							Err(anyhow::anyhow!("Connection timed out"))
 						}
 					}

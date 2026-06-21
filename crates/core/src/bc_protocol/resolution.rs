@@ -74,6 +74,13 @@ pub enum DiscoveryMethods {
 	/// only those are tried
 	#[serde(alias = "cellular")]
 	Cellular,
+	/// Account ("cloud") camera. The camera is bound to a Reolink account and
+	/// only accepts the sigV3 login with a cloud-minted token. Enables the same
+	/// discovery reach as [`Relay`](Self::Relay) (local + remote + map + relay)
+	/// and advertises `lver=3` so the camera issues the sigV3 handshake.
+	/// Requires top-level `cloud_account` / `cloud_password`.
+	#[serde(alias = "cloud")]
+	Cloud,
 	#[doc(hidden)]
 	#[serde(alias = "debug")]
 	/// Used for debugging it is set to whatever the dev is currently testing
@@ -288,7 +295,7 @@ pub(crate) fn discovery_flags_for(method: DiscoveryMethods) -> DiscoveryFlags {
 			map: true,
 			relay: false,
 		},
-		DiscoveryMethods::Relay => DiscoveryFlags {
+		DiscoveryMethods::Relay | DiscoveryMethods::Cloud => DiscoveryFlags {
 			local: true,
 			remote: true,
 			map: true,

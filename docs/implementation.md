@@ -14,7 +14,7 @@ Static structure and dependency tables live in `docs/architecture.md`.
 
 | Method                                | Notes                                                     |
 |---------------------------------------|-----------------------------------------------------------|
-| `BcCamera::new(&BcCameraOpt)`         | Connects via discovery. 2–30 s depending on method.       |
+| `BcCamera::new(&BcCameraOpt)`         | Connects via discovery. Local/direct: 2–15 s. Remote/relay registration retries 5 rounds w/ backoff, up to ~80 s for an asleep cam. |
 | `login_with_maxenc(MaxEncryption)`    | MD5 challenge-response auth.                              |
 | `logout()`                            | Concrete-only (not on `CameraDriver`); call with 5 s timeout. |
 | `get_linktype()`                      | Used for keepalive (NOT `ping()`; see "Keepalive").       |
@@ -38,7 +38,7 @@ Every async `BcCamera` method can hang indefinitely if the camera drops the TCP 
 
 | Operation         | Deadline |
 |-------------------|----------|
-| Connect           | 30 s     |
+| Connect           | 100 s (backstop; the discovery retry loop self-terminates in ~80 s) |
 | Keepalive         | 5 s      |
 | Pollers           | 10 s     |
 | Control commands  | 30 s     |

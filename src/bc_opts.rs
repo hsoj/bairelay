@@ -30,6 +30,7 @@ pub fn build_bc_opts(cfg: &CameraConfig) -> BcCameraOpt {
 		config::DiscoveryMethod::Map => DiscoveryMethods::Map,
 		config::DiscoveryMethod::Relay => DiscoveryMethods::Relay,
 		config::DiscoveryMethod::Cellular => DiscoveryMethods::Cellular,
+		config::DiscoveryMethod::Cloud => DiscoveryMethods::Cloud,
 	};
 
 	BcCameraOpt {
@@ -40,11 +41,18 @@ pub fn build_bc_opts(cfg: &CameraConfig) -> BcCameraOpt {
 		port,
 		protocol: ConnectionProtocol::TcpUdp,
 		discovery,
-		max_discovery_retries: 10,
+		// 5 rounds with exponential backoff (1,2,4,8,16 s) is plenty for
+		// Reolink's lazy registration to catch up / a battery cam to wake;
+		// each round is itself bounded by REGISTRATION_ROUND_TIMEOUT.
+		max_discovery_retries: 5,
 		credentials: Credentials {
 			username: cfg.username.clone(),
 			password: cfg.password.clone(),
 		},
+		cloud_account: cfg.cloud_account.clone(),
+		cloud_password: cfg.cloud_password.clone(),
+		cloud_mfa_trust_token: cfg.cloud_mfa_trust_token.clone(),
+		cloud_refresh_token: cfg.cloud_refresh_token.clone(),
 		debug: cfg.debug.unwrap_or(false),
 	}
 }
@@ -93,7 +101,7 @@ mod tests {
 		assert_eq!(opts.port, Some(9000));
 		assert!(matches!(opts.protocol, ConnectionProtocol::TcpUdp));
 		assert!(matches!(opts.discovery, DiscoveryMethods::Relay));
-		assert_eq!(opts.max_discovery_retries, 10);
+		assert_eq!(opts.max_discovery_retries, 5);
 		assert_eq!(opts.credentials.username, "admin");
 		assert_eq!(opts.credentials.password.as_deref(), Some("s3cret"));
 		assert!(!opts.debug);
@@ -185,6 +193,7 @@ mod tests {
 			("map", DiscoveryMethods::Map),
 			("relay", DiscoveryMethods::Relay),
 			("cellular", DiscoveryMethods::Cellular),
+			("cloud", DiscoveryMethods::Cloud),
 		];
 		for (name, expected) in tests {
 			let cfg: CameraConfig = toml::from_str(&format!(

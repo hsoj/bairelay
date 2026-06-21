@@ -63,6 +63,7 @@ fn bcudp_discovery_c2d_c_roundtrip() {
 			mtu: 1350,
 			debug: false,
 			os: "MAC".into(),
+			lver: 0,
 		}),
 	));
 }
@@ -76,6 +77,8 @@ fn bcudp_discovery_d2c_c_r_roundtrip() {
 			rsp: 0,
 			cid: 82000,
 			did: 49,
+			pl: None,
+			nc: None,
 		}),
 	));
 }

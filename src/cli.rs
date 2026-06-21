@@ -34,6 +34,7 @@ Camera commands:
 
 Other:
   check-config   Validate the config file and exit (no camera connection)
+  cloud-authorise Clear cloud login verification (MFA) for this host (~30 days)
   help           Print help for the given subcommand
 
 Options:
@@ -320,6 +321,18 @@ pub enum Command {
 	#[command(name = "check-config")]
 	CheckConfig,
 
+	/// Interactively clear Reolink's login verification (MFA) for this host
+	/// and store the ~30-day trust token beside the config, so cloud cameras
+	/// connect headlessly from an IP Reolink would otherwise challenge. Run
+	/// once per host (re-run when the token lapses).
+	#[command(name = "cloud-authorise")]
+	CloudAuthorise {
+		/// Verification method: `email` (a code is emailed), `totp` (read from
+		/// your authenticator app), or `backup_code` (one of your saved codes).
+		#[arg(long, default_value = "email")]
+		method: String,
+	},
+
 	/// Render Home Assistant Supervisor options + a TOML overlay into
 	/// a complete bairelay config file. Internal subcommand used by the
 	/// HA add-on entrypoint shim; operators do not invoke this directly.
@@ -373,6 +386,7 @@ impl Cli {
 			| Command::Services { .. }
 			| Command::Users { .. }
 			| Command::CheckConfig
+			| Command::CloudAuthorise { .. }
 			| Command::RenderHassioConfig { .. } => None,
 		}
 	}
@@ -382,6 +396,13 @@ impl Cli {
 	/// short-circuits before anything that needs a camera.
 	pub fn is_check_config(&self) -> bool {
 		matches!(self.command, Command::CheckConfig)
+	}
+
+	/// Returns true for the `cloud-authorise` subcommand — a config-level,
+	/// no-camera interactive command (like `check-config`), routed through the
+	/// one-shot pipeline but short-circuited before any camera connection.
+	pub fn is_cloud_authorise(&self) -> bool {
+		matches!(self.command, Command::CloudAuthorise { .. })
 	}
 
 	/// Returns true if the selected mode includes MQTT.
@@ -414,6 +435,7 @@ impl Cli {
 			| Command::Rtsp { .. }
 			| Command::MqttRtsp { .. }
 			| Command::CheckConfig
+			| Command::CloudAuthorise { .. }
 			| Command::RenderHassioConfig { .. } => None,
 			Command::Reboot(a)
 			| Command::Battery(a)

@@ -37,6 +37,7 @@ impl BcCamera {
 						user_name: username,
 						password,
 						user_ver: 1,
+						..Default::default()
 					}),
 					login_net: Some(LoginNet::default()),
 					..Default::default()

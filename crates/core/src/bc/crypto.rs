@@ -57,6 +57,16 @@ impl EncryptionProtocol {
 			dec: Aes128CfbDec::new(key.as_slice().into(), IV.into()),
 		}
 	}
+	/// Full AES (control + media stream) with an explicit IV. Account ("cloud")
+	/// cameras encrypt the leading `encryptLen` bytes of every media payload
+	/// with the same derived key/IV as the control session, so the post-login
+	/// session must be `FullAes`, not `Aes` (which leaves media plaintext).
+	pub fn full_aes_with_iv(key: [u8; 16], iv: [u8; 16]) -> Self {
+		EncryptionProtocol::FullAes {
+			enc: Aes128CfbEnc::new(key.as_slice().into(), iv.as_slice().into()),
+			dec: Aes128CfbDec::new(key.as_slice().into(), iv.as_slice().into()),
+		}
+	}
 	/// Helper to make full aes
 	pub fn full_aes(key: [u8; 16]) -> Self {
 		EncryptionProtocol::FullAes {

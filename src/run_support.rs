@@ -38,9 +38,12 @@ pub fn cli_output_mode(cli: &Cli) -> Mode {
 pub fn load_validated_config(path: &Path) -> Result<Config> {
 	let config_str = std::fs::read_to_string(path)
 		.with_context(|| format!("Failed to read config file: {}", path.display()))?;
-	let config = parse_config(&config_str)
+	let mut config = parse_config(&config_str)
 		.map_err(|e| anyhow::anyhow!(e))
 		.context("Invalid configuration")?;
+	// Attach the host's MFA trust token (if bootstrapped via `cloud-authorise`)
+	// from the sibling state file, so cloud cameras can clear login verification.
+	crate::config::apply_cloud_auth(&mut config, path);
 	validate_config(&config)
 		.map_err(|e| anyhow::anyhow!(e))
 		.context("Configuration validation failed")?;
@@ -262,6 +265,32 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 	// applies (0 OK, 2 missing, 3 parse/validate failure).
 	if cli.is_check_config() {
 		return run_check_config_to(cli, mode, stdout, stderr);
+	}
+
+	// `cloud-authorise` is a no-camera interactive command: read the config,
+	// run the MFA bootstrap (prompts on the real terminal), and write the
+	// trust-token file. It bypasses the structured-output machinery.
+	if cli.is_cloud_authorise() {
+		let method = match &cli.command {
+			crate::cli::Command::CloudAuthorise { method } => method.clone(),
+			_ => unreachable!("is_cloud_authorise gated the variant"),
+		};
+		let path = cli.config_path();
+		let config_str = match std::fs::read_to_string(path) {
+			Ok(s) => s,
+			Err(e) => {
+				let _ = writeln!(stderr, "cloud-authorise: read {}: {e}", path.display());
+				return classify::EXIT_USAGE;
+			}
+		};
+		let config = match parse_config(&config_str) {
+			Ok(c) => c,
+			Err(e) => {
+				let _ = writeln!(stderr, "cloud-authorise: {e}");
+				return classify::EXIT_CONFIG;
+			}
+		};
+		return crate::oneshot::cloud_authorise::run(path, &config, &method).await;
 	}
 
 	// Pre-flight: snapshot --json without --output is a usage error.
@@ -604,6 +633,30 @@ cameras = []
 		// Per classify tables, a ConfigError surfaces as EXIT_CONFIG or
 		// a coarse non-zero code — whatever the table decided.
 		assert_ne!(code, classify::EXIT_OK);
+	}
+
+	#[tokio::test]
+	async fn run_oneshot_cloud_authorise_missing_config_is_usage() {
+		// The cloud-authorise dispatch reads the config first; a missing file
+		// short-circuits to EXIT_USAGE before any network/MFA work.
+		let cli = cli_from(&[
+			"bairelay",
+			"cloud-authorise",
+			"-c",
+			"/nonexistent-ca-xyz.toml",
+		]);
+		let code = run_oneshot_to(&cli, &mut Vec::new(), &mut Vec::new()).await;
+		assert_eq!(code, classify::EXIT_USAGE);
+	}
+
+	#[tokio::test]
+	async fn run_oneshot_cloud_authorise_malformed_config_is_config_error() {
+		let f = tempfile::NamedTempFile::new().unwrap();
+		std::fs::write(f.path(), "this is = not valid toml {{").unwrap();
+		let p = f.path().display().to_string();
+		let cli = cli_from(&["bairelay", "cloud-authorise", "-c", &p]);
+		let code = run_oneshot_to(&cli, &mut Vec::new(), &mut Vec::new()).await;
+		assert_eq!(code, classify::EXIT_CONFIG);
 	}
 
 	#[tokio::test]

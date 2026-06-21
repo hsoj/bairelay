@@ -25,6 +25,8 @@ mod keepalive;
 mod ledstate;
 mod link;
 mod login;
+mod login_authlogin;
+mod login_sigv3;
 mod logout;
 mod motion;
 mod ping;
@@ -64,6 +66,13 @@ pub use stream::{StreamData, StreamKind, VideoStream};
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
+/// Per-round budget for one P2P registration attempt. A reachable relay
+/// answers the lookup + register round-trip in well under a second, so a
+/// round that drags on is a dead/firewalled relay holding the whole
+/// attempt at its 15 s socket timeout. Cut it short and let the retry
+/// loop's exponential backoff (1,2,4,8,16 s) do the waiting instead.
+const REGISTRATION_ROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Clone, Copy)]
 enum ReadKind {
 	ReadOnly,
@@ -84,6 +93,26 @@ pub struct BcCamera {
 	// wire so the plaintext does not leave the host outside that case.
 	credentials: Credentials,
 	abilities: RwLock<HashMap<String, ReadKind>>,
+	/// This camera is configured `discovery = "cloud"` — it authenticates with a
+	/// minted cloud token (sigV3), never a local password. The account/UID below
+	/// are propagated to *every* camera from the document root, so this flag —
+	/// NOT `cloud_account.is_some()` — is what gates the cloud login path.
+	is_cloud: bool,
+	/// Account ("cloud") cameras only: the sigV3 `(nonce, pl)` captured from the
+	/// discovery handshake, and the Reolink account + UID used to mint a fresh
+	/// token bundle at login. All `None` for ordinary cameras.
+	sigv3_handshake: Option<(i64, String)>,
+	cloud_account: Option<String>,
+	cloud_password: Option<String>,
+	cloud_uid: Option<String>,
+	/// Host's stored MFA trust token (from a `cloud-authorise` bootstrap), sent
+	/// with the cloud mint's password grant to clear login verification on an
+	/// IP Reolink would otherwise challenge. `None` when not bootstrapped.
+	cloud_mfa_trust_token: Option<String>,
+	/// Host's stored refresh token (same bootstrap). Used for a refresh grant
+	/// that skips the password grant — and thus MFA — entirely; the fallback
+	/// when Reolink issued no `mfa_trust_token`. `None` when absent.
+	cloud_refresh_token: Option<String>,
 }
 
 /// Options used to construct a camera
@@ -108,6 +137,19 @@ pub struct BcCameraOpt {
 	pub max_discovery_retries: usize,
 	/// Credentials for login
 	pub credentials: Credentials,
+	/// Reolink account e-mail for account ("cloud") cameras. Used with
+	/// `cloud_password` to mint the sigV3 token bundle. Only consulted when
+	/// `discovery` is [`DiscoveryMethods::Cloud`].
+	pub cloud_account: Option<String>,
+	/// Reolink account password for account ("cloud") cameras.
+	pub cloud_password: Option<String>,
+	/// Host's stored MFA trust token (from a `cloud-authorise` bootstrap), sent
+	/// with the cloud mint to clear login verification on an IP Reolink would
+	/// otherwise challenge. `None` when not bootstrapped / not needed.
+	pub cloud_mfa_trust_token: Option<String>,
+	/// Host's stored refresh token (same bootstrap) — refresh-grant fallback
+	/// when no `mfa_trust_token` was issued. `None` when absent.
+	pub cloud_refresh_token: Option<String>,
 	/// Toggle debug print of underlying data
 	pub debug: bool,
 }
@@ -230,12 +272,14 @@ impl BcCamera {
 	/// registration loop deliberately resets client IDs between tries,
 	/// which was the only subtlety driving the old open-coded form).
 	async fn find_camera(options: &BcCameraOpt) -> Result<CameraLocation> {
-		let discovery =
-			std::sync::Arc::new(Discovery::new().await?) as std::sync::Arc<dyn CameraDiscoverer>;
-		let reg_factory: RegFactory = std::sync::Arc::new(|| {
-			Box::pin(async {
+		// Account ("cloud") cameras advertise sigV3 (`lver=3`) on the connect.
+		let sigv3 = matches!(options.discovery, DiscoveryMethods::Cloud);
+		let discovery = std::sync::Arc::new(Discovery::new(sigv3).await?)
+			as std::sync::Arc<dyn CameraDiscoverer>;
+		let reg_factory: RegFactory = std::sync::Arc::new(move || {
+			Box::pin(async move {
 				Ok::<std::sync::Arc<dyn CameraDiscoverer>, Error>(std::sync::Arc::new(
-					Discovery::new().await?,
+					Discovery::new(sigv3).await?,
 				)
 					as std::sync::Arc<dyn CameraDiscoverer>)
 			})
@@ -309,16 +353,49 @@ impl BcCamera {
 					let max_retry: usize = options.max_discovery_retries;
 					loop {
 						tokio::task::yield_now().await;
-						if let Ok(result) = reg_disc.get_registration(uid).await {
-							reg_result = result;
-							break;
-						}
+						// Bound each round so a single hung relay can't stall
+						// the whole budget at the 15 s socket timeout — a live
+						// relay answers in well under a second, so cutting a
+						// dead round short and backing off is strictly better.
+						let round = tokio::time::timeout(
+							REGISTRATION_ROUND_TIMEOUT,
+							reg_disc.get_registration(uid),
+						)
+						.await;
+						let round_err = match round {
+							Ok(Ok(result)) => {
+								reg_result = result;
+								break;
+							}
+							// Relay-level failure carries a per-relay summary.
+							Ok(Err(e)) => e,
+							// Round exceeded its budget (all relays slow/hung).
+							Err(_) => Error::DiscoveryTimeout,
+						};
 						if retry >= max_retry && max_retry > 0 {
-							return Err(Error::DiscoveryTimeout);
+							// Surface the real reason (which relays failed),
+							// not a bare timeout.
+							return Err(round_err);
 						}
-						log::info!("{}: Registration with reolink servers failed. Retrying: {}/{}", options.name, retry + 1, if max_retry > 0 {format!("{}", max_retry)} else {"infinite".to_string()});
+						// Exponential backoff between attempts: 1,2,4,8,16 s
+						// (capped at 30). Reolink only updates a camera's
+						// registration lazily — and a battery camera may be asleep
+						// — so hammering with a flat 1 s gap just burns the retry
+						// budget before either has a chance to come good. Waiting
+						// progressively gives both time to catch up.
+						let backoff = (1u64 << (retry.min(5) as u32)).min(30);
+						log::info!(
+							"{}: discovery attempt {}/{} failed ({round_err}); retrying in {backoff}s",
+							options.name,
+							retry + 1,
+							if max_retry > 0 {
+								format!("{max_retry}")
+							} else {
+								"infinite".to_string()
+							}
+						);
 						retry += 1;
-						tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+						tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
 						// New discovery to get new client IDs
 						reg_disc = reg_factory().await?;
 					};
@@ -407,6 +484,9 @@ impl BcCamera {
 		let username: String = options.credentials.username.clone();
 		let passwd: Option<String> = options.credentials.password.clone();
 
+		// Account-camera sigV3 handshake `(nonce, pl)`, captured from the
+		// discovery reply before the DiscoveryResult is consumed below.
+		let mut sigv3_handshake: Option<(i64, String)> = None;
 		let (sink, source): (BcConnSink, BcConnSource) = {
 			match BcCamera::find_camera(options).await? {
 				CameraLocation::Tcp(addr) => {
@@ -415,7 +495,8 @@ impl BcCamera {
 						.split();
 					(Box::new(x), Box::new(r))
 				}
-				CameraLocation::Udp(discovery) => {
+				CameraLocation::Udp(mut discovery) => {
+					sigv3_handshake = discovery.take_sigv3_handshake();
 					let (x, r) = UdpSource::new_from_discovery(
 						discovery,
 						&username,
@@ -444,6 +525,13 @@ impl BcCamera {
 			logged_in: AtomicBool::new(false),
 			credentials: Credentials::new(username, passwd),
 			abilities: Default::default(),
+			is_cloud: matches!(options.discovery, DiscoveryMethods::Cloud),
+			sigv3_handshake,
+			cloud_account: options.cloud_account.clone(),
+			cloud_password: options.cloud_password.clone(),
+			cloud_uid: options.uid.clone(),
+			cloud_mfa_trust_token: options.cloud_mfa_trust_token.clone(),
+			cloud_refresh_token: options.cloud_refresh_token.clone(),
 		};
 		// `keepalive` registers the inbound handler. If it fails, tear
 		// the just-started BcConnection down explicitly so we don't
@@ -555,6 +643,13 @@ impl BcCamera {
 			logged_in: AtomicBool::new(true),
 			credentials,
 			abilities: Default::default(),
+			is_cloud: false,
+			sigv3_handshake: None,
+			cloud_account: None,
+			cloud_password: None,
+			cloud_uid: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 		}
 	}
 
@@ -786,6 +881,10 @@ mod find_camera_guardrail_tests {
 			discovery: DiscoveryMethods::Local,
 			max_discovery_retries: 1,
 			credentials: Credentials::new("admin".to_string(), None::<String>),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		}
 	}
@@ -891,6 +990,10 @@ mod discoverer_fallback_tests {
 			discovery: DiscoveryMethods::Local,
 			max_discovery_retries: 1,
 			credentials: Credentials::new("admin".to_string(), None::<String>),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		}
 	}
@@ -1088,6 +1191,10 @@ mod discoverer_fallback_tests {
 			discovery: DiscoveryMethods::Local,
 			max_discovery_retries: 1,
 			credentials: Credentials::new("admin".to_string(), None::<String>),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		};
 		let (res, log) = run_with_timeout(opts, sc).await;
@@ -1110,6 +1217,10 @@ mod discoverer_fallback_tests {
 			discovery: DiscoveryMethods::Local,
 			max_discovery_retries: 1,
 			credentials: Credentials::new("admin".to_string(), None::<String>),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		};
 		let (res, _log) = run_with_timeout(opts, sc).await;
@@ -1133,6 +1244,10 @@ mod discoverer_fallback_tests {
 			discovery: DiscoveryMethods::Local,
 			max_discovery_retries: 1,
 			credentials: Credentials::new("admin".to_string(), None::<String>),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		};
 		let (res, log) = run_with_timeout(opts, sc).await;
@@ -1349,6 +1464,10 @@ mod bccamera_opt_tests {
 			discovery: resolution::DiscoveryMethods::Local,
 			max_discovery_retries: 3,
 			credentials: Credentials::new("admin".to_string(), None::<String>),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		};
 		let dbg = format!("{opt:?}");
@@ -1373,6 +1492,10 @@ mod bccamera_opt_tests {
 			discovery: resolution::DiscoveryMethods::Local,
 			max_discovery_retries: 3,
 			credentials: Credentials::new("admin".to_string(), Some("hunter2".to_string())),
+			cloud_account: None,
+			cloud_password: None,
+			cloud_mfa_trust_token: None,
+			cloud_refresh_token: None,
 			debug: false,
 		};
 		let dbg = format!("{opt:?}");

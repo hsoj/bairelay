@@ -4,6 +4,11 @@
 bind = "0.0.0.0"
 # bind_port = 8554
 
+# Reolink account, for cameras with discovery = "cloud" (account-bound cameras
+# that only accept the cloud-token sigV3 login). Shared by all cloud cameras.
+# cloud_account = "you@example.com"
+# cloud_password = "your-reolink-password"
+
 # TLS server. Plain RTSP keeps running on bind_port; TLS adds a second
 # listener on tls_bind_port. Set bind_port = 0 to disable plain.
 # certificate = "/path/to/cert-and-key.pem"   # PEM with cert chain + key
@@ -76,7 +81,7 @@ address = "192.168.1.187:9000"
 # uid = "ABCDEF1234567890"
 # channel_id = 0
 # stream = "all"              # none | all | main | sub | extern
-# discovery = "relay"         # local | remote | map | relay | cellular
+# discovery = "relay"         # local | remote | map | relay | cellular | cloud
 # max_encryption = "aes"      # none | aes | bcencrypt
 # idle_disconnect = false     # true for battery cams
 # idle_disconnect_timeout_secs = 45  # grace period before sleep

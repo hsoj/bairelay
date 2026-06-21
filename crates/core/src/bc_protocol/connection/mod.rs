@@ -35,11 +35,24 @@ pub(crate) struct DiscoveryResult {
 	addr: SocketAddr,
 	client_id: i32,
 	camera_id: i32,
+	/// sigV3 login nonce from the `D2C_C_R` handshake (account cameras only).
+	nc: Option<i64>,
+	/// sigV3 ECDHE offer (`pl` line) from the handshake (account cameras only).
+	pl: Option<String>,
 }
 
 impl DiscoveryResult {
 	/// Get the address discovered
 	pub(crate) fn get_addr(&self) -> &SocketAddr {
 		&self.addr
+	}
+
+	/// Take the sigV3 handshake `(nonce, pl)` if this was an account-camera
+	/// connect. Consumed once by `BcCamera::new` and handed to the login layer.
+	pub(crate) fn take_sigv3_handshake(&mut self) -> Option<(i64, String)> {
+		match (self.nc.take(), self.pl.take()) {
+			(Some(nc), Some(pl)) => Some((nc, pl)),
+			_ => None,
+		}
 	}
 }

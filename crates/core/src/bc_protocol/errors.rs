@@ -157,6 +157,12 @@ pub enum Error {
 	#[error("Timed out while waiting for camera reply")]
 	DiscoveryTimeout,
 
+	/// Raised when every P2P relay refused or failed a registration
+	/// round. Carries a per-relay summary so the caller can name the
+	/// unreachable servers in one log line.
+	#[error("no relay accepted registration — {0}")]
+	DiscoveryNoRelay(String),
+
 	/// Raised during a (de)seralisation error
 	#[error("Cookie GenError")]
 	GenError(#[from] std::sync::Arc<cookie_factory::GenError>),
@@ -247,6 +253,10 @@ pub enum Error {
 	/// A generic catch all error
 	#[error("Other error: {0}")]
 	Other(&'static str),
+
+	/// Cloud ("account camera") bundle minting against apis.reolink.com failed.
+	#[error("Cloud bundle mint failed: {0}")]
+	Cloud(String),
 }
 
 #[derive(Debug, Clone)]
@@ -428,6 +438,13 @@ mod tests {
 		assert_eq!(
 			format!("{}", Error::DiscoveryTimeout),
 			"Timed out while waiting for camera reply"
+		);
+		assert_eq!(
+			format!(
+				"{}",
+				Error::DiscoveryNoRelay("p2p.reolink.com (query failed: Timeout)".to_string())
+			),
+			"no relay accepted registration — p2p.reolink.com (query failed: Timeout)"
 		);
 		assert_eq!(
 			format!("{}", Error::ConnectionUnavailable),

@@ -360,6 +360,71 @@ fn xml_encryption_tolerates_missing_type_and_nonce() {
 }
 
 #[test]
+fn xml_encryption_roundtrip_preserves_sigv3_ecdhe_fields() {
+	// New-firmware Encryption reply: the legacy <type>/<nonce> plus the
+	// sigV3/ECDHE auth negotiation. Sanitised key material (not real
+	// camera values).
+	let xml = indoc!(
+		r#"
+		<?xml version="1.0" encoding="UTF-8" ?>
+		<body>
+		<Encryption version="1.1">
+		<type>md5</type>
+		<nonce>9E6D1FCB9E69846D</nonce>
+		<authTypeList>
+		<authType>password</authType>
+		<authType>sigV3</authType>
+		</authTypeList>
+		<sigVer>v3</sigVer>
+		<ECDHE>
+		<publicKeyAlgo>X25519</publicKeyAlgo>
+		<publicKey>cVDyUYZvGuKK</publicKey>
+		<publicKeySign>KO0nVOr9ux0</publicKeySign>
+		<iterations>1000</iterations>
+		</ECDHE>
+		</Encryption>
+		</body>"#
+	);
+	let parsed = assert_xml_roundtrip_via_bcxml(xml);
+	let enc = parsed.encryption.as_ref().unwrap();
+	assert_eq!(enc.version, "1.1");
+	assert_eq!(enc.type_, "md5");
+	assert_eq!(enc.nonce, "9E6D1FCB9E69846D");
+	assert_eq!(enc.sig_ver.as_deref(), Some("v3"));
+	let atl = enc.auth_type_list.as_ref().expect("authTypeList present");
+	assert_eq!(
+		atl.auth_type,
+		vec!["password".to_string(), "sigV3".to_string()]
+	);
+	let ecdhe = enc.ecdhe.as_ref().expect("ECDHE present");
+	assert_eq!(ecdhe.public_key_algo, "X25519");
+	assert_eq!(ecdhe.public_key, "cVDyUYZvGuKK");
+	assert_eq!(ecdhe.public_key_sign, "KO0nVOr9ux0");
+	assert_eq!(ecdhe.iterations, 1000);
+}
+
+#[test]
+fn xml_encryption_legacy_block_defaults_new_fields() {
+	// Old-firmware reply: no sigV3/ECDHE. New fields default to
+	// absent so the legacy login path stays selected.
+	let xml = indoc!(
+		r#"
+		<?xml version="1.0" encoding="UTF-8" ?>
+		<body>
+		<Encryption version="1.1">
+		<type>md5</type>
+		<nonce>9E6D1FCB9E69846D</nonce>
+		</Encryption>
+		</body>"#
+	);
+	let parsed = BcXml::try_parse(xml.as_bytes()).unwrap();
+	let enc = parsed.encryption.as_ref().unwrap();
+	assert!(enc.sig_ver.is_none());
+	assert!(enc.ecdhe.is_none());
+	assert!(enc.auth_type_list.is_none());
+}
+
+#[test]
 fn xml_login_user_roundtrip_preserves_all_fields() {
 	let xml = indoc!(
 		r#"

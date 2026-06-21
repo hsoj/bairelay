@@ -12,7 +12,14 @@ use crate::bc_opts::{build_bc_opts, max_encryption};
 use crate::config::CameraConfig;
 use crate::oneshot::errors::InterruptedError;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+// Backstop only — the discovery retry loop owns the real timing. It runs 5
+// rounds (each bounded by REGISTRATION_ROUND_TIMEOUT = 8 s) with exponential
+// backoff (1,2,4,8,16 s), so it self-terminates with a named-relay error in
+// ~80 s worst case and returns the instant a reachable camera answers. This
+// deadline just has to sit above that budget so it never preempts a retry
+// (the old 30 s cut the loop off after ~2 rounds); it only fires on a genuine
+// hang in the non-retry discovery / socket-setup paths.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(100);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);

@@ -11,7 +11,7 @@ use crate::bcudp::xml::*;
 use crate::{Error, Result};
 use futures::{
 	sink::SinkExt,
-	stream::{FuturesUnordered, Stream, StreamExt},
+	stream::{FuturesUnordered, StreamExt},
 };
 use lazy_static::lazy_static;
 use log::*;
@@ -50,6 +50,10 @@ struct ConnectResult {
 	client_id: i32,
 	camera_id: i32,
 	sid: u32,
+	/// sigV3 login nonce from the `D2C_C_R` handshake (account cameras only).
+	nc: Option<i64>,
+	/// sigV3 ECDHE offer (`pl` line) from the handshake (account cameras only).
+	pl: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +105,10 @@ pub(crate) struct Discoverer {
 	handlers: Handlers,
 	local_addr: SocketAddr,
 	cancel: CancellationToken,
+	/// Account ("cloud") camera: advertise `lver=3` on the direct connect so
+	/// the camera issues the sigV3 login nonce. Off for every other camera —
+	/// they get a plain (no `<lver>`) connect.
+	sigv3: bool,
 }
 
 fn valid_ip(ip: &str) -> bool {
@@ -116,7 +124,7 @@ fn valid_addr(ip_port: &IpPort) -> bool {
 }
 
 impl Discoverer {
-	async fn new() -> Result<Discoverer> {
+	async fn new(sigv3: bool) -> Result<Discoverer> {
 		let socket = Arc::new(connect().await?);
 		let local_addr = socket.local_addr()?;
 		let inner: ArcFramedSocket = UdpFramed::new(socket.clone(), BcUdpCodex::new());
@@ -221,6 +229,7 @@ impl Discoverer {
 			handlers,
 			local_addr,
 			cancel,
+			sigv3,
 		})
 	}
 
@@ -383,6 +392,10 @@ impl Discoverer {
 				mtu: MTU,
 				debug: false,
 				os: "MAC".to_string(),
+				// Account ("cloud") cameras only: signal sigV3 (`lver=3`) so
+				// the camera issues the login nonce (`nc`) + ECDHE offer in its
+				// D2C_C_R reply. `0` is skipped on the wire (legacy connect).
+				lver: if self.sigv3 { 3 } else { 0 },
 			}),
 		};
 
@@ -392,14 +405,24 @@ impl Discoverer {
 			msg.tid
 		);
 
-		let (camera_address, camera_id) = self
+		let (camera_address, camera_id, nc, pl) = self
 			.retry_send(msg, addr, |bc, addr| match bc {
 				UdpDiscovery {
 					tid: _,
-					payload: UdpXml::D2cCr(D2cCr { did, cid, .. }),
+					payload:
+						UdpXml::D2cCr(D2cCr {
+							did,
+							cid,
+							ref pl,
+							nc,
+							..
+						}),
 				} if cid == client_id => {
-					log::trace!("Got expected reply");
-					Some((addr, did))
+					log::debug!("D2cCr handshake: nc={:?} pl={:?}", nc, pl);
+					// Carry the sigV3 handshake nonce + ECDHE offer out to the
+					// login layer (the sigV3 login is keyed by these). No
+					// globals — they ride the per-camera DiscoveryResult.
+					Some((addr, did, nc, pl.clone()))
 				}
 				n => {
 					log::debug!("Got unexpected reply: {:?}", n);
@@ -420,6 +443,8 @@ impl Discoverer {
 			client_id,
 			camera_id,
 			sid: 0,
+			nc,
+			pl,
 		};
 		self.keep_alive_device(tid, &result).await;
 
@@ -427,49 +452,27 @@ impl Discoverer {
 		Ok(result)
 	}
 
-	async fn uid_lookup_all<'a>(
-		&'a self,
-		uid: &'a str,
-	) -> Result<impl Stream<Item = UidLookupResults> + 'a> {
+	/// Resolve every P2P relay hostname to its socket address(es),
+	/// keeping each address tagged with the hostname it came from so a
+	/// caller can name a specific relay in diagnostics. Returns the
+	/// resolved `(host, addr)` pairs alongside any per-host DNS failures.
+	async fn resolve_relay_addrs(
+		&self,
+	) -> Result<(Vec<(&'static str, SocketAddr)>, Vec<(&'static str, String)>)> {
 		let task = tokio::task::spawn_blocking(move || {
-			let mut addrs = vec![];
+			let mut addrs: Vec<(&'static str, SocketAddr)> = vec![];
 			let mut errors: Vec<(&'static str, String)> = vec![];
 			for p2p_relay in P2P_RELAY_HOSTNAMES.iter() {
 				match format!("{}:9999", p2p_relay).to_socket_addrs() {
-					Ok(it) => addrs.extend(it),
+					Ok(it) => addrs.extend(it.map(|a| (*p2p_relay, a))),
 					Err(e) => errors.push((p2p_relay, e.to_string())),
 				}
 			}
 			(addrs, errors)
 		});
-		let (mut addrs, errors) = timeout(*MAXIMUM_WAIT, task).await??;
-		// Surface DNS-resolution failures so an operator with a broken
-		// resolver doesn't get the opaque "no registers returned valid
-		// device data" error with no breadcrumb. One warn per failed
-		// hostname; legitimate cloud-relay outages light all of them.
-		for (host, err) in &errors {
-			log::warn!("UID lookup: DNS failed for {host}:9999 — {err}");
-		}
-		trace!("Uid lookup to: {:?}", addrs);
-
-		Ok(addrs
-			.drain(..)
-			.map(|addr| self.uid_lookup(uid, addr))
-			.collect::<FuturesUnordered<_>>()
-			.filter_map(|f| async {
-				match f {
-					Ok(r) => Some(r),
-					Err(e) => {
-						// Per-relay protocol failure (timeout, malformed
-						// reply, register refused). Without this log,
-						// the upstream `get_registration` collapses an
-						// all-relays-failed run to a single
-						// "DiscoveryTimeout" with no per-relay detail.
-						log::warn!("UID lookup: relay rejected query — {e}");
-						None
-					}
-				}
-			}))
+		let out = timeout(*MAXIMUM_WAIT, task).await??;
+		trace!("Uid lookup to: {:?}", out.0);
+		Ok(out)
 	}
 	/// This function will contact the p2p relay servers
 	///
@@ -725,6 +728,9 @@ impl Discoverer {
 			client_id: register_result.client_id,
 			sid: register_result.sid,
 			camera_id: local_did,
+			// Relay/map/remote paths don't carry a sigV3 handshake.
+			nc: None,
+			pl: None,
 		};
 
 		// Confirm local to register
@@ -835,6 +841,9 @@ impl Discoverer {
 			client_id: register_result.client_id,
 			sid: register_result.sid,
 			camera_id: local_did,
+			// Relay/map/remote paths don't carry a sigV3 handshake.
+			nc: None,
+			pl: None,
 		};
 
 		// Confirm map to register
@@ -890,6 +899,9 @@ impl Discoverer {
 			client_id: register_result.client_id,
 			sid: register_result.sid,
 			camera_id: local_did,
+			// Relay/map/remote paths don't carry a sigV3 handshake.
+			nc: None,
+			pl: None,
 		};
 
 		let permit = self
@@ -969,6 +981,9 @@ impl Discoverer {
 			client_id: register_result.client_id,
 			sid: register_result.sid,
 			camera_id: local_did,
+			// Relay/map/remote paths don't carry a sigV3 handshake.
+			nc: None,
+			pl: None,
 		};
 
 		// Confirm relay to register
@@ -1079,58 +1094,80 @@ pub(crate) struct Discovery {
 }
 
 impl Discovery {
-	pub(crate) async fn new() -> Result<Self> {
+	pub(crate) async fn new(sigv3: bool) -> Result<Self> {
 		Ok(Self {
-			discoverer: Discoverer::new().await?,
+			discoverer: Discoverer::new(sigv3).await?,
 			client_id: generate_cid(),
 		})
 	}
 
 	pub(crate) async fn get_registration(&self, uid: &str) -> Result<RegisterResult> {
-		let lookups = self.discoverer.uid_lookup_all(uid).await?;
+		let (targets, dns_errors) = self.discoverer.resolve_relay_addrs().await?;
+		// DNS failures are a host-config problem (broken resolver), not a
+		// transient relay outage, so they warrant a warning of their own.
+		for (host, err) in &dns_errors {
+			log::warn!("Discovery: DNS lookup failed for {host}:9999 — {err}");
+		}
 
 		let checked_reg = Arc::new(RwLock::new(HashSet::new()));
-		let reg_result = Box::pin(
-			lookups
-				.then(|lookup| {
-					let discoverer = &self.discoverer;
-					let client_id = self.client_id;
+		let discoverer = &self.discoverer;
+		let client_id = self.client_id;
 
-					let thread_checked_reg = checked_reg.clone();
-					async move {
-						let mut locked_checked_reg = thread_checked_reg.write().await;
-						if locked_checked_reg.contains(&lookup.reg) {
-							return Result::Err(Error::Other("Already checked."));
-						}
-						locked_checked_reg.insert(lookup.reg);
-						drop(locked_checked_reg);
-						trace!("lookup: {:?}", lookup);
-						let reg_result = discoverer.register_address(uid, client_id, &lookup).await;
-						trace!("reg_result: {:?}", reg_result);
-						reg_result
-					}
-				})
-				.filter_map(|f| async {
-					match f {
-						Ok(r) => Some(r),
-						Err(e) => {
-							// Per-relay register failure. Same rationale as
-							// `uid_lookup_all`'s filter_map: collapsing
-							// every relay's failure into a single
-							// downstream error hides the proximate cause.
-							log::warn!("Register failed at relay — {e}");
-							None
+		// One future per relay: look the UID up, then register against the
+		// reg server that relay points us at. Each failure is tagged with
+		// the originating hostname so a fully-failed round can name the
+		// unreachable servers in a single line (see the `Err` arm below)
+		// rather than emitting a wall of one-per-relay warnings.
+		let mut attempts = targets
+			.into_iter()
+			.map(|(host, addr)| {
+				let checked_reg = checked_reg.clone();
+				async move {
+					let lookup = discoverer
+						.uid_lookup(uid, addr)
+						.await
+						.map_err(|e| (host, format!("query failed: {e}")))?;
+					{
+						let mut checked = checked_reg.write().await;
+						if !checked.insert(lookup.reg) {
+							// Another relay already pointed us at this reg
+							// server; skip the duplicate registration.
+							return Err((host, "duplicate reg server".to_string()));
 						}
 					}
-				}),
-		)
-		.next()
-		.await
-		.ok_or(Error::Other(
-			"No reolink registers returned valid device data.",
-		))?;
+					trace!("lookup: {:?}", lookup);
+					discoverer
+						.register_address(uid, client_id, &lookup)
+						.await
+						.map_err(|e| (host, format!("register refused: {e}")))
+				}
+			})
+			.collect::<FuturesUnordered<_>>();
 
-		Ok(reg_result)
+		let mut failures: Vec<(&'static str, String)> = vec![];
+		while let Some(outcome) = attempts.next().await {
+			match outcome {
+				Ok(reg_result) => {
+					trace!("reg_result: {:?}", reg_result);
+					return Ok(reg_result);
+				}
+				Err(failure) => failures.push(failure),
+			}
+		}
+
+		// Every relay failed this round. Fold the per-relay reasons into a
+		// single typed error the retry loop renders verbatim, so the
+		// operator sees exactly which servers are unreachable and why.
+		let detail = failures
+			.iter()
+			.map(|(host, why)| format!("{host} ({why})"))
+			.collect::<Vec<_>>()
+			.join(", ");
+		Err(Error::DiscoveryNoRelay(if detail.is_empty() {
+			"no relays resolved".to_string()
+		} else {
+			detail
+		}))
 	}
 
 	// Check if TCP is possible
@@ -1213,6 +1250,8 @@ impl Discovery {
 		let socket = self.discoverer.get_socket().await;
 		Ok(DiscoveryResult {
 			socket,
+			nc: connect_result.nc,
+			pl: connect_result.pl,
 			addr: connect_result.addr,
 			camera_id: connect_result.camera_id,
 			client_id: connect_result.client_id,
@@ -1244,6 +1283,8 @@ impl Discovery {
 		let socket = self.discoverer.get_socket().await;
 		Ok(DiscoveryResult {
 			socket,
+			nc: connect_result.nc,
+			pl: connect_result.pl,
 			addr: connect_result.addr,
 			client_id: self.client_id,
 			camera_id: connect_result.camera_id,
@@ -1265,6 +1306,8 @@ impl Discovery {
 		let socket = self.discoverer.get_socket().await;
 		Ok(DiscoveryResult {
 			socket,
+			nc: connect_result.nc,
+			pl: connect_result.pl,
 			addr: connect_result.addr,
 			client_id: self.client_id,
 			camera_id: connect_result.camera_id,
@@ -1283,6 +1326,8 @@ impl Discovery {
 		let socket = self.discoverer.get_socket().await;
 		Ok(DiscoveryResult {
 			socket,
+			nc: connect_result.nc,
+			pl: connect_result.pl,
 			addr: connect_result.addr,
 			client_id: self.client_id,
 			camera_id: connect_result.camera_id,
@@ -1547,7 +1592,30 @@ pub(crate) mod test_support {
 			addr,
 			client_id: 1,
 			camera_id: 2,
+			nc: None,
+			pl: None,
 		}
+	}
+
+	#[tokio::test]
+	async fn take_sigv3_handshake_yields_pair_once_then_none() {
+		let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+		let mut dr = DiscoveryResult {
+			socket: dummy_socket(),
+			addr,
+			client_id: 1,
+			camera_id: 2,
+			nc: Some(42),
+			pl: Some("V=1;P2=v3;P4=k".to_string()),
+		};
+		assert_eq!(
+			dr.take_sigv3_handshake(),
+			Some((42, "V=1;P2=v3;P4=k".to_string()))
+		);
+		// Consumed — a second call yields None.
+		assert_eq!(dr.take_sigv3_handshake(), None);
+		// A non-cloud result (nc/pl absent) yields None.
+		assert_eq!(ok_discovery(addr).take_sigv3_handshake(), None);
 	}
 
 	pub fn dummy_reg_result() -> RegisterResult {
@@ -2152,13 +2220,13 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discoverer_new_binds_socket_and_starts_tasks() {
-		let d = t_timeout(T, Discoverer::new()).await.unwrap().unwrap();
+		let d = t_timeout(T, Discoverer::new(false)).await.unwrap().unwrap();
 		assert_eq!(*d.local_addr(), d.socket.local_addr().unwrap());
 	}
 
 	#[tokio::test]
 	async fn discoverer_get_socket_returns_clone() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let s = d.get_socket().await;
 		assert_eq!(
 			s.local_addr().unwrap(),
@@ -2169,13 +2237,13 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discoverer_subscribe_tid_nonzero_gives_channel() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let _rx = d.subscribe(42).await.expect("subscribe ok");
 	}
 
 	#[tokio::test]
 	async fn discoverer_subscribe_tid_zero_registers_handler() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let _rx = d.subscribe(0).await.expect("tid=0 handler registers");
 		// A second subscribe(0) should also succeed (distinct handler
 		// slot).
@@ -2184,7 +2252,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discoverer_simultaneous_subscription_errors() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let _rx1 = d.subscribe(1234).await.expect("first");
 		let r = d.subscribe(1234).await;
 		assert!(
@@ -2195,7 +2263,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discoverer_subscribe_reuses_slot_when_closed() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		{
 			let _rx = d.subscribe(7777).await.expect("first");
 			// drop _rx — channel closes.
@@ -2213,7 +2281,7 @@ mod internal_tests {
 		// MAXIMUM_WAIT window; the `handle_incoming` sleep yields
 		// Error::DiscoveryTimeout.
 		tokio::time::pause();
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let fut = d.handle_incoming(|_: UdpDiscovery, _: SocketAddr| -> Option<()> { None });
 		tokio::pin!(fut);
 		// Advance time past 15s.
@@ -2226,7 +2294,7 @@ mod internal_tests {
 	async fn discoverer_retry_send_times_out() {
 		// Same trick: advance the paused clock past MAXIMUM_WAIT.
 		tokio::time::pause();
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		// Send into the void — 127.0.0.2:1 will drop packets.
 		let target: SocketAddr = "127.0.0.2:1".parse().unwrap();
 		let msg = UdpDiscovery {
@@ -2250,7 +2318,7 @@ mod internal_tests {
 		let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let server_addr = server.local_addr().unwrap();
 
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let msg = BcUdp::Ack(UdpAck::empty(123));
 		d.send(msg, server_addr).await.unwrap();
 
@@ -2304,7 +2372,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn client_initiated_direct_success_round_trip() {
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 
 		let uid = "TESTUID0001";
 		let client_id = 0xABCDi32;
@@ -2334,6 +2402,8 @@ mod internal_tests {
 					rsp: 0,
 					cid: client_id,
 					did: 99,
+					pl: None,
+					nc: None,
 				}),
 			});
 			peer_send(&peer, reply, from).await;
@@ -2357,7 +2427,7 @@ mod internal_tests {
 		// DiscoveryTimeout.
 		tokio::time::pause();
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 
 		let camera = tokio::spawn(async move {
 			let (pkt, from) = peer_recv(&peer).await;
@@ -2372,6 +2442,8 @@ mod internal_tests {
 					rsp: 0,
 					cid: 9999, // wrong
 					did: 11,
+					pl: None,
+					nc: None,
 				}),
 			});
 			peer_send(&peer, reply, from).await;
@@ -2398,7 +2470,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn uid_lookup_success() {
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 
 		let camera = tokio::spawn(async move {
 			let (pkt, from) = peer_recv(&peer).await;
@@ -2444,7 +2516,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn register_address_success() {
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 
 		let lookup = UidLookupResults {
 			reg: peer_addr,
@@ -2512,7 +2584,7 @@ mod internal_tests {
 		// original ignored version tripped over a stale `sid: None` path
 		// that widened the window for the reply to race the subscribe.
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let lookup = UidLookupResults {
 			reg: peer_addr,
 			relay: peer_addr,
@@ -2560,7 +2632,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn client_initiated_dev_success() {
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: peer_addr,
 			dev: Some(peer_addr),
@@ -2618,7 +2690,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn client_initiated_dev_no_dev_returns_error() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2633,7 +2705,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn client_initiated_relay_no_relay_returns_error() {
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2649,7 +2721,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn client_initiated_relay_success() {
 		let (peer, peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: peer_addr,
 			dev: None,
@@ -2706,6 +2778,132 @@ mod internal_tests {
 		camera.await.unwrap();
 	}
 
+	// ---------- device_initiated_dev / device_initiated_map ----------
+
+	/// The loopback address the camera uses to reach a `Discoverer` —
+	/// `local_addr()` is bound to `0.0.0.0`, which isn't a valid send target.
+	fn loopback_of(d: &Discoverer) -> SocketAddr {
+		SocketAddr::from(([127, 0, 0, 1], d.local_addr().port()))
+	}
+
+	/// Drive a device-initiated handshake from the camera side. The camera
+	/// opens by re-sending `D2cT` until the `Discoverer` answers with `C2dA`
+	/// (covering the subscribe race where the first datagram can land before
+	/// `handle_incoming` registers its tid-0 handler), then confirms with
+	/// `D2cCfm` and drains the trailing `C2rCfm` + heartbeat traffic.
+	async fn drive_device_initiated(peer: UdpSocket, d_addr: SocketAddr, conn: &'static str) {
+		let tid = 0x4321u32;
+		let d2ct = BcUdp::Discovery(UdpDiscovery {
+			tid,
+			payload: UdpXml::D2cT(D2cT {
+				sid: 1234,
+				conn: conn.into(),
+				cid: 500,
+				did: 7,
+			}),
+		});
+
+		let from = loop {
+			peer_send(&peer, d2ct.clone(), d_addr).await;
+			let mut buf = [0u8; 2048];
+			match t_timeout(Duration::from_millis(100), peer.recv_from(&mut buf)).await {
+				Ok(Ok((n, from))) => {
+					let mut codec = BcUdpCodex::new();
+					let mut bm = BytesMut::from(&buf[..n]);
+					if let Ok(Some(BcUdp::Discovery(UdpDiscovery {
+						payload: UdpXml::C2dA(C2dA { conn: got, .. }),
+						..
+					}))) = codec.decode(&mut bm)
+					{
+						assert_eq!(got, conn);
+						break from;
+					}
+				}
+				_ => continue,
+			}
+		};
+
+		let cfm = BcUdp::Discovery(UdpDiscovery {
+			tid,
+			payload: UdpXml::D2cCfm(D2cCfm {
+				sid: 1234,
+				conn: conn.into(),
+				rsp: 0,
+				cid: 500,
+				did: 7,
+				time_r: Some(0),
+			}),
+		});
+		peer_send(&peer, cfm, from).await;
+
+		// Absorb the trailing C2R_CFM (send_and_forget) burst + the first
+		// heartbeats so the discoverer's sends don't fail. A short window is
+		// enough — the discoverer returns the moment it emits C2R_CFM.
+		let _ = t_timeout(Duration::from_millis(300), async {
+			let mut buf = [0u8; 2048];
+			loop {
+				if peer.recv_from(&mut buf).await.is_err() {
+					break;
+				}
+			}
+		})
+		.await;
+	}
+
+	#[tokio::test]
+	async fn device_initiated_dev_success() {
+		let (peer, peer_addr) = scripted_peer().await;
+		let d = Discoverer::new(false).await.unwrap();
+		let d_addr = loopback_of(&d);
+		let reg = RegisterResult {
+			reg: peer_addr,
+			dev: None,
+			dmap: Some(peer_addr),
+			relay: None,
+			client_id: 500,
+			sid: 1234,
+		};
+
+		let camera = tokio::spawn(drive_device_initiated(peer, d_addr, "local"));
+
+		let res = t_timeout(Duration::from_secs(5), d.device_initiated_dev(&reg))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(res.camera_id, 7);
+		assert_eq!(res.client_id, 500);
+		assert_eq!(res.sid, 1234);
+		assert!(res.nc.is_none());
+		assert!(res.pl.is_none());
+		camera.await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn device_initiated_map_success() {
+		let (peer, peer_addr) = scripted_peer().await;
+		let d = Discoverer::new(false).await.unwrap();
+		let d_addr = loopback_of(&d);
+		let reg = RegisterResult {
+			reg: peer_addr,
+			dev: None,
+			dmap: Some(peer_addr),
+			relay: None,
+			client_id: 500,
+			sid: 1234,
+		};
+
+		let camera = tokio::spawn(drive_device_initiated(peer, d_addr, "map"));
+
+		let res = t_timeout(Duration::from_secs(5), d.device_initiated_map(&reg))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(res.camera_id, 7);
+		assert_eq!(res.client_id, 500);
+		assert_eq!(res.sid, 1234);
+		camera.await.unwrap();
+	}
+
 	// ---------- Discovery::local full path ----------
 
 	#[tokio::test]
@@ -2713,7 +2911,7 @@ mod internal_tests {
 		// Use the optional_addrs override so we bypass the global
 		// broadcast (which would flood tests on shared runners).
 		let (peer, peer_addr) = scripted_peer().await;
-		let discovery = Discovery::new().await.unwrap();
+		let discovery = Discovery::new(false).await.unwrap();
 
 		let camera = tokio::spawn(async move {
 			let (pkt, from) = peer_recv(&peer).await;
@@ -2728,6 +2926,8 @@ mod internal_tests {
 					rsp: 0,
 					cid: discovery_client_id_hack(&peer),
 					did: 1001,
+					pl: None,
+					nc: None,
 				}),
 			});
 			// We don't know the client_id in advance, but we can just
@@ -2744,6 +2944,8 @@ mod internal_tests {
 						rsp: 0,
 						cid: 0, // placeholder; see extracted fn
 						did: 1001,
+						pl: None,
+						nc: None,
 					}),
 				}),
 				from,
@@ -2781,7 +2983,7 @@ mod internal_tests {
 		// with it. Uses optional_addrs = [peer_addr] so we only hit our
 		// scripted peer.
 		let (peer, peer_addr) = scripted_peer().await;
-		let discovery = Discovery::new().await.unwrap();
+		let discovery = Discovery::new(false).await.unwrap();
 
 		let camera = tokio::spawn(async move {
 			let (pkt, from) = peer_recv(&peer).await;
@@ -2799,6 +3001,8 @@ mod internal_tests {
 					rsp: 0,
 					cid: client_id,
 					did: 7777,
+					pl: None,
+					nc: None,
 				}),
 			});
 			peer_send(&peer, reply, from).await;
@@ -2824,7 +3028,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn discovery_remote_errors_when_no_dev_no_response() {
 		tokio::time::pause();
-		let discovery = Discovery::new().await.unwrap();
+		let discovery = Discovery::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2850,7 +3054,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discovery_relay_errors_without_relay_addr() {
-		let discovery = Discovery::new().await.unwrap();
+		let discovery = Discovery::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2866,7 +3070,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn discovery_map_times_out_without_incoming_packet() {
 		tokio::time::pause();
-		let discovery = Discovery::new().await.unwrap();
+		let discovery = Discovery::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2884,7 +3088,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discovery_new_binds_ok_and_has_client_id() {
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		// client_id is randomized; just check the accessor path works.
 		let _ = d.client_id;
 	}
@@ -2893,24 +3097,25 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discovery_trait_get_registration_rejects_no_resolves() {
-		// Pretend the p2p hostnames all resolve to nothing useful —
-		// `uid_lookup_all` will return no valid register addresses.
-		// We accept either DiscoveryTimeout or Other — the method path
-		// is reached either way.
+		// No relay can be reached in the sandbox: either the p2p
+		// hostnames don't resolve, or they do and every UID lookup times
+		// out. Both paths land in `get_registration`'s "every relay
+		// failed" arm and surface `Error::DiscoveryNoRelay`.
 		tokio::time::pause();
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		let fut = <Discovery as CameraDiscoverer>::get_registration(&d, "XZZZZZZZZZZZZZZZZ");
 		tokio::pin!(fut);
 		tokio::time::advance(Duration::from_secs(60)).await;
 		let r = fut.await;
-		// In a sandbox with no network, resolution may fail and we
-		// surface `Error::Other("...")`; we just want the path to run.
+		// The real-path error is `DiscoveryNoRelay` (every relay failed);
+		// in a no-network sandbox resolution itself may time out first. We
+		// only need the method path to run and reject.
 		assert!(r.is_err(), "expected error, got {r:?}");
 	}
 
 	#[tokio::test]
 	async fn discovery_trait_relay_pass_through_errors() {
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2928,7 +3133,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn discovery_trait_map_pass_through() {
 		tokio::time::pause();
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2947,7 +3152,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn discovery_trait_remote_pass_through_errors_when_no_routes() {
 		tokio::time::pause();
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		let reg = RegisterResult {
 			reg: "127.0.0.1:9000".parse().unwrap(),
 			dev: None,
@@ -2966,7 +3171,7 @@ mod internal_tests {
 	#[tokio::test]
 	async fn discovery_trait_local_errors_without_valid_targets() {
 		tokio::time::pause();
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		let fut = <Discovery as CameraDiscoverer>::local(&d, "U", Some(vec![]));
 		tokio::pin!(fut);
 		tokio::time::advance(Duration::from_secs(30)).await;
@@ -2976,7 +3181,7 @@ mod internal_tests {
 
 	#[tokio::test]
 	async fn discovery_trait_check_tcp_errors_on_bad_addr() {
-		let d = Discovery::new().await.unwrap();
+		let d = Discovery::new(false).await.unwrap();
 		// 127.0.0.2:1 will refuse the connection immediately.
 		let r = t_timeout(
 			Duration::from_secs(6),
@@ -3010,7 +3215,7 @@ mod internal_tests {
 		const TID_OTHER: u32 = 0x1234;
 
 		let (peer, _peer_addr) = scripted_peer().await;
-		let d = Discoverer::new().await.unwrap();
+		let d = Discoverer::new(false).await.unwrap();
 		// Discoverer::new binds on 0.0.0.0:port for broadcast; route
 		// the test peer's datagrams via 127.0.0.1 + the bound port so
 		// the kernel can deliver locally without a real interface.

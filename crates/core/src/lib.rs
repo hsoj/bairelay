@@ -23,6 +23,10 @@
 //!         username: "username".to_string(),
 //!         password: Some("password".to_string()),
 //!     },
+//!     cloud_account: None,
+//!     cloud_password: None,
+//!     cloud_mfa_trust_token: None,
+//!     cloud_refresh_token: None,
 //!     debug: false,
 //!     max_discovery_retries: 10,
 //! };
@@ -47,6 +51,10 @@
 //! #        username: "username".to_string(),
 //! #        password: Some("password".to_string()),
 //! #    },
+//! #    cloud_account: None,
+//! #    cloud_password: None,
+//! #    cloud_mfa_trust_token: None,
+//! #    cloud_refresh_token: None,
 //! #    debug: false,
 //! #    max_discovery_retries: 10,
 //! # };
@@ -65,6 +73,8 @@ pub mod bc_protocol;
 pub mod bcmedia;
 ///  Contains low level structures and formats for the udpstream
 pub mod bcudp;
+/// Cloud bundle minting for account ("cloud") cameras (apis.reolink.com).
+pub mod cloud;
 
 /// This is the top level error structure of the library
 ///

@@ -170,6 +170,16 @@ pub struct C2dC {
 	/// Os of the machine known values are `"MAC"`, `"WIN"`
 	#[serde(rename = "p")]
 	pub os: String,
+	/// Login/protocol version. `3` signals the sigV3 handshake — the camera
+	/// then issues the login `nc` (nonce) in its `D2C_C_R` reply. Omitted
+	/// (serialized as nothing via `skip`) for legacy connects.
+	#[serde(default, skip_serializing_if = "is_zero_u32_xml")]
+	pub lver: u32,
+}
+
+/// serde predicate: skip `lver` when 0 (legacy connect emits no `<lver>`).
+fn is_zero_u32_xml(v: &u32) -> bool {
+	*v == 0
 }
 
 /// Client List xml
@@ -193,6 +203,17 @@ pub struct D2cCr {
 	pub cid: i32,
 	/// Camera ID
 	pub did: i32,
+	/// sigV3 payload line — the camera's ECDHE offer delivered in the P2P
+	/// handshake (cloud-bound cameras): `V=1;C=...,P2=v3,P3=X25519,
+	/// P4=<camera pubkey b64>,P5=<sign b64>,P6=<iterations>;`. Absent on
+	/// non-sigV3 cameras.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub pl: Option<String>,
+	/// sigV3 login nonce delivered in the P2P handshake (cloud-bound
+	/// cameras). The sigV3 login is keyed by THIS nonce, not by a Bc
+	/// `Encryption`-reply nonce. Absent on non-sigV3 cameras.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub nc: Option<i64>,
 }
 
 /// Timer provided by D2C_C_R
@@ -292,7 +313,7 @@ pub struct D2mQ {
 /// M2D_Q_R xml
 ///
 /// Middleman reply to `D2M_Q`. Verified shape from a real Reolink cloud
-/// pcap (see `tests/logs/real-pcap/cloud-m2dqr-1.pcap`):
+/// capture:
 ///
 /// ```xml
 /// <P2P><M2D_Q_R>
@@ -343,8 +364,8 @@ pub struct EmptyTag {}
 ///
 /// Sent immediately after the camera receives `M2D_Q_R`. The `<token>`
 /// is the value our `M2D_Q_R` issued; the camera echoes it back so the
-/// register-port loop can correlate and reply. Verified against
-/// `tests/logs/real-pcap/cloud-m2dqr-2.pcap`.
+/// register-port loop can correlate and reply. Verified against a real
+/// Reolink cloud capture.
 #[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
 pub struct D2rR {
 	/// Long-form camera UID (matches the `<uid>` from `D2M_Q`).
@@ -730,6 +751,8 @@ fn test_d2c_c_r_deser() {
 			rsp: 0,
 			cid: -376737975,
 			did: 49,
+			pl: None,
+			nc: None,
 		})
 	);
 }

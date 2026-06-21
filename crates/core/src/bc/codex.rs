@@ -12,6 +12,14 @@ use tokio_util::codec::{Decoder, Encoder};
 
 pub(crate) struct BcCodex {
 	context: BcContext,
+	/// sigV3 only: the signed login's `(msg_num, key, iv)`, captured while
+	/// encoding it. Applied — switching the session from BCEncrypt to FullAes
+	/// (control commands AND the media stream are AES, the latter only its
+	/// leading `encryptLen` bytes) — when THIS login's `200` reply is decoded
+	/// (matched by `msg_num`; that reply itself is still BCEncrypt). Disarmed on
+	/// any reply to that `msg_num`, so a rejected login never leaves it armed.
+	/// `None` on every other path.
+	pending_session_aes: Option<(u16, [u8; 16], [u8; 16])>,
 }
 
 impl BcCodex {
@@ -19,11 +27,15 @@ impl BcCodex {
 		let mut context = BcContext::new(credentials);
 
 		context.debug_on();
-		Self { context }
+		Self {
+			context,
+			pending_session_aes: None,
+		}
 	}
 	pub(crate) fn new(credentials: Credentials) -> Self {
 		Self {
 			context: BcContext::new(credentials),
+			pending_session_aes: None,
 		}
 	}
 }
@@ -35,6 +47,33 @@ impl Encoder<Bc> for BcCodex {
 		// let context = self.context.read().unwrap();
 		const BC_ENCRYPTED: EncryptionProtocol = EncryptionProtocol::BCEncrypt;
 		let buf: Vec<u8> = Default::default();
+		// The sigV3 direct login (cloud-bound cameras) is sent with no prior
+		// Bc Encryption negotiation: the nonce + ECDHE arrive in the P2P
+		// handshake instead. That login — and the camera's DeviceInfo reply —
+		// travel under BCEncrypt (confirmed on the wire). Detect the signed
+		// login (a LoginUser carrying `publicKey`) and pin the context to
+		// BCEncrypt so both this encode AND the reply decode use it.
+		let signed_login_aes = match &item.body {
+			BcBody::ModernMsg(ModernMsg {
+				payload: Some(BcPayloads::BcXml(BcXml {
+					login_user: Some(lu),
+					..
+				})),
+				..
+			}) if lu.public_key.is_some() => Some(lu.session_aes),
+			_ => None,
+		};
+		if let Some(session_aes) = signed_login_aes {
+			self.context.set_encrypted(EncryptionProtocol::BCEncrypt);
+			// Arm the post-login switch, tagged with this login's msg_num so it
+			// applies only to THIS login's reply. Applied once that 200 decodes.
+			self.pending_session_aes = session_aes.map(|(k, iv)| (item.meta.msg_num, k, iv));
+		}
+		// The modern login (msg_id 1) is always sent under BCEncrypt even when
+		// AES is negotiated — including the sigV3 / authLogin signed logins.
+		// The official app's `setXmlEncryptVersion(2)` only re-keys the
+		// *post-login* session; the login message itself stays BCEncrypt
+		// (confirmed on the wire against a cloud-bound camera).
 		let enc_protocol: &EncryptionProtocol = match self.context.get_encrypted() {
 			EncryptionProtocol::Aes { .. } | EncryptionProtocol::FullAes { .. }
 				if item.meta.msg_id == 1 =>
@@ -81,6 +120,20 @@ impl Decoder for BcCodex {
 			Err(Error::NomIncomplete(_)) => return Ok(None),
 			Err(e) => return Err(e),
 		};
+		// sigV3: the camera accepted the signed login (msg 1, code 200). That
+		// reply itself arrived under BCEncrypt; every message after it on the
+		// control AND media are AES keyed by the ECDHE-derived (key, iv).
+		// Apply the FullAes switch armed while encoding the login.
+		if let Some((msg_num, key, iv)) = self.pending_session_aes {
+			if bc.meta.msg_id == 1 && bc.meta.msg_num == msg_num {
+				if bc.meta.response_code == 200 {
+					self.context
+						.set_encrypted(EncryptionProtocol::full_aes_with_iv(key, iv));
+				}
+				// Resolved (accepted or rejected) — disarm either way.
+				self.pending_session_aes = None;
+			}
+		}
 		// Update context
 		if let Bc {
 			meta: BcMeta {
@@ -184,6 +237,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "AB".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -205,6 +259,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "AB".to_string(),
 					type_: "none".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -232,6 +287,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "AB".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -257,6 +313,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "AB".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -302,6 +359,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "AB".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -324,6 +382,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "AB".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -343,6 +402,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "ABCDEFGH".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -368,6 +428,7 @@ mod tests {
 					version: "1.1".to_string(),
 					nonce: "ABCDEFGH".to_string(),
 					type_: "md5".to_string(),
+					..Default::default()
 				}),
 				..Default::default()
 			},
@@ -451,5 +512,103 @@ mod tests {
 			.unwrap();
 		let mut buf = BytesMut::from(bytes.as_slice());
 		let _ = codex.decode(&mut buf).expect("decode ok");
+	}
+
+	// ---- sigV3 post-login FullAes switch ----
+
+	fn signed_login(msg_num: u16, key: [u8; 16], iv: [u8; 16]) -> Bc {
+		Bc::new_from_xml(
+			BcMeta {
+				msg_id: 1,
+				channel_id: 0,
+				stream_type: 0,
+				response_code: 0,
+				msg_num,
+				class: 0x0000,
+			},
+			BcXml {
+				login_user: Some(LoginUser {
+					version: "1.1".to_string(),
+					user_name: "u".to_string(),
+					public_key: Some("PK".to_string()),
+					session_aes: Some((key, iv)),
+					..Default::default()
+				}),
+				..Default::default()
+			},
+		)
+	}
+
+	fn login_reply(msg_num: u16, response_code: u16) -> BytesMut {
+		// Camera reply to the sigV3 login (decoded under BCEncrypt — the codec
+		// forces BCEncrypt for msg_id==1 regardless of session state).
+		let bytes = Bc::new_from_xml(
+			BcMeta {
+				msg_id: 1,
+				channel_id: 0,
+				stream_type: 0,
+				response_code,
+				msg_num,
+				class: 0x6614,
+			},
+			BcXml::default(),
+		)
+		.serialize(vec![], &EncryptionProtocol::BCEncrypt)
+		.unwrap();
+		BytesMut::from(bytes.as_slice())
+	}
+
+	#[test]
+	fn sigv3_encode_arms_pending_with_msg_num() {
+		let mut codex = BcCodex::new(empty_creds());
+		let (key, iv) = ([1u8; 16], [2u8; 16]);
+		let mut dst = BytesMut::new();
+		codex.encode(signed_login(42, key, iv), &mut dst).unwrap();
+		assert_eq!(codex.pending_session_aes, Some((42, key, iv)));
+	}
+
+	#[test]
+	fn sigv3_matching_200_reply_switches_to_full_aes() {
+		let mut codex = BcCodex::new(empty_creds());
+		let (key, iv) = ([3u8; 16], [4u8; 16]);
+		let mut dst = BytesMut::new();
+		codex.encode(signed_login(42, key, iv), &mut dst).unwrap();
+		let _ = codex.decode(&mut login_reply(42, 200)).expect("decode");
+		assert!(matches!(
+			codex.context.get_encrypted(),
+			EncryptionProtocol::FullAes { .. }
+		));
+		assert!(codex.pending_session_aes.is_none());
+	}
+
+	#[test]
+	fn sigv3_non_200_reply_disarms_without_switching() {
+		let mut codex = BcCodex::new(empty_creds());
+		let mut dst = BytesMut::new();
+		codex
+			.encode(signed_login(7, [1u8; 16], [2u8; 16]), &mut dst)
+			.unwrap();
+		let _ = codex.decode(&mut login_reply(7, 417)).expect("decode");
+		// Rejected login must NOT flip the session, and must disarm.
+		assert!(matches!(
+			codex.context.get_encrypted(),
+			EncryptionProtocol::BCEncrypt
+		));
+		assert!(codex.pending_session_aes.is_none());
+	}
+
+	#[test]
+	fn sigv3_switch_ignores_mismatched_msg_num() {
+		let mut codex = BcCodex::new(empty_creds());
+		let (key, iv) = ([1u8; 16], [2u8; 16]);
+		let mut dst = BytesMut::new();
+		codex.encode(signed_login(7, key, iv), &mut dst).unwrap();
+		// A 200 to a DIFFERENT msg_num must not apply, and must stay armed.
+		let _ = codex.decode(&mut login_reply(9, 200)).expect("decode");
+		assert!(matches!(
+			codex.context.get_encrypted(),
+			EncryptionProtocol::BCEncrypt
+		));
+		assert_eq!(codex.pending_session_aes, Some((7, key, iv)));
 	}
 }

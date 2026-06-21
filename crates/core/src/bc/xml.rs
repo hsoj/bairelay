@@ -244,18 +244,60 @@ impl BcXml {
 		quick_xml::de::from_reader(s)
 	}
 	pub(crate) fn serialize<W: Write>(&self, mut w: W) -> Result<W, quick_xml::de::DeError> {
-		let mut writer = quick_xml::writer::Writer::new(&mut w);
-		// Bubble the (in practice unreachable, since the inputs are
-		// fixed string literals) error rather than `expect`ing —
-		// keeps a public serializer in `crates/core/` panic-free.
-		writer
-			.write_event(quick_xml::events::Event::Decl(
-				quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None),
-			))
-			.map_err(quick_xml::de::DeError::from)?;
-		writer.write_serializable("body", &self)?;
+		let mut buf: Vec<u8> = Vec::new();
+		{
+			let mut writer = quick_xml::writer::Writer::new(&mut buf);
+			// Bubble the (in practice unreachable, since the inputs are
+			// fixed string literals) error rather than `expect`ing —
+			// keeps a public serializer in `crates/core/` panic-free.
+			writer
+				.write_event(quick_xml::events::Event::Decl(
+					quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None),
+				))
+				.map_err(quick_xml::de::DeError::from)?;
+			writer.write_serializable("body", &self)?;
+		}
+		// The camera firmware's TiXml parser condenses raw whitespace inside
+		// text nodes. That collapses the newlines of the multi-line PEM
+		// carried in `<certChain>` on the sigV3 login, corrupting the cert so
+		// the cloud token fails validation. The official app emits those
+		// newlines as `&#x0A;` entities, which survive condensing — replicate
+		// that. quick-xml emits compact XML, so the only raw newlines in `buf`
+		// are inside text values, where this re-encoding is value-preserving.
+		w.write_all(&encode_certchain_newlines(&buf))
+			.map_err(|e| quick_xml::de::DeError::Custom(e.to_string()))?;
 		Ok(w)
 	}
+}
+
+/// Within the `<certChain>…</certChain>` span only, replace raw `\n`/`\r`
+/// with their XML numeric-character-reference entities so a
+/// whitespace-condensing parser preserves the PEM newlines. Returns `buf`
+/// unchanged when there is no `<certChain>` element (every non-sigV3-login
+/// message).
+fn encode_certchain_newlines(buf: &[u8]) -> Vec<u8> {
+	const OPEN: &[u8] = b"<certChain>";
+	const CLOSE: &[u8] = b"</certChain>";
+	let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+	let Some(open) = find(buf, OPEN) else {
+		return buf.to_vec();
+	};
+	let inner = open + OPEN.len();
+	let Some(rel_close) = find(&buf[inner..], CLOSE) else {
+		return buf.to_vec();
+	};
+	let close = inner + rel_close;
+	let mut out = Vec::with_capacity(buf.len() + 256);
+	out.extend_from_slice(&buf[..inner]);
+	for &b in &buf[inner..close] {
+		match b {
+			b'\n' => out.extend_from_slice(b"&#x0A;"),
+			b'\r' => out.extend_from_slice(b"&#x0D;"),
+			_ => out.push(b),
+		}
+	}
+	out.extend_from_slice(&buf[close..]);
+	out
 }
 
 impl Extension {
@@ -289,6 +331,51 @@ pub struct Encryption {
 	/// The nonce used to negotiate the login and to generate the AES key
 	#[serde(default)]
 	pub nonce: String,
+	/// Auth methods the camera will accept. Newer firmware advertises
+	/// `password` / `sigV1` / `sigV3` / `authLogin` / `getAccesskey`;
+	/// absent on older firmware. Drives the legacy-vs-sigV3 login branch.
+	#[serde(
+		default,
+		rename = "authTypeList",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub auth_type_list: Option<AuthTypeList>,
+	/// Signature scheme version (`v3` on firmware that requires the
+	/// ECDHE-signed login). Absent on older firmware.
+	#[serde(default, rename = "sigVer", skip_serializing_if = "Option::is_none")]
+	pub sig_ver: Option<String>,
+	/// ECDHE key-agreement parameters the camera offers for sigV3 login.
+	/// Absent on older firmware.
+	#[serde(default, rename = "ECDHE", skip_serializing_if = "Option::is_none")]
+	pub ecdhe: Option<Ecdhe>,
+}
+
+/// `<authTypeList>` wrapper carrying the repeated `<authType>` elements
+/// from the camera's encryption-negotiation reply.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct AuthTypeList {
+	/// Each accepted auth method, e.g. `password`, `sigV3`.
+	#[serde(default, rename = "authType")]
+	pub auth_type: Vec<String>,
+}
+
+/// `<ECDHE>` block: the camera's ephemeral X25519 public key plus the
+/// KDF iteration count for the sigV3 login handshake. Field semantics
+/// are documented in `docs/baichuan-sigv3-login.md` once recovered.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct Ecdhe {
+	/// Key-agreement algorithm. Observed value: `X25519`.
+	#[serde(default, rename = "publicKeyAlgo")]
+	pub public_key_algo: String,
+	/// The camera's ephemeral public key (base64).
+	#[serde(default, rename = "publicKey")]
+	pub public_key: String,
+	/// Signature over the camera's public key (base64).
+	#[serde(default, rename = "publicKeySign")]
+	pub public_key_sign: String,
+	/// KDF iteration count (observed: 1000).
+	#[serde(default)]
+	pub iterations: u32,
 }
 
 /// LoginUser xml. Custom `Debug` redacts `password` so an
@@ -302,21 +389,90 @@ pub struct LoginUser {
 	/// XML Version
 	#[serde(default, rename = "@version")]
 	pub version: String,
+	/// Camera-local login method when the legacy + sigV3 logins don't
+	/// apply: `getAccesskey` (request the authLogin challenge) or
+	/// `authLogin` (final challenge-response). Absent on every other
+	/// login — see `login_authlogin`.
+	#[serde(default, rename = "authType", skip_serializing_if = "Option::is_none")]
+	pub auth_type: Option<String>,
 	/// Username to login as
-	#[serde(default, rename = "userName")]
+	#[serde(default, rename = "userName", skip_serializing_if = "String::is_empty")]
 	pub user_name: String,
 	/// Password for login in plain text
-	#[serde(default)]
+	#[serde(default, skip_serializing_if = "String::is_empty")]
 	pub password: String,
 	/// Unknown always `1`
-	#[serde(default, rename = "userVer")]
+	#[serde(default, rename = "userVer", skip_serializing_if = "is_zero_u32")]
 	pub user_ver: u32,
+	/// Client kind, e.g. `"app"`. Sent on the sigV3 login; absent on the
+	/// legacy login.
+	#[serde(
+		default,
+		rename = "clientType",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub client_type: Option<String>,
+	/// sigV3 only: base64 of our ephemeral X25519 public key.
+	#[serde(default, rename = "publicKey", skip_serializing_if = "Option::is_none")]
+	pub public_key: Option<String>,
+	/// sigV3 only: cloud-issued token key (base64) from the `getAccesskey`
+	/// bundle. Echoed verbatim — not ECDHE-derived. Field order matters:
+	/// the official app emits `tokenKey` BEFORE `cipherContent`, so keep
+	/// this declared before `cipher_content` (serde serializes in order).
+	#[serde(default, rename = "tokenKey", skip_serializing_if = "Option::is_none")]
+	pub token_key: Option<String>,
+	/// sigV3 only: base64 of `AES-128-CFB(cipherContent-JSON)` — the
+	/// password proof keyed by the ECDHE shared secret.
+	#[serde(
+		default,
+		rename = "cipherContent",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub cipher_content: Option<String>,
+	/// sigV3 only: the reolink.com PEM certificate chain the camera validates
+	/// the cloud token against.
+	#[serde(default, rename = "certChain", skip_serializing_if = "Option::is_none")]
+	pub cert_chain: Option<String>,
+	/// `getAccesskey` step only: the `<AuthInfo>` carrying `authCode`.
+	#[serde(default, rename = "AuthInfo", skip_serializing_if = "Option::is_none")]
+	pub auth_info: Option<AuthInfo>,
+	/// sigV3 only, never on the wire: the derived post-login session AES
+	/// `(key, iv)`. `run_sigv3_direct` attaches it; the codec reads it while
+	/// encoding the signed login and arms the control session to switch to AES
+	/// once the camera accepts the login. See `bc/codex.rs`.
+	#[serde(skip)]
+	pub session_aes: Option<([u8; 16], [u8; 16])>,
+}
+
+/// `<AuthInfo>` block sent on the `authType=getAccesskey` login step. The
+/// camera answers with the AES-encrypted authLogin challenge.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct AuthInfo {
+	/// `md5(password + nonce)` truncated to 31 hex chars — the same proof
+	/// carried by the legacy `<password>` field.
+	#[serde(default, rename = "authCode")]
+	pub auth_code: String,
+	/// Client model string. The app sends its phone model; bairelay omits
+	/// it (the camera does not require it).
+	#[serde(
+		default,
+		rename = "phoneModel",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub phone_model: Option<String>,
+}
+
+/// serde `skip_serializing_if` predicate for `userVer` so the
+/// `getAccesskey` request (which omits it) doesn't emit `<userVer>0</…>`.
+fn is_zero_u32(v: &u32) -> bool {
+	*v == 0
 }
 
 impl std::fmt::Debug for LoginUser {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("LoginUser")
 			.field("version", &self.version)
+			.field("auth_type", &self.auth_type)
 			.field("user_name", &self.user_name)
 			.field(
 				"password",
@@ -327,6 +483,15 @@ impl std::fmt::Debug for LoginUser {
 				},
 			)
 			.field("user_ver", &self.user_ver)
+			.field("client_type", &self.client_type)
+			.field("public_key", &self.public_key)
+			.field("cipher_content", &self.cipher_content)
+			// tokenKey is cloud-issued session-key material — length only.
+			.field("token_key", &self.token_key.as_ref().map(|k| k.len()))
+			.field("cert_chain", &self.cert_chain.as_ref().map(|c| c.len()))
+			.field("auth_info", &self.auth_info)
+			// session_aes is the derived AES key/iv — never print it.
+			.field("session_aes", &self.session_aes.map(|_| "<redacted>"))
 			.finish()
 	}
 }
@@ -2213,6 +2378,7 @@ fn test_login_ser() {
 			user_name: "9F07915E819A076E2E14169830769D6".to_string(),
 			password: "8EFECD610524A98390F118D2789BE3B".to_string(),
 			user_ver: 1,
+			..Default::default()
 		}),
 		login_net: Some(LoginNet {
 			version: "1.1".to_string(),
@@ -2699,6 +2865,7 @@ fn login_user_debug_redacts_password() {
 		user_name: "admin".to_string(),
 		password: "hunter2".to_string(),
 		user_ver: 1,
+		..Default::default()
 	};
 	let dbg = format!("{user:?}");
 	assert!(
@@ -2732,10 +2899,94 @@ fn login_user_debug_marks_empty_password_distinctly() {
 		user_name: "admin".to_string(),
 		password: String::new(),
 		user_ver: 1,
+		..Default::default()
 	};
 	let dbg = format!("{user:?}");
 	assert!(
 		dbg.contains("empty"),
 		"empty password should surface as <empty>, not <redacted>; got {dbg}"
+	);
+}
+
+#[test]
+fn login_user_sigv3_serializes_extra_fields() {
+	// The sigV3 login adds clientType / publicKey / cipherContent on the
+	// wire; field names must match what the camera expects.
+	let sigv3 = BcXml {
+		login_user: Some(LoginUser {
+			version: "1.1".to_string(),
+			user_name: "md5user".to_string(),
+			password: "md5pass".to_string(),
+			user_ver: 1,
+			client_type: Some("app".to_string()),
+			public_key: Some("PUBKEYB64".to_string()),
+			cipher_content: Some("CIPHERB64".to_string()),
+			..Default::default()
+		}),
+		..Default::default()
+	};
+	let xml = String::from_utf8(sigv3.serialize(vec![]).unwrap()).unwrap();
+	assert!(xml.contains("<clientType>app</clientType>"), "{xml}");
+	assert!(xml.contains("<publicKey>PUBKEYB64</publicKey>"), "{xml}");
+	assert!(
+		xml.contains("<cipherContent>CIPHERB64</cipherContent>"),
+		"{xml}"
+	);
+
+	// Legacy login (no sigV3 fields set) must omit them entirely so the
+	// old-firmware path is byte-for-byte unchanged.
+	let legacy = BcXml {
+		login_user: Some(LoginUser {
+			version: "1.1".to_string(),
+			user_name: "md5user".to_string(),
+			password: "md5pass".to_string(),
+			user_ver: 1,
+			..Default::default()
+		}),
+		..Default::default()
+	};
+	let xml = String::from_utf8(legacy.serialize(vec![]).unwrap()).unwrap();
+	assert!(
+		!xml.contains("publicKey"),
+		"legacy must omit sigV3 fields: {xml}"
+	);
+	assert!(!xml.contains("cipherContent"), "{xml}");
+	assert!(!xml.contains("clientType"), "{xml}");
+}
+
+#[test]
+fn certchain_newlines_emitted_as_entities_on_the_wire() {
+	let login = BcXml {
+		login_user: Some(LoginUser {
+			version: "1.1".to_string(),
+			user_name: "u".to_string(),
+			cert_chain: Some("-----BEGIN-----\nAAAA\n-----END-----\n".to_string()),
+			..Default::default()
+		}),
+		..Default::default()
+	};
+	let xml = String::from_utf8(login.serialize(vec![]).unwrap()).unwrap();
+	assert!(
+		xml.contains("<certChain>-----BEGIN-----&#x0A;AAAA&#x0A;-----END-----&#x0A;</certChain>"),
+		"{xml}"
+	);
+	let inner = &xml[xml.find("<certChain>").unwrap()..xml.find("</certChain>").unwrap()];
+	assert!(
+		!inner.contains('\n'),
+		"no raw newline survives in certChain"
+	);
+}
+
+#[test]
+fn encode_certchain_newlines_is_scoped() {
+	// No <certChain> -> buffer unchanged (no global newline rewrite).
+	assert_eq!(
+		encode_certchain_newlines(b"<foo>a\nb</foo>").as_slice(),
+		b"<foo>a\nb</foo>"
+	);
+	// Only the certChain span is rewritten; surrounding newlines are untouched.
+	assert_eq!(
+		encode_certchain_newlines(b"x\n<certChain>a\nb\r</certChain>\ny").as_slice(),
+		b"x\n<certChain>a&#x0A;b&#x0D;</certChain>\ny".as_slice()
 	);
 }
