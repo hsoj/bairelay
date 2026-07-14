@@ -110,7 +110,10 @@ jobs:
       - name: Install tarpaulin
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          # Version-pinned for the same reason the toolchain is: an
+          # unpinned tool floats to its latest release and can turn CI
+          # red with no code change.
+          tool: cargo-tarpaulin@0.37.0
       # Tarpaulin reads workspace = true / fail-under = 87 from
       # tarpaulin.toml. The job exits non-zero when coverage drops
       # below that floor, so the gate is now mechanically enforced
