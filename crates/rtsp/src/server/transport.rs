@@ -146,18 +146,50 @@ impl UdpUnicastTransport {
 		client_rtp_addr: SocketAddr,
 		client_rtcp_addr: SocketAddr,
 	) -> io::Result<Self> {
-		let lease = pool.acquire().map_err(io::Error::other)?;
+		// A leased port can still be occupied at the OS level — a
+		// TIME_WAIT socket from a prior session, or an unrelated process
+		// on the same port. Rather than fail the SETUP on the first such
+		// pair, step to the next one. Failed leases are parked (not
+		// dropped) so `acquire` skips them until a pair binds; the parked
+		// leases release when `_parked` drops at end of scope.
+		let mut _parked = Vec::new();
+		loop {
+			let lease = pool.acquire().map_err(io::Error::other)?;
+
+			match Self::try_bind_pair(server_bind_ip, &lease).await {
+				Ok((rtp_sock, rtcp_sock)) => {
+					return Ok(Self {
+						rtp_sock,
+						rtcp_sock,
+						client_rtp_addr,
+						client_rtcp_addr,
+						lease,
+					});
+				}
+				Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+					// Pair unusable — park the lease so the next acquire
+					// hands back a different port, and retry.
+					_parked.push(lease);
+				}
+				// A non-conflict error (bad bind IP, host out of sockets)
+				// won't be fixed by trying another port.
+				Err(e) => return Err(e),
+			}
+		}
+	}
+
+	/// Bind the RTP + RTCP sockets for a single leased pair. Binding the
+	/// RTCP socket only after the RTP socket succeeds means an
+	/// `AddrInUse` on either surfaces as `AddrInUse` to the caller.
+	async fn try_bind_pair(
+		server_bind_ip: IpAddr,
+		lease: &UdpPortLease,
+	) -> io::Result<(Arc<UdpSocket>, Arc<UdpSocket>)> {
 		let rtp_sock =
 			Arc::new(UdpSocket::bind(SocketAddr::new(server_bind_ip, lease.rtp_port)).await?);
 		let rtcp_sock =
 			Arc::new(UdpSocket::bind(SocketAddr::new(server_bind_ip, lease.rtcp_port)).await?);
-		Ok(Self {
-			rtp_sock,
-			rtcp_sock,
-			client_rtp_addr,
-			client_rtcp_addr,
-			lease,
-		})
+		Ok((rtp_sock, rtcp_sock))
 	}
 
 	/// Server-assigned RTP port (even). Read directly from the held lease,
@@ -282,5 +314,40 @@ mod tests {
 		assert_eq!(&buf[..n], b"rtp-data");
 		let (n, _) = client_rtcp_sock.recv_from(&mut buf).await.unwrap();
 		assert_eq!(&buf[..n], b"rtcp-data");
+	}
+
+	/// `bind` must step past a leased pair whose ports are already
+	/// occupied at the OS level, rather than fail the SETUP. Occupy the
+	/// pool's first RTP port, then bind and assert the transport landed
+	/// on a later pair.
+	#[tokio::test]
+	async fn udp_bind_skips_occupied_pair() {
+		use crate::server::udp_pool::POOL_START;
+		use std::net::Ipv4Addr;
+
+		let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+		// Squat on the even (RTP) port of the pool's first pair.
+		let squatter = UdpSocket::bind(SocketAddr::new(ip, POOL_START)).await;
+		// If something else already holds POOL_START this test can't set
+		// up its precondition; skip rather than false-fail.
+		let Ok(_squatter) = squatter else {
+			eprintln!("POOL_START busy; skipping");
+			return;
+		};
+
+		let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let caddr = client.local_addr().unwrap();
+
+		let pool = Arc::new(UdpPortPool::new());
+		let transport = UdpUnicastTransport::bind(ip, Arc::clone(&pool), caddr, caddr)
+			.await
+			.expect("bind must retry past the occupied first pair");
+
+		assert_ne!(
+			transport.server_rtp_port(),
+			POOL_START,
+			"transport must not claim the occupied port"
+		);
+		assert!(transport.server_rtp_port() > POOL_START);
 	}
 }
