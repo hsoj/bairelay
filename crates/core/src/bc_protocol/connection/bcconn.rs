@@ -347,16 +347,16 @@ impl Poller {
 												"Remaining: {} of {} message space for {} (ID: {})",
 												sender.capacity(),
 												sender.max_capacity(),
-												&msg_num,
-												&msg_id
+												msg_num,
+												msg_id
 											);
 										} else {
 											trace!(
 												"Remaining: {} of {} message space for {} (ID: {})",
 												sender.capacity(),
 												sender.max_capacity(),
-												&msg_num,
-												&msg_id
+												msg_num,
+												msg_id
 											);
 										}
 										let _ = sender.send(Ok(response)).await;

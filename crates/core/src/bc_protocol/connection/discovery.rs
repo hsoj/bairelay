@@ -208,7 +208,7 @@ impl Discoverer {
 							Some(Err(e)) => {
 								log::error!("Error on discovery socket: {:?}", e);
 								let mut locked_sub = thread_subscriber.write().await;
-								for (_, sub) in locked_sub.iter() {
+								for sub in locked_sub.values() {
 									let _ = sub.send(Err(e.clone())).await;
 								}
 								locked_sub.clear();
@@ -699,7 +699,7 @@ impl Discoverer {
 			.map_err(|_| Error::Other("Discovery already complete"))?;
 		// Send and await confirm
 		self.retry_send(msg, addr, |bc, _| {
-			trace!("msg: {:?}", &bc);
+			trace!("msg: {:?}", bc);
 			match bc {
 				UdpDiscovery {
 					tid: _,
@@ -812,7 +812,7 @@ impl Discoverer {
 			.map_err(|_| Error::Other("Discovery already complete"))?;
 		// Send and await confirm
 		self.retry_send(msg, addr, |bc, _| {
-			trace!("msg: {:?}", &bc);
+			trace!("msg: {:?}", bc);
 			match bc {
 				UdpDiscovery {
 					tid: _,

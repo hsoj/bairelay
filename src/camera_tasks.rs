@@ -944,7 +944,7 @@ mod tests {
 		let _ = task.await;
 
 		assert!(
-			call.load(Ordering::Acquire) > u64::from(BATTERY_MAX_UNSUPPORTED) as u32 + 1,
+			call.load(Ordering::Acquire) > BATTERY_MAX_UNSUPPORTED + 1,
 			"test must actually drive more refusals than the streak limit"
 		);
 		assert!(

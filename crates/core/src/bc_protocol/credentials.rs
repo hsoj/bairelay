@@ -60,7 +60,7 @@ impl Credentials {
 	/// that lingers until the allocator reuses the page.
 	pub(crate) fn make_aeskey<T: AsRef<str>>(&self, nonce: T) -> [u8; 16] {
 		let password = Zeroizing::new(self.password.clone().unwrap_or_default());
-		let key_phrase = Zeroizing::new(format!("{}-{}", nonce.as_ref(), &*password));
+		let key_phrase = Zeroizing::new(format!("{}-{}", nonce.as_ref(), *password));
 		// `{:X}` already emits uppercase hex; `.to_uppercase()` was a
 		// no-op carried over from a lowercase variant in upstream code.
 		let key_phrase_hash = format!("{:X}\0", md5::compute(&*key_phrase)).into_bytes();
