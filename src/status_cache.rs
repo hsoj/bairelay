@@ -9,10 +9,10 @@
 //! Why: MQTT brokers without persistence (or whose retained store is
 //! reset alongside HA) lose retained messages on restart. Bairelay's
 //! own publishes are then the only source of state, but several
-//! topics are event-driven (motion, floodlight) or polled at long
-//! intervals (battery: 600 s default), so HA can show "unknown" for
-//! up to 10 min after such a reset. Re-emitting the cache on every
-//! broker reconnect closes the gap.
+//! topics are event-driven (motion, floodlight) or polled on an
+//! interval, so HA can show "unknown" until the next tick after such
+//! a reset. Re-emitting the cache on every broker reconnect closes
+//! the gap.
 //!
 //! What's NOT cached:
 //!

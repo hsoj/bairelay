@@ -93,7 +93,7 @@ address = "192.168.1.187:9000"
 # [cameras.mqtt]
 # enable_motion     = true
 # enable_light      = true    # status LED
-# enable_battery    = true
+# enable_battery    = true    # false for mains-powered models (no battery)
 # battery_update    = 2000    # ms, min 500
 # enable_preview    = true
 # preview_update    = 2000    # ms, min 500

@@ -3,13 +3,14 @@
 //! Each task is spawned when a camera connects and cancelled when the
 //! connection drops (via a session-scoped `CancellationToken`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use bairelay_neolink_core::bc_protocol::{CameraDriver, MotionStatus};
+use bairelay_neolink_core::bc_protocol::{CameraDriver, Error as CoreError, MotionStatus};
 
 use bairelay_mqtt::{SharedMqttClient, StatusPublisher};
 use bairelay_rtsp::buffer::LastFrameBuffer;
@@ -128,6 +129,85 @@ pub async fn motion_listener(
 
 // ── Battery Poller ───────────────────────────────────────────────────
 
+/// Consecutive "camera refused the battery command" replies before the
+/// poller concludes the camera has no battery and stops asking.
+///
+/// Three rather than one: `UnintelligibleReply` is a structural catch-all
+/// for "reply shape I didn't expect", not a dedicated unsupported-command
+/// code — a 200 carrying garbled XML raises it too. One occurrence is not
+/// conclusive. Three in a row, spaced a full `battery_update` apart, with
+/// any success or transport blip resetting the streak, is.
+pub(crate) const BATTERY_MAX_UNSUPPORTED: u32 = 3;
+
+/// Shorthand for one `timeout(..., battery_info()).await` outcome.
+pub(crate) type TickResult<T> =
+	std::result::Result<std::result::Result<T, CoreError>, tokio::time::error::Elapsed>;
+
+/// What one battery poll told us about the camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatteryTickOutcome {
+	/// Got a battery level. Reset the streak.
+	Ok,
+	/// The camera answered and refused. Evidence it has no battery.
+	Unsupported,
+	/// Timeout, transport error, mid-reconnect. Says nothing about
+	/// whether the camera has a battery — reset the streak.
+	Transient,
+}
+
+/// Fold a battery-poll outcome into a [`BatteryTickOutcome`].
+///
+/// The load-bearing distinction is *refused* vs *failed*. A camera that
+/// replies with a non-200 (or a 200 without a `battery_info` payload) has
+/// said something about its hardware; a camera that timed out or dropped
+/// the connection has not. Only the former may ever disable polling — see
+/// [`advance_battery_counter`].
+///
+/// `MissingAbility` is deliberately absent: a missing ability key does not
+/// prove the camera lacks the feature, so it must never latch a permanent
+/// disable. It falls through to `Transient`.
+pub(crate) fn classify_battery_tick<T>(outcome: &TickResult<T>) -> BatteryTickOutcome {
+	match outcome {
+		Ok(Ok(_)) => BatteryTickOutcome::Ok,
+		Ok(Err(CoreError::UnintelligibleReply { .. })) => BatteryTickOutcome::Unsupported,
+		Ok(Err(_)) | Err(_) => BatteryTickOutcome::Transient,
+	}
+}
+
+/// Update the consecutive-refusal counter, and report whether the poller
+/// should now give up.
+///
+/// Pure, so the decision table can be unit-tested without a camera.
+/// Anything that is not a refusal clears the streak — see the doc on
+/// [`classify_battery_tick`] for why a transient error must not count.
+pub(crate) fn advance_battery_counter(
+	consecutive_unsupported: u32,
+	outcome: BatteryTickOutcome,
+	max_unsupported: u32,
+) -> (u32, bool) {
+	match outcome {
+		BatteryTickOutcome::Ok | BatteryTickOutcome::Transient => (0, false),
+		BatteryTickOutcome::Unsupported => {
+			let next = consecutive_unsupported.saturating_add(1);
+			(next, next >= max_unsupported)
+		}
+	}
+}
+
+/// Poll `battery_info()` and publish `status/battery_level`.
+///
+/// Gives up once the camera has refused the command
+/// [`BATTERY_MAX_UNSUPPORTED`] times in a row **and has never once
+/// answered it**, setting `battery_unsupported` so `spawn_session_tasks`
+/// doesn't re-probe on the next reconnect. Mains-powered models have no
+/// battery and refuse every probe; without the give-up they are re-asked
+/// every `battery_update` ms for the life of the process.
+///
+/// The never-answered condition is what makes the latch safe. A camera
+/// that has produced even one battery level has proven the hardware is
+/// there, so a later run of malformed replies — which
+/// [`classify_battery_tick`] cannot distinguish from a refusal — can
+/// never silence a real battery.
 #[allow(clippy::too_many_arguments)]
 pub async fn battery_poller(
 	camera_name: String,
@@ -137,16 +217,43 @@ pub async fn battery_poller(
 	interval_ms: u64,
 	cancel: CancellationToken,
 	status_cache: Arc<StatusCache>,
+	battery_unsupported: Arc<AtomicBool>,
 ) {
 	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+	// Delay, not the default Burst: a poll that stalls to the 10 s timeout
+	// leaves several deadlines overdue, and Burst would fire them
+	// back-to-back with no spacing — collapsing the refusal streak's
+	// evidence window to milliseconds. Delay keeps every probe a full
+	// `interval_ms` apart.
+	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	// Drop the immediate first tick: it lands the instant the session
+	// establishes, when a just-woken camera is least likely to answer.
+	ticker.tick().await;
+
+	let mut consecutive_unsupported: u32 = 0;
+	let mut ever_succeeded = false;
 
 	loop {
 		tokio::select! {
 			_ = cancel.cancelled() => break,
 			_ = ticker.tick() => {
-				match tokio::time::timeout(Duration::from_secs(10), bc_camera.battery_info()).await {
+				let tick = tokio::time::timeout(
+					Duration::from_secs(10),
+					bc_camera.battery_info(),
+				).await;
+
+				let outcome = classify_battery_tick(&tick);
+				let (next, streak_tripped) = advance_battery_counter(
+					consecutive_unsupported,
+					outcome,
+					BATTERY_MAX_UNSUPPORTED,
+				);
+				consecutive_unsupported = next;
+
+				match &tick {
 					Ok(Ok(info)) => {
+						ever_succeeded = true;
 						let level = info.battery_percent.min(100) as u8;
 						tracing::debug!(camera = %camera_name, battery = level, "Battery level");
 						let _ = publisher.publish_battery_level(level).await;
@@ -158,6 +265,18 @@ pub async fn battery_poller(
 					Err(_) => {
 						tracing::debug!(camera = %camera_name, "Battery poll timed out");
 					}
+				}
+
+				if streak_tripped && !ever_succeeded {
+					battery_unsupported.store(true, Ordering::Release);
+					tracing::warn!(
+						camera = %camera_name,
+						"Camera refused every battery query — it appears to have no \
+						 battery. Disabling battery polling for this camera. Set \
+						 `enable_battery = false` under [cameras.mqtt] to make this \
+						 permanent and silence this warning at startup."
+					);
+					break;
 				}
 			}
 		}
@@ -383,6 +502,7 @@ mod tests {
 	use bairelay_mqtt::test_support::MockHandle;
 	use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
 	use bytes::Bytes;
+	use std::sync::atomic::{AtomicBool, Ordering};
 
 	/// Helper: every status-publishing task takes an `Arc<StatusCache>`
 	/// as its final argument. Tests that don't assert on cache contents
@@ -501,6 +621,7 @@ mod tests {
 			20,
 			cancel.clone(),
 			empty_cache(),
+			Arc::new(AtomicBool::new(false)),
 		));
 
 		let saw_level = await_publish_matching(&mock, Duration::from_secs(2), |(t, p, r)| {
@@ -557,6 +678,7 @@ mod tests {
 			20,
 			cancel.clone(),
 			empty_cache(),
+			Arc::new(AtomicBool::new(false)),
 		));
 
 		let saw_level = await_publish_matching(&mock, Duration::from_secs(3), |(t, p, _)| {
@@ -576,6 +698,258 @@ mod tests {
 		assert!(
 			call.load(Ordering::Acquire) >= 2,
 			"closure should have been invoked at least twice (one Err, one Ok)"
+		);
+	}
+
+	/// Build the exact error `BcCamera::battery_info` raises when a camera
+	/// answers the battery-info request with anything other than a 200
+	/// carrying a `battery_info` payload — i.e. the camera refusing the
+	/// command outright. A mains-powered camera returns this on every poll.
+	fn battery_refused() -> bairelay_neolink_core::bc_protocol::Error {
+		use bairelay_neolink_core::bc::model::{Bc, BcMeta, MSG_ID_BATTERY_INFO};
+		bairelay_neolink_core::bc_protocol::Error::UnintelligibleReply {
+			reply: Arc::new(Bc::new_from_meta(BcMeta {
+				msg_id: MSG_ID_BATTERY_INFO,
+				channel_id: 0,
+				stream_type: 0,
+				response_code: 400,
+				msg_num: 0,
+				class: 0x6414,
+			})),
+			why: "The camera did not accept the battery info (maybe no battery) command.",
+		}
+	}
+
+	#[test]
+	fn classify_battery_tick_maps_each_arm() {
+		use bairelay_neolink_core::bc::xml::BatteryInfo;
+
+		let ok: TickResult<BatteryInfo> = Ok(Ok(BatteryInfo::default()));
+		assert_eq!(classify_battery_tick(&ok), BatteryTickOutcome::Ok);
+
+		// The camera answered and said no.
+		let refused: TickResult<BatteryInfo> = Ok(Err(battery_refused()));
+		assert_eq!(
+			classify_battery_tick(&refused),
+			BatteryTickOutcome::Unsupported
+		);
+
+		// `MissingAbility` must NOT latch a disable: a missing ability
+		// key doesn't prove the camera lacks the hardware.
+		let missing: TickResult<BatteryInfo> = Ok(Err(
+			bairelay_neolink_core::bc_protocol::Error::MissingAbility {
+				name: "battery".into(),
+				requested: "read".into(),
+				actual: "none".into(),
+			},
+		));
+		assert_eq!(
+			classify_battery_tick(&missing),
+			BatteryTickOutcome::Transient
+		);
+
+		// Anything else is a transport-level blip.
+		let other: TickResult<BatteryInfo> = Ok(Err(
+			bairelay_neolink_core::bc_protocol::Error::Other("transient"),
+		));
+		assert_eq!(classify_battery_tick(&other), BatteryTickOutcome::Transient);
+	}
+
+	#[test]
+	fn advance_battery_counter_only_trips_on_consecutive_unsupported() {
+		// Streak builds and trips at exactly `max`.
+		assert_eq!(
+			advance_battery_counter(0, BatteryTickOutcome::Unsupported, 3),
+			(1, false)
+		);
+		assert_eq!(
+			advance_battery_counter(1, BatteryTickOutcome::Unsupported, 3),
+			(2, false)
+		);
+		assert_eq!(
+			advance_battery_counter(2, BatteryTickOutcome::Unsupported, 3),
+			(3, true)
+		);
+
+		// A success clears the streak.
+		assert_eq!(
+			advance_battery_counter(2, BatteryTickOutcome::Ok, 3),
+			(0, false)
+		);
+
+		// So does a transient error: a camera that refused twice and then
+		// dropped its connection has not proven it lacks a battery.
+		assert_eq!(
+			advance_battery_counter(2, BatteryTickOutcome::Transient, 3),
+			(0, false)
+		);
+	}
+
+	/// A camera that refuses `battery_info` on every poll must make the
+	/// poller give up: the task exits on its own, sets the shared
+	/// "unsupported" flag, and publishes nothing.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn battery_poller_gives_up_after_repeated_refusals() {
+		let fake = FakeCameraBuilder::new()
+			.with_battery_info(|| Err(battery_refused()))
+			.build();
+		let driver: Arc<dyn CameraDriver> = fake;
+
+		let cancel = CancellationToken::new();
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let unsupported = Arc::new(AtomicBool::new(false));
+
+		let task = tokio::spawn(battery_poller(
+			"cam1".to_string(),
+			driver,
+			mqtt,
+			"bairelay".to_string(),
+			20,
+			cancel.clone(),
+			empty_cache(),
+			Arc::clone(&unsupported),
+		));
+
+		// The task must terminate WITHOUT anyone cancelling it. If it
+		// still runs after the budget, the give-up path never fired.
+		let ended = tokio::time::timeout(Duration::from_secs(5), task).await;
+
+		assert!(
+			ended.is_ok(),
+			"battery_poller should exit on its own after {BATTERY_MAX_UNSUPPORTED} refusals"
+		);
+		assert!(
+			unsupported.load(Ordering::Acquire),
+			"give-up path must set the battery_unsupported flag so reconnects don't re-probe"
+		);
+		assert!(
+			!mock
+				.published_topics()
+				.iter()
+				.any(|t| t.contains("battery_level")),
+			"a camera with no battery must never publish a battery level"
+		);
+	}
+
+	/// The give-up must not fire on a camera that merely has a flaky
+	/// link: refusal, refusal, transient error, then success. The streak
+	/// resets and the poller keeps serving a real battery.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn battery_poller_survives_refusals_broken_by_a_transient_error() {
+		use bairelay_neolink_core::bc::xml::BatteryInfo;
+		use std::sync::atomic::AtomicU32;
+
+		let call = Arc::new(AtomicU32::new(0));
+		let call_c = Arc::clone(&call);
+
+		let fake = FakeCameraBuilder::new()
+			.with_battery_info(move || match call_c.fetch_add(1, Ordering::AcqRel) {
+				0 | 1 => Err(battery_refused()),
+				2 => Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"transient test failure",
+				)),
+				_ => Ok(BatteryInfo {
+					battery_percent: 42,
+					..Default::default()
+				}),
+			})
+			.build();
+		let driver: Arc<dyn CameraDriver> = fake;
+
+		let cancel = CancellationToken::new();
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let unsupported = Arc::new(AtomicBool::new(false));
+
+		let task = tokio::spawn(battery_poller(
+			"cam1".to_string(),
+			driver,
+			mqtt,
+			"bairelay".to_string(),
+			20,
+			cancel.clone(),
+			empty_cache(),
+			Arc::clone(&unsupported),
+		));
+
+		let saw_level = await_publish_matching(&mock, Duration::from_secs(3), |(t, p, _)| {
+			t == "bairelay/cam1/status/battery_level" && p == b"42"
+		})
+		.await;
+
+		cancel.cancel();
+		let _ = task.await;
+
+		assert!(
+			saw_level,
+			"two refusals broken by a transient error must not disable the poller"
+		);
+		assert!(
+			!unsupported.load(Ordering::Acquire),
+			"battery_unsupported must stay clear when the streak was broken"
+		);
+	}
+
+	/// A camera that answers once has proven it has a battery. A later
+	/// unbroken run of refusals — which `classify_battery_tick` cannot
+	/// tell apart from garbled replies on a real battery camera — must
+	/// therefore never latch the permanent disable.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn battery_poller_never_disables_a_camera_that_once_answered() {
+		use bairelay_neolink_core::bc::xml::BatteryInfo;
+		use std::sync::atomic::AtomicU32;
+
+		let call = Arc::new(AtomicU32::new(0));
+		let call_c = Arc::clone(&call);
+
+		let fake = FakeCameraBuilder::new()
+			.with_battery_info(move || {
+				// One good reading, then refuse forever.
+				if call_c.fetch_add(1, Ordering::AcqRel) == 0 {
+					Ok(BatteryInfo {
+						battery_percent: 55,
+						..Default::default()
+					})
+				} else {
+					Err(battery_refused())
+				}
+			})
+			.build();
+		let driver: Arc<dyn CameraDriver> = fake;
+
+		let cancel = CancellationToken::new();
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let unsupported = Arc::new(AtomicBool::new(false));
+
+		let task = tokio::spawn(battery_poller(
+			"cam1".to_string(),
+			driver,
+			mqtt,
+			"bairelay".to_string(),
+			20,
+			cancel.clone(),
+			empty_cache(),
+			Arc::clone(&unsupported),
+		));
+
+		let saw_level = await_publish_matching(&mock, Duration::from_secs(3), |(t, p, _)| {
+			t == "bairelay/cam1/status/battery_level" && p == b"55"
+		})
+		.await;
+		assert!(saw_level, "the one good reading must publish");
+
+		// Far more than BATTERY_MAX_UNSUPPORTED refusals have now landed.
+		tokio::time::sleep(Duration::from_millis(300)).await;
+
+		cancel.cancel();
+		let _ = task.await;
+
+		assert!(
+			call.load(Ordering::Acquire) > u64::from(BATTERY_MAX_UNSUPPORTED) as u32 + 1,
+			"test must actually drive more refusals than the streak limit"
+		);
+		assert!(
+			!unsupported.load(Ordering::Acquire),
+			"a camera that has answered once must never be latched as batteryless"
 		);
 	}
 
@@ -1487,6 +1861,7 @@ mod tests {
 			20,
 			cancel.clone(),
 			empty_cache(),
+			Arc::new(AtomicBool::new(false)),
 		));
 		// Advance past the first tick (20 ms) plus the 10 s per-tick timeout.
 		tokio::time::advance(Duration::from_secs(11)).await;

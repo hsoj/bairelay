@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
@@ -219,6 +220,12 @@ pub struct CameraHandle {
 	/// the broker has lost retained messages (no-persistence config,
 	/// HA-Mosquitto-add-on restart, etc.). See `src/status_cache.rs`.
 	status_cache: Arc<StatusCache>,
+	/// Set once the camera has refused `battery_info` enough times in a
+	/// row for `battery_poller` to conclude it has no battery hardware,
+	/// as a mains-powered model does. Sticky for the process lifetime:
+	/// `spawn_session_tasks` consults it so a reconnect doesn't restart
+	/// the poller and re-run the same futile probes on every wake.
+	battery_unsupported: Arc<AtomicBool>,
 	/// Global `Config::stream_prune_grace_secs` propagated by the
 	/// orchestrator at construction. Threaded through to
 	/// [`crate::config::resolve_idle_disconnect_timeout`] so the floor
@@ -295,6 +302,7 @@ impl CameraHandle {
 			preview_state_tx,
 			preview_state_rx,
 			status_cache: Arc::new(StatusCache::default()),
+			battery_unsupported: Arc::new(AtomicBool::new(false)),
 			prune_grace: Duration::ZERO,
 		}
 	}
@@ -458,6 +466,13 @@ impl CameraHandle {
 	/// [`Self::republish_cached_status`] on every broker reconnect.
 	pub fn status_cache(&self) -> Arc<StatusCache> {
 		Arc::clone(&self.status_cache)
+	}
+
+	/// `true` once `battery_poller` has concluded this camera has no
+	/// battery hardware and given up. Sticky for the process lifetime;
+	/// gates the poller respawn in [`Self::spawn_session_tasks`].
+	pub fn battery_unsupported(&self) -> bool {
+		self.battery_unsupported.load(Ordering::Acquire)
 	}
 
 	/// Re-emit every cached MQTT status value via retained publishes.
@@ -1050,7 +1065,11 @@ impl CameraHandle {
 					self.status_cache(),
 				));
 			}
-			if self.config.mqtt.enable_battery {
+			// `battery_unsupported` latches when the poller concludes the
+			// camera has no battery. Skipping the respawn is what makes
+			// that verdict permanent rather than per-session — see
+			// `camera_tasks::battery_poller`.
+			if self.config.mqtt.enable_battery && !self.battery_unsupported() {
 				tasks.spawn(camera_tasks::battery_poller(
 					self.config.name.clone(),
 					Arc::clone(driver),
@@ -1059,6 +1078,7 @@ impl CameraHandle {
 					self.config.mqtt.battery_update,
 					session_cancel.clone(),
 					self.status_cache(),
+					Arc::clone(&self.battery_unsupported),
 				));
 			}
 			if self.config.mqtt.enable_floodlight {
@@ -2733,6 +2753,62 @@ mod tests {
 		assert!(
 			pir_published,
 			"enable_pir = true must trigger a status/pir publish"
+		);
+	}
+
+	/// Once `battery_poller` has latched the "no battery" verdict, a
+	/// later session must NOT respawn it — else every wake re-runs the
+	/// same futile probes for the life of the process. The fake here has
+	/// **no** `battery_info` configured, so `FakeCamera` panics if the
+	/// poller is spawned: the session completing at all is the assertion.
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn battery_poller_not_respawned_once_camera_is_known_batteryless() {
+		use crate::config::test_helpers::minimal_camera_config;
+		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+
+		let mut config = minimal_camera_config("cam-nobat");
+		config.mqtt.enable_battery = true;
+		config.mqtt.battery_update = 10;
+
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+
+		let fake = FakeCameraBuilder::new()
+			// battery_info deliberately unset — a spawned poller panics.
+			.with_support(|| Ok(bairelay_neolink_core::bc::xml::Support::default()))
+			.with_linktype(|| {
+				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					"scripted link fail",
+				))
+			})
+			.build();
+		let driver: Arc<dyn CameraDriver> = fake.clone();
+
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::with_bcmedia_dump_and_prefix(
+			config,
+			cancel,
+			Some(mqtt),
+			"bairelay".to_string(),
+			None,
+		));
+
+		// An earlier session's poller already gave up on this camera.
+		handle.battery_unsupported.store(true, Ordering::Release);
+		assert!(handle.battery_unsupported());
+
+		tokio::time::timeout(
+			Duration::from_secs(30),
+			handle.run_connected_session_for_test(driver),
+		)
+		.await
+		.expect("session must exit; a respawned battery poller would have panicked");
+
+		assert!(
+			!mock
+				.published_topics()
+				.iter()
+				.any(|t| t.contains("battery_level")),
+			"a camera known to have no battery must never publish a level"
 		);
 	}
 

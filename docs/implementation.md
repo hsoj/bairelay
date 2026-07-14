@@ -180,6 +180,12 @@ enable_pir = false
 
 Battery and motion default to enabled. Floodlight and PIR default to disabled so cameras without those features don't generate unsupported-feature errors at connect.
 
+`enable_battery` defaults to `true`, so mains-powered cameras get polled and refuse every probe. `battery_poller` gives up after `BATTERY_MAX_UNSUPPORTED` (3) consecutive refusals *and only if the camera never once answered*, latching the sticky `battery_unsupported` flag that `spawn_session_tasks` checks before respawning it.
+
+Why the guards: `battery_info` raises `UnintelligibleReply` for any reply that isn't a 200 with a payload, so a garbled 200 is indistinguishable from a refusal — one success therefore grants permanent immunity. Transient errors and `MissingAbility` reset the streak (a missing ability key doesn't prove missing hardware). The ticker is `Delay` with the first tick dropped; the default `Burst` would fire the streak's probes back-to-back after any stalled poll.
+
+`[mqtt.discovery].features` gates only the HA entity, never the poller — `[cameras.mqtt] enable_battery` is the sole knob for that, and the only one that also removes the battery entity left at "Unknown" after a give-up.
+
 PIR state (`get_pirstate()`) is a configuration query, **not** a live sensor — it changes only when explicitly set via `control/pir`. Publish once on connect, re-publish after control commands. Do NOT poll periodically.
 
 Floodlight has two aspects on separate topics:
