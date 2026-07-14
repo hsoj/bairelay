@@ -52,9 +52,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      # rust-toolchain.toml pins the version; reproducible release artefacts
+      # are defined by (commit, target triple, rustc version), so the channel
+      # must not float.
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
@@ -272,7 +274,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup show
 
       - uses: Swatinem/rust-cache@v2
         with:

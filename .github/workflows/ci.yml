@@ -47,10 +47,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: rustup default stable && rustup show
+      # No toolchain action: rustup installs the version + components pinned
+      # in rust-toolchain.toml. An action that sets RUSTUP_TOOLCHAIN would
+      # override that pin.
+      - run: rustup show
       - run: cargo fmt --all --check
 
   clippy:
@@ -60,10 +60,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - run: rustup default stable && rustup show
+      - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
 
@@ -94,8 +91,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - run: rustup default stable && rustup show
+      - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --all-targets
 
@@ -107,8 +103,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - run: rustup default stable && rustup show
+      - run: rustup show
       - uses: Swatinem/rust-cache@v2
       # Pre-built binary install — avoids the ~3-5 min `cargo install`
       # rebuild that would otherwise run on every CI invocation.

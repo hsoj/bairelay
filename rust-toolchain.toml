@@ -1,2 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned, not "stable": a floating channel lets a new clippy release turn CI
+# red with no code change. Bump this deliberately, in its own commit.
+channel = "1.94.1"
+components = ["clippy", "rustfmt"]
