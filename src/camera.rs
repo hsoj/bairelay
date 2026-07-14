@@ -1308,6 +1308,14 @@ impl CameraHandle {
 			}
 		}
 
+		// `run()` has returned ⇒ the camera is not connected. Most exit
+		// paths already land on Disconnected, but a cancel that fires
+		// while `try_connect()` is still in flight breaks out of the
+		// loop with the state left at `Connecting` — an observable lie
+		// for anything that reads `state()` after shutdown. Idempotent
+		// on the paths that already set it.
+		self.set_state(CameraState::Disconnected);
+
 		// Ensure no stream sources outlive the camera handle even on
 		// cancelled/early-exit paths (e.g. auth failure, cancellation
 		// during backoff sleep). `run_connected_session` already
@@ -2303,10 +2311,14 @@ mod tests {
 			tokio::spawn(async move { h.run().await })
 		};
 
-		// Wait for the connect attempt to start (state flips to
-		// Connecting) + fail (flips back to Disconnected) — ~1-5s on
-		// a refused-connection socket. Then cancel to break the
-		// backoff sleep.
+		// A refused connect on 127.0.0.1:1 fails in well under a
+		// millisecond, so by now the loop is parked in the 2 s backoff
+		// sleep and the cancel below exercises the
+		// `sleep_with_cancel → false` branch. On a heavily instrumented
+		// runner the connect can still be in flight instead, in which
+		// case cancel breaks out of the connect `select!` — the final
+		// assertion holds either way, because `run()` guarantees
+		// Disconnected on every exit path.
 		tokio::time::sleep(Duration::from_millis(500)).await;
 		cancel.cancel();
 		let join_outcome = tokio::time::timeout(Duration::from_secs(10), run_handle).await;
@@ -2319,6 +2331,44 @@ mod tests {
 		// Final state must be Disconnected — pinned so a future change
 		// to leave state as Connecting on cancel-during-backoff would
 		// surface here.
+		assert_eq!(handle.state(), CameraState::Disconnected);
+	}
+
+	/// Cancelling while `try_connect()` is still in flight breaks out of
+	/// the connect `select!` rather than the backoff sleep. `run()` must
+	/// still leave the camera Disconnected: otherwise anything reading
+	/// `state()` after shutdown sees a camera that claims Connecting
+	/// forever.
+	#[tokio::test]
+	async fn run_cancelled_mid_connect_still_ends_disconnected() {
+		use crate::config::test_helpers::minimal_camera_config;
+		use tokio_util::sync::CancellationToken;
+
+		let mut config = minimal_camera_config("cam-midconnect");
+		config.idle_disconnect = false;
+		// TEST-NET-1 blackholes rather than refusing, so the connect
+		// stays in flight instead of failing fast like a closed port.
+		config.address = Some("192.0.2.1:9000".to_string());
+
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::new(config, cancel.clone(), None));
+
+		let run_handle = {
+			let h = Arc::clone(&handle);
+			tokio::spawn(async move { h.run().await })
+		};
+
+		// Long enough for run() to set Connecting and enter try_connect().
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		cancel.cancel();
+
+		// Exiting well inside CONNECT_TIMEOUT (100 s) proves cancel broke
+		// the in-flight connect rather than waiting the attempt out.
+		tokio::time::timeout(Duration::from_secs(10), run_handle)
+			.await
+			.expect("cancel must break an in-flight connect, not wait for CONNECT_TIMEOUT")
+			.expect("run() task panicked");
+
 		assert_eq!(handle.state(), CameraState::Disconnected);
 	}
 
