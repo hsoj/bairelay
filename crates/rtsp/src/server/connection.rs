@@ -124,7 +124,7 @@ pub async fn handle_connection<S>(
 	// exist; once SETUP creates a session, the keepalive watchdog
 	// handles idle reaping.
 	let mut last_activity = tokio::time::Instant::now();
-	loop {
+	'conn: loop {
 		let pre_session = state.sessions.is_empty();
 		let deadline = last_activity + INITIAL_REQUEST_TIMEOUT;
 		tokio::select! {
@@ -152,41 +152,61 @@ pub async fn handle_connection<S>(
 						break;
 					}
 					Ok(_) => {
-						// Try to parse a complete RTSP request.
-						match try_consume_request(&mut buf) {
-							Ok(Some(req_bytes)) => {
-								if let Err(e) = crate::server::connection::dispatch_request(
-									&state, &req_bytes,
-								).await {
-									tracing::warn!(error = %e, "request handler error");
+						// Drain *every* complete request the read yielded, not
+						// just the first. Pipelining is legal (RFC 7826 §9.2)
+						// and a single read also coalesces whatever the peer
+						// had in flight. Handling one per read parks the rest
+						// in `buf` until the next inbound byte arrives — a
+						// client that pipelines and then blocks for all its
+						// responses deadlocks until the slow-loris arm fires,
+						// or forever once a session exists and that arm is
+						// disabled.
+						loop {
+							// Re-checked per request: a 64 KiB buffer holds
+							// thousands of minimal requests, and dispatch is
+							// not cancel-aware. Without this, shutdown waits
+							// out the whole drain.
+							if cancel.is_cancelled() {
+								tracing::debug!("connection cancelled by server shutdown");
+								break 'conn;
+							}
+							match try_consume_request(&mut buf) {
+								Ok(Some(req_bytes)) => {
+									if let Err(e) = crate::server::connection::dispatch_request(
+										&state, &req_bytes,
+									).await {
+										tracing::warn!(error = %e, "request handler error");
+										break 'conn;
+									}
+									// Refresh the rolling deadline: the
+									// connection has shown activity, so
+									// give it another full window before
+									// the slow-loris arm can fire.
+									last_activity = tokio::time::Instant::now();
+								}
+								Ok(None) => {
+									// Need more bytes. Any trailing partial
+									// request stays buffered for the next read.
+									if buf.len() > MAX_REQUEST_BYTES {
+										tracing::warn!("request buffer exceeded limit, closing");
+										break 'conn;
+									}
 									break;
 								}
-								// Refresh the rolling deadline: the
-								// connection has shown activity, so
-								// give it another full window before
-								// the slow-loris arm can fire.
-								last_activity = tokio::time::Instant::now();
-							}
-							Ok(None) => {
-								// Need more bytes.
-								if buf.len() > MAX_REQUEST_BYTES {
-									tracing::warn!("request buffer exceeded limit, closing");
-									break;
+								Err(e) => {
+									tracing::warn!(error = %e, "malformed RTSP request, closing");
+									// Send 400 Bad Request once then close.
+									let resp = crate::rtsp::message::build_response(
+										rtsp_types::StatusCode::BadRequest,
+										0,
+										&[],
+										None,
+									);
+									let mut w = writer.lock().await;
+									let _ = w.write_all(&resp).await;
+									let _ = w.flush().await;
+									break 'conn;
 								}
-							}
-							Err(e) => {
-								tracing::warn!(error = %e, "malformed RTSP request, closing");
-								// Send 400 Bad Request once then close.
-								let resp = crate::rtsp::message::build_response(
-									rtsp_types::StatusCode::BadRequest,
-									0,
-									&[],
-									None,
-								);
-								let mut w = writer.lock().await;
-								let _ = w.write_all(&resp).await;
-								let _ = w.flush().await;
-								break;
 							}
 						}
 					}

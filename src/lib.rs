@@ -11,6 +11,9 @@ pub mod config;
 pub mod grace_period;
 pub mod hassio;
 pub mod local_time;
+// Test-only: pins the log strings `tests/scripts/manual-verify.sh` greps.
+#[cfg(test)]
+mod log_capture;
 pub mod mqtt_dispatch;
 pub mod mqtt_loop;
 pub mod oneshot;

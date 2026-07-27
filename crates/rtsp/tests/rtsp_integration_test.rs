@@ -799,3 +799,66 @@ async fn extern_fallback_to_sub() {
 	drop(stream);
 	cancel.cancel();
 }
+
+// ----------------------------------------------------------------------------
+// Pipelining — several requests in one TCP write must all be answered.
+// ----------------------------------------------------------------------------
+
+/// RFC 7826 §9.2 lets a client pipeline requests. Regression guard for the
+/// read loop consuming only one request per `read()`: the remainder used to
+/// sit in the connection buffer until the *next* inbound byte, so a client
+/// that pipelined and then waited for all its responses hung.
+///
+/// Reads raw rather than reusing `read_rtsp_response` — that helper drops
+/// whatever trailed the first response in its local buffer, which is exactly
+/// the bytes this test needs to see.
+#[tokio::test]
+async fn pipelined_requests_all_receive_responses() {
+	let provider = MockProvider::new(&["cam1"]);
+	let (addr, cancel) = spawn_server_with(provider, vec![]).await;
+	let mut stream = TcpStream::connect(addr).await.unwrap();
+
+	// Three OPTIONS in a single write, so the server sees them coalesced.
+	let pipelined = format!(
+		"OPTIONS rtsp://{addr}/cam1 RTSP/1.0\r\nCSeq: 1\r\n\r\n\
+		 OPTIONS rtsp://{addr}/cam1 RTSP/1.0\r\nCSeq: 2\r\n\r\n\
+		 OPTIONS rtsp://{addr}/cam1 RTSP/1.0\r\nCSeq: 3\r\n\r\n",
+	);
+	write_request(&mut stream, pipelined.as_bytes()).await;
+
+	let mut acc: Vec<u8> = Vec::new();
+	let mut tmp = [0u8; 4096];
+	let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+	while acc.windows(9).filter(|w| *w == b"CSeq: 3\r\n").count() == 0 {
+		let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+		assert!(
+			!remaining.is_zero(),
+			"timed out with only: {}",
+			String::from_utf8_lossy(&acc)
+		);
+		let n = tokio::time::timeout(remaining, stream.read(&mut tmp))
+			.await
+			.expect("timed out awaiting pipelined responses")
+			.unwrap();
+		assert!(n > 0, "server closed mid-pipeline");
+		acc.extend_from_slice(&tmp[..n]);
+	}
+
+	let text = String::from_utf8_lossy(&acc);
+	assert_eq!(
+		text.matches("RTSP/1.0 200").count(),
+		3,
+		"expected one 200 per pipelined request, got: {text}"
+	);
+	// Responses must come back in request order — CSeq pairs each reply to
+	// its request, and a client reading sequentially relies on the ordering.
+	let order: Vec<&str> = text
+		.lines()
+		.filter(|l| l.starts_with("CSeq:"))
+		.map(str::trim)
+		.collect();
+	assert_eq!(order, ["CSeq: 1", "CSeq: 2", "CSeq: 3"]);
+
+	drop(stream);
+	cancel.cancel();
+}

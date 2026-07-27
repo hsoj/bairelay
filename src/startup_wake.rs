@@ -414,6 +414,68 @@ mod tests {
 		warm_last_frame_buffers(&cameras, cancel).await;
 	}
 
+	/// `tests/scripts/manual-verify.sh` polls the daemon log for
+	/// `Startup wake cycle complete` before it starts probing, because a
+	/// still-running warm cycle holds StreamSources that would be torn
+	/// down under a connecting client. Reword the marker and the script
+	/// silently falls through its 60 s wait into a racy probe matrix.
+	///
+	/// Asserted on the completion path specifically: the early
+	/// `cameras.is_empty()` return deliberately skips the marker, so a
+	/// refactor that hoisted the log above the JoinSet drain would let
+	/// the script proceed while cameras are still warming.
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn startup_wake_completion_logs_live_verify_marker() {
+		use crate::camera::CameraHandle;
+		use crate::config::test_helpers::minimal_camera_config;
+		use std::collections::HashMap;
+
+		crate::log_capture::install();
+
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::new(
+			minimal_camera_config("cam-marker-wake"),
+			cancel.clone(),
+			None,
+		));
+		let mut map = HashMap::new();
+		map.insert("cam-marker-wake".to_string(), handle);
+		let cameras = Arc::new(map);
+
+		warm_last_frame_buffers(&cameras, cancel).await;
+
+		// "Starting startup wake cycle" carries the camera count and is
+		// the only marker with a per-run discriminator; the completion
+		// line has no fields, so pin it via the count field on the open
+		// and then assert the completion line exists at all. Only this
+		// function emits it.
+		crate::log_capture::assert_marker("Starting startup wake cycle", "cameras=1");
+		assert!(
+			!crate::log_capture::lines_containing("Startup wake cycle complete").is_empty(),
+			"manual-verify.sh greps 'Startup wake cycle complete'; see src/log_capture.rs"
+		);
+	}
+
+	/// The empty-map early return must NOT claim completion — the script
+	/// treats the marker as "all cameras warmed".
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn startup_wake_empty_map_does_not_log_completion_marker() {
+		use crate::camera::CameraHandle;
+		use std::collections::HashMap;
+
+		crate::log_capture::install();
+		let before = crate::log_capture::lines_containing("Startup wake cycle complete").len();
+
+		let cameras: Arc<HashMap<String, Arc<CameraHandle>>> = Arc::new(HashMap::new());
+		warm_last_frame_buffers(&cameras, CancellationToken::new()).await;
+
+		assert_eq!(
+			crate::log_capture::lines_containing("Startup wake cycle complete").len(),
+			before,
+			"empty-map return must not emit the completion marker"
+		);
+	}
+
 	/// Drive `warm_one` through the frame-wait loop to its timeout
 	/// branch: Connected state + pre-registered inert `StreamSource`
 	/// lets `stream_source()` succeed via the fast path, then the
