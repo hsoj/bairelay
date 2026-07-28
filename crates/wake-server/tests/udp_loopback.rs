@@ -407,9 +407,10 @@ async fn stale_uid_reads_as_unknown() {
 		heartbeat_ms: 1000,
 		stale_after_ms: 2000,
 	};
+	let registry = bairelay_wake_server::make_registry();
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
-		bairelay_wake_server::make_registry(),
+		registry.clone(),
 		middleman,
 		register,
 		cancel.clone(),
@@ -429,11 +430,20 @@ async fn stale_uid_reads_as_unknown() {
 	)
 	.unwrap();
 	cam.send_to(&hb, reg_addr).await.unwrap();
-	// Yield so the register loop has a real chance to record the
-	// heartbeat before we advance virtual time past the TTL.
-	for _ in 0..20 {
+	// Yield-poll until the register loop has recorded the heartbeat. A
+	// fixed yield count races the upsert against the `advance` below —
+	// the runtime only polls the I/O driver every ~61 task polls while a
+	// task keeps yielding, so a late upsert lands *after* the advance,
+	// timestamps the entry at virtual now, and reads back as fresh.
+	let mut registered = false;
+	for _ in 0..10_000 {
+		if registry.len() == 1 {
+			registered = true;
+			break;
+		}
 		tokio::task::yield_now().await;
 	}
+	assert!(registered, "heartbeat was not recorded within 10000 yields");
 
 	// Advance virtual time past the TTL.
 	tokio::time::advance(Duration::from_secs(10)).await;
@@ -466,14 +476,14 @@ async fn stale_uid_reads_as_unknown() {
 	// fires before real UDP I/O completes. Use a yield-driven poll instead.
 	let mut buf = vec![0u8; 4096];
 	let mut got = None;
-	for _ in 0..200 {
+	for _ in 0..10_000 {
 		if let Ok((n, _)) = client.try_recv_from(&mut buf) {
 			got = Some(n);
 			break;
 		}
 		tokio::task::yield_now().await;
 	}
-	let n = got.expect("R2cCr reply did not arrive within 200 yields");
+	let n = got.expect("R2cCr reply did not arrive within 10000 yields");
 	let (_, p) = decode_discovery(&buf[..n]).unwrap();
 	assert!(matches!(p, UdpXml::R2cCr(R2cCr { rsp: -1, .. })));
 

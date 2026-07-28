@@ -106,23 +106,6 @@ pub(crate) fn assert_marker(marker: &str, discriminator: &str) {
 	);
 }
 
-/// Poll until [`assert_marker`]'s condition holds, or panic after
-/// `attempts` yields. For markers emitted from a task the test does not
-/// await — the RTSP accept loop logs before it is cancellable.
-pub(crate) async fn await_marker(marker: &str, discriminator: &str, attempts: u32) {
-	for _ in 0..attempts {
-		if lines_containing(discriminator)
-			.iter()
-			.any(|line| line.contains(marker))
-		{
-			return;
-		}
-		tokio::task::yield_now().await;
-		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-	}
-	assert_marker(marker, discriminator);
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;

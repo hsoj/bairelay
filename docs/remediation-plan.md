@@ -14,7 +14,8 @@ Opened 2026-07-26 from a full-workspace review. Static structure lives in
 
 The project's own merge gate — `cargo fmt --all --check`, `cargo clippy
 --all-targets -- -D warnings`, `cargo test`, `cargo tarpaulin` — was green on
-`fmt` and `clippy` at the time of review, and is red on `test` (see P0-1).
+`fmt` and `clippy` at the time of review, and red on `test` (P0-1, since
+landed; all four green as of 2026-07-27).
 
 This is above-average Rust. No `unsafe` in production paths, no unbounded
 channels, no lock guards held across `.await`, `thiserror` in libraries and
@@ -38,25 +39,6 @@ Effort: **S** under an hour · **M** half a day · **L** multi-day.
 ---
 
 ## P0 — Blocking or actively exposed
-
-### P0-1. The merge gate is red on `main` · S
-
-`crates/core/src/bc_protocol/connection/discovery.rs:3260` —
-`discoverer_reader_survives_same_tid_flood` fails deterministically (3/3 runs,
-and on a pristine tree with all in-flight changes stashed).
-
-First because it disables the entire quality apparatus: `cargo test` fails, and
-`cargo tarpaulin` aborts with `Error: "Test failed during run"`, so the
-`fail-under = 87` coverage floor is currently unenforced. Everything below lands
-into a repo where the gate cannot confirm it.
-
-The assertion message — *"rx_other timed out — reader is parked, regression!"* —
-says the discovery reader is blocking on a full channel. That is either a real
-regression in the non-blocking-send path or a test that has become
-timing-sensitive. Diagnose before assuming which.
-
-Related: local `cargo-tarpaulin` is 0.35.4 while CI pins 0.37.0. Align them or
-the floor means different things in the two places.
 
 ### P0-2. Basic auth offered over plaintext RTSP · S
 
@@ -320,7 +302,7 @@ independently reviewable and the gate is meaningful when it runs.
 
 | # | Commit | Items | Why grouped |
 |---|---|---|---|
-| 1 | Fix the discovery flood test | P0-1 | Nothing below is verifiable until the gate is green |
+| 1 | ~~Fix the discovery flood test~~ *(landed 2026-07-27)* | P0-1 | Nothing below is verifiable until the gate is green |
 | 2 | RTSP auth hardening | P0-2, P1-3 | Same function; one security review |
 | 3 | Poison-recovery sweep + `src/sync.rs` | P0-3, P3-1 | The move is a prerequisite for the sweep |
 | 4 | CI: cargo-deny, MSRV job, nightly fuzz smoke | P1-1, P1-2, P1-7 | Workflow-only, no source risk |
@@ -339,6 +321,31 @@ releases.
 ---
 
 ## Landed
+
+### P0-1: merge gate green again — 2026-07-27
+
+Three separate reddening causes, all test-side; no production code changed.
+
+- `discoverer_reader_survives_same_tid_flood` — the reader was never parked.
+  Trace logging showed it healthy on the `try_send` drop path; the probe
+  datagram was being dropped by the *kernel* because the 200-packet flood
+  overruns the socket receive buffer (~167 × ~1.2 KB skb truesize fills a
+  212992-byte `rmem_default`, the WSL2 default and cap). Fixed by retrying the
+  `tid_other` probe on a 100 ms interval inside the T-bounded timeout —
+  verified to still fail against a reverted `send().await` reader, so the
+  regression net holds.
+- `stale_uid_reads_as_unknown` (wake-server) — under paused time the fixed
+  20-yield wait raced the heartbeat upsert against `advance(10s)`: the runtime
+  only polls the I/O driver every ~61 task polls while a task keeps yielding,
+  so the upsert landed after the advance and the entry read back fresh
+  (`rsp: 0`, wake burst to a "stale" camera). Now yield-polls the registry
+  handle until the heartbeat is recorded before advancing; reply wait bound
+  raised 200 → 10 000 yields (arrival observed as late as 477).
+- `src/log_capture.rs::await_marker` — landed unused in the P1-4 partial and
+  failed `clippy -D warnings` (dead_code) on lib-test. Deleted; the remaining
+  P1-4 marker tests can restore it from history when they actually call it.
+
+Local `cargo-tarpaulin` aligned to CI's 0.37.0 pin.
 
 ### RTSP pipelined requests stalled the connection — 2026-07-26
 

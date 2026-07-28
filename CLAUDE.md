@@ -82,6 +82,8 @@ Beyond `cargo test` there are two on-demand rigs, not wired into CI: `tests/fixt
 
 ## Conventions
 
+`docs/rust-practices.md` is the standing language-and-design reference: numbered MUST/SHOULD rules for type-driven design, errors, traits, async/cancellation, testing, plus the design patterns (newtype, typestate, RAII, sans-IO, ports-and-adapters, DDD tactical) and an anti-pattern catalogue. `docs/rust-code-structure.md` is its structural companion: module→crate→workspace growth path, hexagonal/DDD/vertical-slice architecture in Rust, and a calibration table for how much structure a project warrants. Both are repo-independent. Read them before designing a new module, trait, or crate boundary; cite rule IDs (`TY-1`, `AS-4`) when justifying a design choice. The rules below win where they disagree.
+
 - **Hard tabs**, enforced by `rustfmt.toml` (`hard_tabs = true`).
 - **Comments explain *why*, not *what*.** Default to none; add one only for a hidden constraint, workaround, or subtle invariant. Never reference the current task/PR. The existing comments in `Cargo.toml` and the workflows are the house style — dense, load-bearing, explaining a decision.
 - **No speculative robustness**: don't add error handling, fallbacks, or feature flags for situations that can't occur. Trust internal code; validate at system boundaries only.

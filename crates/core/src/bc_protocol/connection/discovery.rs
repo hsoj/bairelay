@@ -3238,28 +3238,38 @@ mod internal_tests {
 
 		// Round 2: fire the flood. Use blocking send_to so the kernel
 		// queues each datagram; rx_flood is at cap (10) within the
-		// first ~10 packets and the rest must drop on the reader's
-		// try_send Full path.
+		// first ~10 packets and the rest drop either on the reader's
+		// try_send Full path or in the kernel once the socket receive
+		// buffer fills.
 		let flood = make_datagram(TID_FLOOD);
 		for _ in 0..FLOOD_COUNT {
 			peer.send_to(&flood, d_addr).await.unwrap();
 		}
 
-		// Round 3: one tid_other datagram. The reader must service
-		// this within a generous timeout despite the still-undrained
-		// tid_flood subscriber.
+		// Round 3: probe with tid_other datagrams, retried on a short
+		// interval. The flood legitimately overruns the discoverer's
+		// socket receive buffer (200 × ~1.2 KB skb truesize exceeds a
+		// 212992-byte rmem_default), so any single probe sent while the
+		// kernel queue is still full is dropped before the reader can
+		// see it. Retrying distinguishes the failure modes: a healthy
+		// reader picks up the first probe that survives the queue,
+		// while a parked reader never delivers any probe and the outer
+		// T-bounded timeout still catches the `send().await`
+		// regression. rx_flood stays undrained throughout.
 		let other = make_datagram(TID_OTHER);
-		peer.send_to(&other, d_addr).await.unwrap();
-
-		// rx_other must yield within T even though we never drained
-		// rx_flood. With a blocking reader this `recv` would never
-		// fire because the reader would still be parked on the
-		// 11th tid_flood `send().await`.
-		let got = t_timeout(T, rx_other.recv())
-			.await
-			.expect("rx_other timed out — reader is parked, regression!")
-			.expect("rx_other channel closed")
-			.expect("rx_other delivered an error");
+		let got = t_timeout(T, async {
+			loop {
+				peer.send_to(&other, d_addr).await.unwrap();
+				match tokio::time::timeout(Duration::from_millis(100), rx_other.recv()).await {
+					Ok(received) => break received,
+					Err(_) => continue,
+				}
+			}
+		})
+		.await
+		.expect("rx_other timed out — reader is parked, regression!")
+		.expect("rx_other channel closed")
+		.expect("rx_other delivered an error");
 		match got.0.payload {
 			UdpXml::C2dHb(_) => {}
 			other => panic!("unexpected rx_other payload: {other:?}"),
