@@ -224,6 +224,7 @@ pub fn run_check_config_to<W1: std::io::Write, W2: std::io::Write>(
 	crate::config::warn_neolink_compat_fields(&config);
 	crate::config::warn_wire_debug_enabled(&config);
 	crate::config::warn_idle_timeout_below_prune_floor(&config);
+	crate::config::warn_users_without_tls(&config);
 	// Success — short summary so operators get a quick affirmation.
 	let summary = format!(
 		"config OK: {} camera(s), bind {}:{}\n",

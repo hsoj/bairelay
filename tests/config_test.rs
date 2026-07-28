@@ -1355,6 +1355,39 @@ fn warn_idle_timeout_below_prune_floor_silent_when_above_prune() {
 	warn_idle_timeout_below_prune_floor(&cfg);
 }
 
+// ── warn_users_without_tls covers both branches ─────────────────────
+
+#[test]
+fn warn_users_without_tls_fires_for_plaintext_users() {
+	use bairelay::config::{warn_users_without_tls, UserConfig};
+	let cfg = Config {
+		users: vec![UserConfig {
+			name: "alice".into(),
+			pass: "pw".into(),
+		}],
+		certificate: None,
+		..Default::default()
+	};
+	// Warning branch: users configured, no TLS listener.
+	warn_users_without_tls(&cfg);
+}
+
+#[test]
+fn warn_users_without_tls_silent_with_certificate_or_no_users() {
+	use bairelay::config::{warn_users_without_tls, UserConfig};
+	let with_tls = Config {
+		users: vec![UserConfig {
+			name: "alice".into(),
+			pass: "pw".into(),
+		}],
+		certificate: Some("/tmp/cert.pem".into()),
+		..Default::default()
+	};
+	warn_users_without_tls(&with_tls);
+	let no_users = Config::default();
+	warn_users_without_tls(&no_users);
+}
+
 // ── warn_deprecated_pause_fields runs without panicking ────
 
 #[test]

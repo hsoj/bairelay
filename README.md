@@ -246,7 +246,7 @@ Set `certificate = "/path/to/fullchain-and-key.pem"` at the top level to enable 
 
 Bairelay assumes a **trusted LAN** as its deployment context. That assumption shows up in a few places worth calling out:
 
-- **RTSP authentication is opt-in.** Without a `[[users]]` block, the RTSP server accepts anonymous connections. Add a `[[users]]` with name + pass (and optional per-camera `permitted_users` allow-list) to require Digest / Basic auth. Digest enforces a 5-minute nonce TTL and binds the digest URI to the request line per RFC 7616; Basic is offered alongside on plain transport for drop-in compatibility with permissive clients but is, of course, plaintext.
+- **RTSP authentication is opt-in.** Without a `[[users]]` block, the RTSP server accepts anonymous connections. Add a `[[users]]` with name + pass (and optional per-camera `permitted_users` allow-list) to require Digest / Basic auth. Digest enforces a 5-minute nonce TTL and binds the digest URI to the request line per RFC 7616; Basic is offered alongside only on the TLS (`rtsps://`) listener — a plaintext connection never offers or accepts it, since that would broadcast the password to the network. `check-config` warns when `[[users]]` is set without a `certificate`.
 - **Push listener trusts source IP.** Any TCP connection from a registered camera's IP is treated as motion. This is correct on a trusted LAN behind NAT, and the listener intentionally rejects when `[push_listener]` is enabled without `[wake_server] enable = true` (the registry would otherwise be empty).
 
 ### Cloud ("account device") cameras

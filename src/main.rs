@@ -13,7 +13,7 @@ use bairelay::cli::{Cli, Command};
 use bairelay::cli_convert::{should_emit_ansi, verbosity_env_filter};
 use bairelay::config::{
 	warn_deprecated_pause_fields, warn_idle_timeout_below_prune_floor, warn_neolink_compat_fields,
-	warn_wire_debug_enabled,
+	warn_users_without_tls, warn_wire_debug_enabled,
 };
 use bairelay::local_time::LocalTimer;
 use bairelay::mqtt_dispatch::dispatch_control;
@@ -122,6 +122,9 @@ async fn async_main() -> Result<()> {
 	// than the global `stream_prune_grace_secs`; the runtime clamps
 	// silently, this warning makes the override visible.
 	warn_idle_timeout_below_prune_floor(&config);
+	// Surface `[[users]]` without TLS — auth then runs over plaintext
+	// and Digest-MD5 is offline-crackable by an on-LAN observer.
+	warn_users_without_tls(&config);
 
 	info!(
 		cameras = config.cameras.len(),

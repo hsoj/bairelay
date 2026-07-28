@@ -389,7 +389,7 @@ pub struct CameraConfig {
 
 	/// Per-camera RTSP access control allowlist. Empty means "any
 	/// authenticated user (or anonymous, when no auth is configured)".
-	/// Task 24 will add validation that each entry matches a globally
+	/// `validate_config` rejects entries that don't match a globally
 	/// configured `[[users]]` name.
 	#[serde(default)]
 	pub permitted_users: Vec<String>,
@@ -999,6 +999,19 @@ pub fn warn_wire_debug_enabled(config: &Config) {
 				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=info,bairelay_neolink_core::bc::de=trace to see them — the leading info, is required or the console goes silent); they include credential hashes — do not share these logs publicly"
 			);
 		}
+	}
+}
+
+/// Warn when `[[users]]` is configured without a TLS listener. The
+/// plaintext RTSP listener never offers or accepts Basic auth, so
+/// clients fall back to Digest — but Digest-MD5 is still offline-
+/// crackable by anyone who can capture the exchange, and the default
+/// bind is `0.0.0.0`. Called at startup and from `check-config`.
+pub fn warn_users_without_tls(config: &Config) {
+	if !config.users.is_empty() && config.certificate.is_none() {
+		tracing::warn!(
+			"config: [[users]] is set but certificate is not — RTSP auth runs over plaintext, so Basic auth is disabled and clients must use Digest (MD5), which an on-LAN observer can capture and crack offline. Set certificate to enable the rtsps:// listener"
+		);
 	}
 }
 

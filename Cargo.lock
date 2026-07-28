@@ -288,6 +288,7 @@ dependencies = [
  "rtsp-types",
  "rustls",
  "sdp-types",
+ "subtle",
  "thiserror 2.0.19",
  "tokio",
  "tokio-rustls",

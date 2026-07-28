@@ -578,16 +578,22 @@ async fn authenticate(
 	};
 	let nonce = state.current_nonce.lock().await.clone();
 	let Some(authz) = parsed.authorization.as_deref() else {
-		// No credentials provided → challenge.
-		return AuthOutcome::Challenge(vec![
-			(
-				"WWW-Authenticate",
-				build_digest_challenge(&state.realm, &nonce, false),
-			),
-			("WWW-Authenticate", build_basic_challenge(&state.realm)),
-		]);
+		// No credentials provided → challenge. Basic is offered only on
+		// TLS connections — challenging with it over plaintext invites
+		// the client to broadcast the password in cleartext.
+		let mut challenges = vec![(
+			"WWW-Authenticate",
+			build_digest_challenge(&state.realm, &nonce, false),
+		)];
+		if state.is_tls {
+			challenges.push(("WWW-Authenticate", build_basic_challenge(&state.realm)));
+		}
+		return AuthOutcome::Challenge(challenges);
 	};
-	if authz.to_ascii_lowercase().starts_with("basic ") {
+	// Basic over plaintext is never verified — it falls through to the
+	// digest path, fails as an unknown scheme, and the client is
+	// re-challenged with Digest only.
+	if state.is_tls && authz.to_ascii_lowercase().starts_with("basic ") {
 		match verify_basic(authz, &state.users) {
 			Ok(user) => return AuthOutcome::Ok(user.to_string()),
 			Err(AuthError::BadCredentials) => return AuthOutcome::Forbidden,
@@ -1296,6 +1302,14 @@ mod tests {
 		provider: Arc<dyn crate::provider::StreamProvider>,
 		users: Vec<UserCred>,
 	) -> (Arc<ConnectionState>, tokio::io::DuplexStream) {
+		make_state_with_users_tls(provider, users, false)
+	}
+
+	fn make_state_with_users_tls(
+		provider: Arc<dyn crate::provider::StreamProvider>,
+		users: Vec<UserCred>,
+		is_tls: bool,
+	) -> (Arc<ConnectionState>, tokio::io::DuplexStream) {
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let writer: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>> =
 			Arc::new(Mutex::new(Box::new(server)));
@@ -1309,7 +1323,7 @@ mod tests {
 			server_bind_ip: std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
 			peer_ip: std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
 			local_ip: std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
-			is_tls: false,
+			is_tls,
 			writer,
 		});
 		(state, client)
@@ -1628,6 +1642,10 @@ mod tests {
 		assert!(head.contains("WWW-Authenticate"));
 	}
 
+	// Basic is verified only on TLS connections, so the Basic-path tests
+	// run against a TLS state with rtsps:// URIs (the scheme guard
+	// rejects rtsp:// on a TLS transport before auth runs).
+
 	#[tokio::test]
 	async fn describe_bad_basic_creds_returns_403() {
 		let provider = MockProv::with_cameras(&["cam1"]);
@@ -1635,11 +1653,11 @@ mod tests {
 			name: "alice".into(),
 			password: "pw".into(),
 		}];
-		let (state, mut client) = make_state_with_users(provider, users);
+		let (state, mut client) = make_state_with_users_tls(provider, users, true);
 		use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 		let bad = B64.encode("alice:wrong");
 		let req = format!(
-			"DESCRIBE rtsp://x/cam1/main RTSP/1.0\r\nCSeq: 4\r\nAuthorization: Basic {bad}\r\n\r\n"
+			"DESCRIBE rtsps://x/cam1/main RTSP/1.0\r\nCSeq: 4\r\nAuthorization: Basic {bad}\r\n\r\n"
 		);
 		dispatch_request(&state, req.as_bytes()).await.unwrap();
 		let (head, _) = read_response(&mut client).await;
@@ -1653,6 +1671,27 @@ mod tests {
 			name: "alice".into(),
 			password: "pw".into(),
 		}];
+		let (state, mut client) = make_state_with_users_tls(provider, users, true);
+		use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+		let tok = B64.encode("alice:pw");
+		let req = format!(
+			"DESCRIBE rtsps://x/cam1/main RTSP/1.0\r\nCSeq: 4\r\nAuthorization: Basic {tok}\r\n\r\n"
+		);
+		dispatch_request(&state, req.as_bytes()).await.unwrap();
+		let (head, _) = read_response(&mut client).await;
+		assert_eq!(status_of(&head), 200);
+	}
+
+	#[tokio::test]
+	async fn describe_basic_creds_over_plaintext_rechallenged_without_basic() {
+		// Correct credentials, wrong transport: over plaintext the Basic
+		// header must never be verified — 401, and the re-challenge must
+		// not offer Basic either.
+		let provider = MockProv::with_cameras(&["cam1"]);
+		let users = vec![UserCred {
+			name: "alice".into(),
+			password: "pw".into(),
+		}];
 		let (state, mut client) = make_state_with_users(provider, users);
 		use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 		let tok = B64.encode("alice:pw");
@@ -1661,7 +1700,11 @@ mod tests {
 		);
 		dispatch_request(&state, req.as_bytes()).await.unwrap();
 		let (head, _) = read_response(&mut client).await;
-		assert_eq!(status_of(&head), 200);
+		assert_eq!(status_of(&head), 401);
+		assert!(
+			!head.to_ascii_lowercase().contains("basic realm="),
+			"plaintext re-challenge must not offer Basic: {head}"
+		);
 	}
 
 	#[tokio::test]
@@ -1751,11 +1794,11 @@ mod tests {
 			name: "alice".into(),
 			password: "pw".into(),
 		}];
-		let (state, mut client) = make_state_with_users(provider, users);
+		let (state, mut client) = make_state_with_users_tls(provider, users, true);
 		use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 		let bad = B64.encode("alice:bad");
 		let req = format!(
-			"SETUP rtsp://x/cam1/main/trackID=0 RTSP/1.0\r\nCSeq: 5\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\nAuthorization: Basic {bad}\r\n\r\n"
+			"SETUP rtsps://x/cam1/main/trackID=0 RTSP/1.0\r\nCSeq: 5\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\nAuthorization: Basic {bad}\r\n\r\n"
 		);
 		dispatch_request(&state, req.as_bytes()).await.unwrap();
 		let (head, _) = read_response(&mut client).await;

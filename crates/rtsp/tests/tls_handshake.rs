@@ -23,6 +23,7 @@ use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 
 use bairelay_rtsp::provider::{StreamError, StreamProvider, SubscriptionHandle};
+use bairelay_rtsp::rtsp::auth::UserCred;
 use bairelay_rtsp::server::{ClientAuthMode, RtspServer, ServerConfig, TlsConfig};
 use bairelay_rtsp::url::StreamKind;
 
@@ -94,6 +95,13 @@ fn make_pki() -> Pki {
 }
 
 async fn spawn_tls_server(tls: TlsConfig) -> (SocketAddr, CancellationToken) {
+	spawn_tls_server_with_users(tls, vec![]).await
+}
+
+async fn spawn_tls_server_with_users(
+	tls: TlsConfig,
+	users: Vec<UserCred>,
+) -> (SocketAddr, CancellationToken) {
 	// Pick a free loopback port via probe, drop, rebind. The window is
 	// small enough that on practical CI it works first try; fixture-replay
 	// uses the same pattern.
@@ -107,7 +115,7 @@ async fn spawn_tls_server(tls: TlsConfig) -> (SocketAddr, CancellationToken) {
 	let cfg = ServerConfig {
 		bind: addr,
 		realm: "tls-test".to_string(),
-		users: vec![],
+		users,
 		tls: Some(tls),
 		max_connections: None,
 	};
@@ -385,6 +393,83 @@ async fn require_mode_accepts_valid_client_cert() {
 	assert!(
 		res.is_ok(),
 		"handshake with valid client cert must succeed: {res:?}"
+	);
+
+	cancel.cancel();
+}
+
+/// Send one RTSP request over the TLS stream and read the response head
+/// (through the blank line). Panics on timeout or EOF before the head
+/// completes — good enough for single-request assertions.
+async fn tls_roundtrip<S>(stream: &mut S, request: &str) -> String
+where
+	S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+	stream.write_all(request.as_bytes()).await.unwrap();
+	let mut buf = Vec::new();
+	let mut tmp = [0u8; 1024];
+	loop {
+		let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut tmp))
+			.await
+			.expect("timeout reading RTSP response over TLS")
+			.expect("read error");
+		assert!(n > 0, "EOF before response head completed");
+		buf.extend_from_slice(&tmp[..n]);
+		if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+			return String::from_utf8_lossy(&buf).into_owned();
+		}
+	}
+}
+
+#[tokio::test]
+async fn tls_connection_offers_and_accepts_basic_auth() {
+	// The counterpart to the plaintext test in rtsp_integration_test.rs:
+	// on a TLS connection the password is protected in transit, so the
+	// 401 challenge must offer Basic and a Basic header must be verified.
+	install_crypto();
+	let pki = make_pki();
+	let tls = TlsConfig::build(pki.server_chain, pki.server_key, ClientAuthMode::None)
+		.expect("build TlsConfig");
+	let users = vec![UserCred {
+		name: "alice".into(),
+		password: "wonderland".into(),
+	}];
+	let (addr, cancel) = spawn_tls_server_with_users(tls, users).await;
+
+	let connector = TlsConnector::from(make_client_config(&pki.ca_root_store));
+	let tcp = TcpStream::connect(addr).await.unwrap();
+	let server_name = ServerName::try_from("localhost").unwrap();
+	let mut stream = connector.connect(server_name, tcp).await.unwrap();
+
+	// 1. DESCRIBE without credentials → 401 offering Basic (and Digest).
+	let head = tls_roundtrip(
+		&mut stream,
+		"DESCRIBE rtsps://localhost/cam1 RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n",
+	)
+	.await;
+	assert!(head.contains("401"), "expected 401 challenge: {head}");
+	let lower = head.to_ascii_lowercase();
+	assert!(
+		lower.contains("basic realm="),
+		"TLS 401 must offer Basic: {head}"
+	);
+	assert!(
+		lower.contains("digest realm="),
+		"TLS 401 must still offer Digest: {head}"
+	);
+
+	// 2. DESCRIBE with valid Basic creds → authenticated. EmptyProvider
+	// then reports the camera as unknown, so 404 (not 401/403) proves
+	// verify_basic accepted the credentials. base64("alice:wonderland").
+	let head = tls_roundtrip(
+		&mut stream,
+		"DESCRIBE rtsps://localhost/cam1 RTSP/1.0\r\nCSeq: 2\r\nAuthorization: Basic YWxpY2U6d29uZGVybGFuZA==\r\nAccept: application/sdp\r\n\r\n",
+	)
+	.await;
+	assert!(
+		!head.contains("401") && !head.contains("403"),
+		"valid Basic over TLS must authenticate: {head}"
 	);
 
 	cancel.cancel();

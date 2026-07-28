@@ -62,7 +62,7 @@ Pure-Rust RTSP server:
 - AAC (RFC 3640 AU-hbr) and G.711 µ-law (RFC 3551 PT 0) audio.
 - ADPCM → G.711 transcode with 16 → 8 kHz resample.
 - TCP-interleaved transport (RTP-over-RTSP) and UDP-unicast transport.
-- Per-session keepalive watchdog; digest auth with 5 min nonce TTL + RFC 7616 §3.4 URI binding; basic auth on plain transport for drop-in compat.
+- Per-session keepalive watchdog; digest auth with 5 min nonce TTL + RFC 7616 §3.4 URI binding; basic auth offered and verified only on TLS connections (plaintext would broadcast the password).
 - 30 s slow-loris timer on every fresh connection (disarmed once a complete request dispatches).
 - `max_connections` semaphore (default unlimited at the crate boundary, `Some(256)` set by the binary) caps concurrent client handlers.
 - `Content-Length` capped at the request buffer maximum (64 KiB) with `checked_add` arithmetic.

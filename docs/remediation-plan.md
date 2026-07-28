@@ -40,23 +40,6 @@ Effort: **S** under an hour · **M** half a day · **L** multi-day.
 
 ## P0 — Blocking or actively exposed
 
-### P0-2. Basic auth offered over plaintext RTSP · S
-
-`crates/rtsp/src/server/connection.rs:587,591`
-
-`authenticate()` unconditionally emits a `WWW-Authenticate: Basic` challenge and
-unconditionally accepts a `Basic` header. `ConnectionState::is_tls` (`:48`)
-already exists and is consulted for the scheme-mismatch defence at `:320` — it
-is simply not consulted here.
-
-Compounding default: `default_bind_addr` is `"0.0.0.0"` (`src/config.rs:620`)
-and no config rule requires TLS when `[[users]]` is set. The default deployment
-therefore broadcasts the RTSP password in cleartext to anything on the LAN
-segment.
-
-Fix: gate both the challenge and `verify_basic` on `state.is_tls`; add a
-`check-config` warning when `users` is non-empty and `certificate` is unset.
-
 ### P0-3. Poison-panic cascade in shared RTSP state · M
 
 50 sites. Distribution:
@@ -108,18 +91,6 @@ also stops P2-4 from regressing.
 MSRV claim is unfalsified and will drift the first time someone uses a 1.94 API.
 Add a CI job that builds with the declared MSRV, or drop the claim.
 
-### P1-3. Non-constant-time credential comparison · S
-
-`crates/rtsp/src/rtsp/auth.rs:50` (`u.password == pass`) and `:264`
-(`expected.eq_ignore_ascii_case(response)`). Both paths also leak username
-existence by early exit — digest only computes the expensive hash when the
-username matches.
-
-Fix: `subtle::ConstantTimeEq`; compute against a dummy credential on username
-miss. Ranked below P0-2 because exploiting timing over a LAN against MD5 hex is
-impractical — it is here because it is cheap and P0-2 puts you in this file
-anyway.
-
 ### P1-4. Live-verify log-marker contract is unpinned · S — *partially landed*
 
 `tests/scripts/manual-verify.sh` is the live-hardware gate for the RTSP path,
@@ -145,15 +116,6 @@ the empty-map early return does *not* falsely claim completion.
 Remaining: the two `src/camera.rs` lifecycle markers, and `RTSP server
 listening` — the latter needs either a `tracing-subscriber` dev-dependency on
 `crates/rtsp` or a ~30-line bare `Subscriber` impl to stay dependency-free.
-
-### P1-5. `permitted_users` accepts names that do not exist · S
-
-`src/config.rs:392`, `src/camera_provider.rs:70`. Both carry the comment *"Task
-24 will add validation that the listed names exist in the global `[[users]]`
-table"* — never added.
-
-Fails closed: a typo makes the camera unwatchable rather than public. So this is
-a config footgun, not a vulnerability. `check-config` should reject it.
 
 ### P1-6. Stale `Server:` header · S
 
@@ -303,11 +265,11 @@ independently reviewable and the gate is meaningful when it runs.
 | # | Commit | Items | Why grouped |
 |---|---|---|---|
 | 1 | ~~Fix the discovery flood test~~ *(landed 2026-07-27)* | P0-1 | Nothing below is verifiable until the gate is green |
-| 2 | RTSP auth hardening | P0-2, P1-3 | Same function; one security review |
+| 2 | ~~RTSP auth hardening~~ *(landed 2026-07-27)* | P0-2, P1-3 | Same function; one security review |
 | 3 | Poison-recovery sweep + `src/sync.rs` | P0-3, P3-1 | The move is a prerequisite for the sweep |
 | 4 | CI: cargo-deny, MSRV job, nightly fuzz smoke | P1-1, P1-2, P1-7 | Workflow-only, no source risk |
 | 5 | Live-verify marker contract | P1-4 | Finish the two camera markers + the RTSP one |
-| 6 | Config validation + version literal | P1-5, P1-6 | Both operator-facing correctness |
+| 6 | Version literal | ~~P1-5~~ (already fixed), P1-6 | Operator-facing correctness |
 | 7 | `[workspace.lints]` + doc sweep | P2-1 | Large but mechanical; gates 8 |
 | 8 | `non_exhaustive`, `must_use`, `Box::pin` | P2-2, P2-3, P2-5 | Enforced by 7; one semver-review commit |
 | 9 | `rand` 0.9 migration | P2-4 | Isolated, touches three crates |
@@ -321,6 +283,33 @@ releases.
 ---
 
 ## Landed
+
+### P0-2 + P1-3: RTSP auth hardening — 2026-07-27
+
+- Basic auth is now gated on `ConnectionState::is_tls` at both ends of
+  `authenticate()`: the 401 challenge only offers `Basic` on a TLS connection,
+  and a `Basic` header volunteered over plaintext is never verified — it falls
+  through to the digest path, fails as an unknown scheme, and the client is
+  re-challenged with Digest only. Covered at three levels: unit
+  (`describe_basic_creds_over_plaintext_rechallenged_without_basic`), plaintext
+  integration (`plaintext_auth_never_offers_or_accepts_basic`), and TLS
+  integration (`tls_connection_offers_and_accepts_basic_auth`).
+- `verify_basic` and `verify_digest` now use `subtle::ConstantTimeEq` with no
+  early exit; digest computes the MD5 response for every configured user
+  regardless of username match, so response time no longer distinguishes
+  "user exists" from "user unknown". `subtle` was already in-tree via rustls.
+- New `warn_users_without_tls` fires from both daemon startup and
+  `check-config` when `[[users]]` is set without `certificate`.
+- README + `docs/architecture.md` updated (both described the old
+  Basic-on-plaintext behaviour as intentional).
+
+### P1-5: was already fixed — 2026-07-27
+
+`validate_config` (src/config.rs:1344) has rejected `permitted_users` entries
+that match no `[[users]]` name since before the review, with tests
+(`permitted_users_unknown_user_is_rejected`). The review was misled by the two
+stale future-tense *"Task 24 will add validation"* comments, which are now
+corrected (along with the adjacent corrupted `§3.3` comment from P3-4's list).
 
 ### P0-1: merge gate green again — 2026-07-27
 

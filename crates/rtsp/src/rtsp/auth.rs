@@ -2,6 +2,7 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 /// Errors produced while validating an `Authorization` header.
@@ -46,12 +47,18 @@ pub fn verify_basic<'a>(authz: &str, users: &'a [UserCred]) -> Result<&'a str, A
 		.map_err(|_| AuthError::Malformed)?;
 	let s = std::str::from_utf8(&decoded).map_err(|_| AuthError::Malformed)?;
 	let (user, pass) = s.split_once(':').ok_or(AuthError::Malformed)?;
+	// Constant-time, no early exit: every user is checked and both
+	// fields are always compared, so response time can't distinguish
+	// "username unknown" from "password wrong".
+	let mut matched: Option<&'a str> = None;
 	for u in users {
-		if u.name == user && u.password == pass {
-			return Ok(&u.name);
+		let name_ok = u.name.as_bytes().ct_eq(user.as_bytes());
+		let pass_ok = u.password.as_bytes().ct_eq(pass.as_bytes());
+		if bool::from(name_ok & pass_ok) && matched.is_none() {
+			matched = Some(&u.name);
 		}
 	}
-	Err(AuthError::BadCredentials)
+	matched.ok_or(AuthError::BadCredentials)
 }
 
 trait StrExt {
@@ -248,25 +255,31 @@ where
 		return Err(AuthError::BadCredentials);
 	}
 
+	// Compute the digest for every user regardless of username match —
+	// hashing only on a hit let a probe distinguish "user exists" from
+	// "user unknown" by response time — and compare in constant time
+	// with no early exit.
+	let response_lower = response.to_ascii_lowercase();
+	let mut matched: Option<&'a str> = None;
 	for user in users {
-		if &user.name == username {
-			let expected = digest_response(
-				&user.name,
-				realm,
-				&user.password,
-				method,
-				uri,
-				nonce,
-				&nc,
-				&cnonce,
-				&qop,
-			);
-			if expected.eq_ignore_ascii_case(response) {
-				return Ok(&user.name);
-			}
+		let expected = digest_response(
+			&user.name,
+			realm,
+			&user.password,
+			method,
+			uri,
+			nonce,
+			&nc,
+			&cnonce,
+			&qop,
+		);
+		let name_ok = user.name.as_bytes().ct_eq(username.as_bytes());
+		let resp_ok = expected.as_bytes().ct_eq(response_lower.as_bytes());
+		if bool::from(name_ok & resp_ok) && matched.is_none() {
+			matched = Some(&user.name);
 		}
 	}
-	Err(AuthError::BadCredentials)
+	matched.ok_or(AuthError::BadCredentials)
 }
 
 #[cfg(test)]

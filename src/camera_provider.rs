@@ -67,8 +67,8 @@ impl StreamProvider for CameraProvider {
 
 		// Per-camera access control. An empty allowlist means "any
 		// authenticated user (or anonymous, when no auth is configured)
-		// is allowed". Task 24 will add validation that the listed names
-		// exist in the global `[[users]]` table.
+		// is allowed". `validate_config` guarantees every listed name
+		// exists in the global `[[users]]` table.
 		if let Some(user) = authenticated_user {
 			let permitted = &handle.config().permitted_users;
 			if !permitted.is_empty() && !permitted.iter().any(|u| u == user) {
@@ -88,7 +88,7 @@ impl StreamProvider for CameraProvider {
 		// Branch on the camera's observed audio presence. On timeout we
 		// surface Unavailable → 503, which is the appropriate user-visible
 		// signal that the camera never produced usable bitstream. See
-		// `classify_presence` for the policy; §3.3 of the 		// design doc spells out the rationale.
+		// `classify_presence` for the policy.
 		let presence = *handle
 			.audio_presence()
 			.read()

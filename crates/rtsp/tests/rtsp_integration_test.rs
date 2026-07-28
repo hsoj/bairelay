@@ -281,10 +281,17 @@ async fn read_rtsp_response(stream: &mut TcpStream) -> RtspResponse {
 					if key == "content-length" {
 						content_length = value.parse().unwrap_or(0);
 					}
-					// Multiple WWW-Authenticate headers are allowed; keep the
-					// first (Digest) since that's what these tests use. A more
-					// general client would fold values into a list.
-					headers.entry(key).or_insert(value);
+					// Multiple WWW-Authenticate headers are allowed; fold
+					// duplicates into a comma-separated list (HTTP list
+					// semantics) so tests can assert on every challenge
+					// offered, not just the first.
+					headers
+						.entry(key)
+						.and_modify(|existing| {
+							existing.push_str(", ");
+							existing.push_str(&value);
+						})
+						.or_insert(value);
 				}
 			}
 			let mut body = buf[header_end..].to_vec();
@@ -672,6 +679,66 @@ async fn digest_auth_flow() {
 		resp.status == 401 || resp.status == 403,
 		"DESCRIBE with bad password should be 401 or 403, got {}",
 		resp.status
+	);
+
+	drop(stream);
+	cancel.cancel();
+}
+
+#[tokio::test]
+async fn plaintext_auth_never_offers_or_accepts_basic() {
+	// Basic auth transmits the password in cleartext, so on a plain TCP
+	// connection the server must neither challenge with Basic nor verify
+	// a Basic header the client volunteers — otherwise the default
+	// 0.0.0.0 deployment broadcasts the RTSP password to the LAN.
+	let users = vec![UserCred {
+		name: "alice".into(),
+		password: "wonderland".into(),
+	}];
+	let provider = MockProvider::new(&["cam1"]);
+	let (addr, cancel) = spawn_server_with(provider, users).await;
+
+	let uri = format!("rtsp://{addr}/cam1");
+	let mut stream = TcpStream::connect(addr).await.unwrap();
+
+	// 1. DESCRIBE without credentials → 401 whose challenges are Digest only.
+	let req = format!("DESCRIBE {uri} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
+	write_request(&mut stream, req.as_bytes()).await;
+	let resp = read_rtsp_response(&mut stream).await;
+	assert_eq!(resp.status, 401);
+	let challenge = resp
+		.headers
+		.get("www-authenticate")
+		.expect("missing WWW-Authenticate")
+		.to_ascii_lowercase();
+	assert!(
+		challenge.contains("digest"),
+		"plaintext 401 must still offer Digest: {challenge}"
+	);
+	assert!(
+		!challenge.contains("basic"),
+		"plaintext 401 must not offer Basic: {challenge}"
+	);
+
+	// 2. Valid Basic credentials volunteered anyway → re-challenged with
+	// Digest, never authenticated. base64("alice:wonderland").
+	let req = format!(
+		"DESCRIBE {uri} RTSP/1.0\r\nCSeq: 2\r\nAuthorization: Basic YWxpY2U6d29uZGVybGFuZA==\r\nAccept: application/sdp\r\n\r\n"
+	);
+	write_request(&mut stream, req.as_bytes()).await;
+	let resp = read_rtsp_response(&mut stream).await;
+	assert_eq!(
+		resp.status, 401,
+		"valid Basic creds over plaintext must not authenticate"
+	);
+	let challenge = resp
+		.headers
+		.get("www-authenticate")
+		.expect("missing WWW-Authenticate on re-challenge")
+		.to_ascii_lowercase();
+	assert!(
+		!challenge.contains("basic"),
+		"re-challenge must not offer Basic: {challenge}"
 	);
 
 	drop(stream);
