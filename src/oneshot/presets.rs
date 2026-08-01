@@ -1,16 +1,11 @@
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::{Outcome, Preset};
+use crate::camera::Camera;
 
-pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
-	let ptz = cam
-		.get_ptz_preset()
-		.await
-		.context("get_ptz_preset failed")?;
-	let presets = ptz
-		.preset_list
-		.preset
+pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+	let slots = cam.ptz_presets().await.context("ptz_presets failed")?;
+	let presets = slots
 		.into_iter()
 		.map(|p| Preset {
 			id: p.id,
@@ -23,30 +18,22 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::{Preset as XmlPreset, PresetList, PtzPreset};
-	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use crate::baichuan::bc_protocol::Error;
+
+	use crate::fake_camera::FakeCameraBuilder;
+	use crate::ptz::PresetSlot;
 
 	#[tokio::test]
-	async fn presets_maps_xml_list_to_outcome() {
+	async fn presets_maps_slot_list_to_outcome() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| {
-				Ok(PtzPreset {
-					preset_list: PresetList {
-						preset: vec![
-							XmlPreset {
-								id: 0,
-								name: Some("home".into()),
-								..Default::default()
-							},
-							XmlPreset {
-								id: 1,
-								name: None,
-								..Default::default()
-							},
-						],
+			.with_ptz_presets(|| {
+				Ok(vec![
+					PresetSlot {
+						id: 0,
+						name: Some("home".into()),
 					},
-					..Default::default()
-				})
+					PresetSlot { id: 1, name: None },
+				])
 			})
 			.build();
 		let outcome = run(&*fake).await.unwrap();
@@ -63,7 +50,7 @@ mod tests {
 	#[tokio::test]
 	async fn presets_empty_list() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| Ok(PtzPreset::default()))
+			.with_ptz_presets(|| Ok(Vec::new()))
 			.build();
 		let outcome = run(&*fake).await.unwrap();
 		assert_eq!(outcome, Outcome::Presets { presets: vec![] });
@@ -72,9 +59,9 @@ mod tests {
 	#[tokio::test]
 	async fn presets_error_propagates() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| Err(Error::Other("fail")))
+			.with_ptz_presets(|| Err(Error::Other("fail")))
 			.build();
 		let err = run(&*fake).await.unwrap_err();
-		assert!(format!("{:#}", err).contains("get_ptz_preset failed"));
+		assert!(format!("{:#}", err).contains("ptz_presets failed"));
 	}
 }

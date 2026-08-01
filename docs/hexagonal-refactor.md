@@ -5,6 +5,13 @@ What a complete restructuring of bairelay would look like if it fully adhered to
 phased path, not a commitment: § Calibration is explicit about which phases pay for themselves and
 which are ceremony for this product.
 
+> **Status: phases 0–5 are implemented, with one deliberate departure from the sketch below —
+> none of it lives in a new crate.** The separation the blueprint wanted is real, but it is drawn
+> with modules inside `src/`, and the modules are named for their subject matter (`battery`,
+> `ptz`, `camera_services`, `camera_status`, `gap_bridging`) rather than for their architectural
+> role (`domain/`, `ports.rs`, `*_adapter.rs`). See § Phasing for what each phase did, § Why no
+> domain crate for the reasoning, and § Deferred for what was consciously left alone.
+
 Baseline assessment first, because it changes the shape of the answer: **bairelay is already about
 70 % hexagonal.** The leaf crates are clean adapters, `StreamProvider` is a consumer-defined port
 (`TR-2`) done correctly, sockets bind in the composition root, the error strategy matches `ER-1`,
@@ -44,6 +51,9 @@ Two DDD notes that simplify everything:
 ---
 
 ## Target structure
+
+*Historical — this is the shape originally sketched. What was built keeps the separation but
+draws it with modules in `src/`; see § Why no domain crate and § Naming.*
 
 ```
 bairelay/
@@ -205,20 +215,77 @@ stops after it. The live-verify constraint is load-bearing: phases are cut so th
 MQTT-path changes land in *separate* diffs, each small enough for `manual-verify.sh` /
 `ha-verify.sh` to cover.
 
-| Phase | Change | Risk / verification |
+| Phase | Change | Status |
 |---|---|---|
-| **0** | Safety net: confirm fixture-replay coverage of the bridging paths; capture any missing `.bcmedia` fixtures while the current code still runs | None — additive |
-| **1** | Port flip: domain-owned `Camera` trait (in the binary first — no new crate yet), core implements it, delete `bc_camera_concrete`; newtypes at the port | Mechanical; unit + one-shot commands verify; no RTSP/MQTT behavior change |
-| **2** | Extract sans-IO `Bridging`; translator loop becomes its driver; port `PacketSource` tests to fixture tables | The risky one — needs live-verify on the RTSP path (gap → bridge → resume, A/V realign) |
-| **3** | Events-as-values + `StatusSink`; `mqtt_dispatch` shrinks to translation | Needs `ha-verify.sh`; RTSP untouched |
-| **4** | Create `crates/domain`; move wake/grace/lifecycle/bridging/events; wire `default-members`, coverage config | Pure code motion if 1–3 landed; compile-enforces what 1–3 established |
-| **5** | Core modernization (`tracing`, `LazyLock`, async-trait trim) | Independent; can interleave anywhere |
-| **6** *(optional)* | `crates/app` split; `main.rs` to pure composition root; oneshot through app services | Lowest value-per-diff; do only if the binary keeps growing |
+| **0** | Safety net: confirm fixture-replay coverage of the bridging paths | ✅ existing suite carried through every phase green |
+| **1** | Port flip: consumer-defined `Camera` trait, core implements it, delete `bc_camera_concrete`; newtypes at the boundary | ✅ `trait Camera` in `src/camera.rs`, implemented for `BcCamera` in `src/bc_camera.rs`; `CameraDriver` and the parallel concrete handle deleted; `Millivolts` (`battery.rs`), `ZoomLevel` / `PresetSlot` (`ptz.rs`), `ServiceKind` (`camera_services.rs`) added; the 12 service RPCs collapsed to `service` / `set_service`; `FakeCamera` moved to `src/fake_camera.rs` |
+| **2** | Extract sans-IO gap bridging; translator loop becomes its driver | ✅ `src/gap_bridging.rs`; four `Arc<Mutex<_>>` fields collapsed into one policy handle; audio gate takes a `bool` instead of a mutex. **Not live-verified** — no hardware |
+| **3** | Events-as-values + a status port; publishing shrinks to translation | ✅ `src/camera_status.rs` holds `CameraEvent` and `StatusReporter`, implemented by `src/mqtt_status.rs`, which also owns the republish-cache write that every task used to duplicate. **Not HA-verified** — no broker |
+| **4** | Compile-enforce the boundary via a crate split | ⛔️ **Not done, deliberately** — see § Why no domain crate |
+| **5** | Core modernization (`tracing`, `LazyLock`, async-trait trim) | ✅ 127 `log::` sites → `tracing` (they had been going nowhere — no bridge was installed); `lazy_static` → plain `const`; `env_logger` dev-dep dropped. `async-trait` correctly retained: both remaining traits are genuinely `dyn`-dispatched |
+| **6** *(optional)* | `crates/app` split; `main.rs` to pure composition root | Not built — still the right call per § Calibration |
 
-Phases 1–3 deliver ~80 % of the value while `crates/domain` doesn't exist yet — the boundary is
-established as modules first (growth-path stage 1), then promoted to a crate (stage 3) once its
-contents stop moving. Creating the crate first and shoveling code into it is the tempting wrong
-order: it fossilizes today's module shapes before the port flip and bridging extraction reshape them.
+## Why no domain crate
+
+The blueprint's phase 4 argued for `crates/domain` so that an errant `tokio` import in policy code
+becomes a build error. That enforcement is real, but it was not worth what it cost here:
+
+- **A crate is the wrong unit for this.** `rust-code-structure.md` § the growth path says to use
+  the smallest tool that enforces the boundary, and to graduate to a crate when the component has a
+  genuinely different consumer, needs different dependencies, or is large and stable. The policy
+  code has exactly one consumer — this binary. The four existing crates all clear that bar: each is
+  published to crates.io, and `crates/core` is additionally driven by the out-of-workspace `fuzz/`
+  and `tests/scripts/decode-bc-pcap/` projects with their own feature flags.
+- **The enforcement was mostly theatre.** Only the genuinely pure modules could live under the
+  restriction; the `Camera` trait — the actual boundary against the protocol crate — could not,
+  because its signatures carry BC report types. So the crate wall stood in front of the code least
+  likely to grow an I/O dependency, while the code most exposed to one stayed outside it.
+- **It cost a public API and a release-process edge.** A workspace member is a publishable
+  artifact with its own version, description, and lockstep-bump obligation, for something no
+  external consumer will ever depend on.
+
+What replaced it: modules named for their subject, and the same discipline enforced by review —
+which is what `rust-code-structure.md` describes as normal for stage-1 boundaries.
+
+## Naming
+
+Modules say what they are about, not what architectural role they play. `domain/`, `ports.rs`,
+`*_adapter.rs`, and `*_sink.rs` were all pattern vocabulary rather than the vocabulary of Reolink
+battery cameras, and `rust-code-structure.md` § Tactical DDD is explicit that ubiquitous language
+belongs in identifiers (`NM-4`). The mapping used:
+
+| Was | Is | Because |
+|---|---|---|
+| `domain/types.rs` | `battery.rs`, `ptz.rs`, `camera_services.rs` | Three unrelated subjects had been pooled under one architectural label |
+| `domain/events.rs` + the status port | `camera_status.rs` | What a camera reports, and where it goes, are one subject |
+| `domain/bridging.rs` | `gap_bridging.rs` | Matches the operator-facing config knobs `bridge_gaps` / `gap_threshold_secs` |
+| `domain/ports.rs` (`Camera`) | `camera.rs` | What a camera does belongs with the camera |
+| `domain/fake.rs` | `fake_camera.rs` | It is a fake camera |
+| `bc_adapter.rs` | `bc_camera.rs` | It is a camera, spoken to over Baichuan |
+| `mqtt_sink.rs` | `mqtt_status.rs` | It reports status; "sink" named the pattern, not the job |
+| `StatusSink::publish` | `StatusReporter::report` | Same reason |
+
+## Deferred, deliberately
+
+Two things inside the executed phases were left as they were, with reasons:
+
+- **`trait Camera` still names some `bairelay_neolink_core` types** (`RfAlarmCfg`, `LedState`,
+  `VersionInfo`, `UserList`, `AbilityInfo`, `MotionData`, `Direction`, `LightState`, and the core
+  `Error`). Giving each a local twin would be field-for-field mapping with no second implementation
+  to justify it — the over-structure signal in `rust-code-structure.md` § Choosing a structure. The
+  trait is consumer-defined either way, which is the property `TR-2` is about. Revisit when a
+  second camera backend exists.
+- **`crates/core`'s `talk` module uses a blocking `crossbeam_channel::recv()` inside
+  `BufferedStream::fill_buf`, reachable from the `async fn talk_stream`** — a real `AS-5`
+  violation. It is unreachable from the shipped binary (nothing in `src/` calls it), and fixing it
+  means reworking the `Read`/`BufRead` impls with no way to verify two-way audio without hardware.
+  Recorded rather than blind-rewritten.
+
+Phases 1–3 delivered ~80 % of the value as modules (growth-path stage 1), which is where the
+boundary stayed. The original plan was to promote them to a crate once their contents stopped
+moving; in the event the promotion was tried and reverted, because the separation was already
+doing its work and the crate added a published artifact nobody consumes. See § Why no domain
+crate.
 
 ---
 
@@ -232,10 +299,13 @@ highest-complexity logic becomes property-testable and replayable; this is where
 user-visible bugs live). Phase 3 (event routing testable as values; kills the supervisor/MQTT
 ordering subtlety as a distributed concern).
 
-**Pays if sustained work continues.** Phase 4 — the domain crate's value is *enforcement*
+**Judged not worth it, after trying it.** Phase 4 — the domain crate's pitch was *enforcement*
 (a `tokio` import in policy code becomes a build error instead of a review catch) plus faster
-incremental builds. On a project with occasional contributors and agent-driven changes,
-enforcement-by-compiler is worth more than usual; that tips it to "yes, after 1–3."
+incremental builds. Built and then removed: the wall could only stand in front of the modules
+already least at risk, since the `Camera` trait's signatures keep it outside, and the cost was a
+publishable crate with no external consumer. § Why no domain crate has the full reasoning. The
+enforcement argument would return if a second binary or an external consumer ever needed the
+policy code.
 
 **Ceremony for this product, skipped.** An application-service *layer* with one service per use
 case; `dyn`-injected everything (the composition root instantiates once — generics suffice,

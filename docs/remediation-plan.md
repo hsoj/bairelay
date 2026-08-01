@@ -46,11 +46,11 @@ Effort: **S** under an hour · **M** half a day · **L** multi-day.
 
 | Location | Sites | Note |
 |---|---|---|
-| `crates/rtsp/src/server/registry.rs` | 17 | shared by every connection |
-| `crates/core/src/bc_protocol/fake_camera.rs` | 11 | test-util — leave alone |
-| `crates/wake-server/src/registry.rs` | 9 | |
-| `crates/rtsp/src/buffer.rs` | 6 | shared by every session |
-| `crates/rtsp/src/server/session_task.rs`, `server/udp_pool.rs` | 4 | |
+| `src/rtsp/server/registry.rs` | 17 | shared by every connection |
+| `src/baichuan/bc_protocol/fake_camera.rs` | 11 | test-util — leave alone |
+| `src/wake_server/registry.rs` | 9 | |
+| `src/rtsp/buffer.rs` | 6 | shared by every session |
+| `src/rtsp/server/session_task.rs`, `server/udp_pool.rs` | 4 | |
 | `src/startup_wake.rs:158,234`, `src/camera_provider.rs:95` | 3 | |
 
 `src/stream_source.rs:82–105` documents precisely why this is wrong —
@@ -60,7 +60,7 @@ two published library crates do not.
 
 `SessionRegistry` is shared by every RTSP connection and `LastFrameBuffer` by
 every session, so one panic under those locks takes down the whole server rather
-than one client. `crates/wake-server/src/route.rs:149` already uses
+than one client. `src/wake_server/route.rs:149` already uses
 `unwrap_or_else(|p| p.into_inner())`, so the idiom exists in-tree and just is not
 applied uniformly.
 
@@ -98,7 +98,7 @@ and it drives the daemon purely by grepping stdout:
 
 | Marker | Emitted at | Script use |
 |---|---|---|
-| `RTSP server listening` | `crates/rtsp/src/server/listener.rs:78` | 30 s startup gate |
+| `RTSP server listening` | `src/rtsp/server/listener.rs:78` | 30 s startup gate |
 | `RTSP server started` | `src/main.rs:415` | same gate, alternate match |
 | `Startup wake cycle complete` | `src/startup_wake.rs:102` | 60 s warm-cycle gate |
 | `Grace period expired, disconnecting` | `src/camera.rs:1127` | battery-sleep stage |
@@ -115,11 +115,11 @@ the empty-map early return does *not* falsely claim completion.
 
 Remaining: the two `src/camera.rs` lifecycle markers, and `RTSP server
 listening` — the latter needs either a `tracing-subscriber` dev-dependency on
-`crates/rtsp` or a ~30-line bare `Subscriber` impl to stay dependency-free.
+`src/rtsp` or a ~30-line bare `Subscriber` impl to stay dependency-free.
 
 ### P1-6. Stale `Server:` header · S
 
-`crates/rtsp/src/rtsp/message.rs:161` hardcodes `bairelay/0.1.0` while the
+`src/rtsp/protocol/message.rs:161` hardcodes `bairelay/0.1.0` while the
 workspace is at 1.1.2 — against the repo's own "version lives once in
 `[workspace.package].version`" rule. Use `concat!("bairelay/",
 env!("CARGO_PKG_VERSION"))`.
@@ -141,7 +141,7 @@ All four library crates carry `version` / `license` / `repository` and no
 
 ### P2-1. No `[workspace.lints]`; doc lint on 1 of 4 crates · M
 
-Only `crates/core` sets `#![warn(missing_docs)]` and
+Only `src/baichuan` sets `#![warn(missing_docs)]` and
 `#![warn(unused_crate_dependencies)]`. Building the other three with
 `-W missing_docs` yields **196 undocumented public items**.
 
@@ -214,7 +214,7 @@ stringly-typed escape hatch. A binary-local `DispatchError` wrapping
 
 ### P3-3. `CameraDriver` is a 40-method trait · L
 
-`crates/core/src/bc_protocol/camera_driver.rs:28`. Deliberate — it mirrors
+`src/baichuan/bc_protocol/camera_driver.rs:28`. Deliberate — it mirrors
 `BcCamera` so the forwarding blanket impl reads one line per method, and it does
 buy the test seam. But no consumer needs all 40, and every fake pays for all of
 them.
@@ -231,7 +231,7 @@ continued drift is not.
 
 ~30 stale build-plan references — `Task 3/5/6/11/19/22/23/24/27/33`, `Phase
 1.5`, `Stage 6` — across `src/stream_source.rs`, `src/camera.rs`,
-`crates/mqtt/src/discovery/`, `crates/core/src/bc/xml_tests.rs`, and the RTSP
+`src/mqtt/discovery/`, `src/baichuan/bc/xml_tests.rs`, and the RTSP
 integration test header. Directly against `CLAUDE.md`'s *"Never reference the
 current task/PR."* Several describe shipped work in future tense.
 
@@ -338,7 +338,7 @@ Local `cargo-tarpaulin` aligned to CI's 0.37.0 pin.
 
 ### RTSP pipelined requests stalled the connection — 2026-07-26
 
-`crates/rtsp/src/server/connection.rs:173`. The read loop called
+`src/rtsp/server/connection.rs:173`. The read loop called
 `try_consume_request` once per `read()`, so a second request arriving in the
 same TCP segment sat in the buffer until more bytes arrived. A client that
 pipelines and then blocks for all its responses hung — until the slow-loris arm
@@ -351,7 +351,7 @@ minimal requests and `dispatch_request` is not cancel-aware, so without it a
 shutdown would have to wait out the whole drain.
 
 Regression test: `pipelined_requests_all_receive_responses` in
-`crates/rtsp/tests/rtsp_integration_test.rs`, verified to fail against the
+`tests/rtsp_integration_test.rs`, verified to fail against the
 pre-fix code with `timed out awaiting pipelined responses`.
 
 ### Live-verify startup-wake marker pinned — 2026-07-26
@@ -385,18 +385,18 @@ Recorded so the next review does not re-derive them.
   (`tests/config_test.rs:1520`), plus the misplaced-key failure cases. The
   `#[serde(rename = "bind")]` and `topic_prefix` default the script's awk
   depends on are both covered.
-- **`crates/wake-server`** — every in-memory map is capped at
+- **`src/wake_server`** — every in-memory map is capped at
   `MAX_MAP_ENTRIES = 1024` with refresh-vs-insert distinguished, and the route
   cache has its own `CACHE_CAP` soft cap. Hostile-flood memory amplification is
   handled.
-- **`crates/mqtt`** — `parse_control_message` validates the camera name against
+- **`src/mqtt`** — `parse_control_message` validates the camera name against
   an ASCII allowlist before use.
-- **Crypto** — the constant IV in `crates/core/src/bc/crypto.rs` is Reolink
+- **Crypto** — the constant IV in `src/baichuan/bc/crypto.rs` is Reolink
   firmware's constraint and is correctly documented as such; freshness comes
   from the per-session derived key.
 - **Cast truncations** — the flagged wire-path casts were spot-checked.
-  `crates/rtsp/src/server/transport.rs:75` is guarded by a preceding size check;
+  `src/rtsp/server/transport.rs:75` is guarded by a preceding size check;
   `bcmedia/ser.rs` length casts are bounded by protocol limits. One loose end:
-  `crates/rtsp/src/codec/aac.rs:122` does `(au.len() as u16) << 3`, silently
+  `src/rtsp/codec/aac.rs:122` does `(au.len() as u16) << 3`, silently
   wrapping the 13-bit AU-size field for frames ≥ 8192 bytes. Not reachable with
   real AAC; a `debug_assert!` would document the invariant.

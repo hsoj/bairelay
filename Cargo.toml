@@ -1,13 +1,15 @@
 [package]
 name = "bairelay"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+# Single source of truth for the version. `scripts/release.sh` rewrites
+# this line; `hassio/bairelay/config.yaml` is bumped in lockstep.
+version = "1.1.2"
+edition = "2021"
+rust-version = "1.93"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/mgc8/bairelay"
+homepage = "https://github.com/mgc8/bairelay"
+keywords = ["reolink", "rtsp", "mqtt", "baichuan", "home-assistant"]
+categories = ["multimedia::video", "network-programming"]
 description = "RTSP Relay for Reolink Baichuan cameras"
 readme = "README.md"
 
@@ -31,56 +33,6 @@ exclude = [
 	"/tests/scripts/",
 ]
 
-[workspace]
-members = [
-	"crates/*",
-]
-# `fuzz/` is its own detached cargo project (libfuzzer-sys + nightly).
-# Excluding it keeps `cargo build/test --workspace` from walking it
-# and dragging in nightly-only deps. `tests/scripts/decode-bc-pcap/` is
-# similarly detached: a debugging-only tool that opts bairelay_neolink_core into
-# the `pcap-decode-api` feature, kept out of the workspace so the feature
-# is never accidentally pulled into a release build.
-exclude = ["fuzz", "tests/scripts/decode-bc-pcap"]
-# Without this, bare `cargo test` / `cargo build` / `cargo clippy`
-# from the workspace root operates only on the root crate and silently
-# skips every member crate (bairelay_neolink_core's ~686 tests included). The
-# `--workspace` flag works either way; this just makes the bare form
-# do the right thing.
-default-members = [
-	".",
-	"crates/core",
-	"crates/mqtt",
-	"crates/rtsp",
-	"crates/wake-server",
-]
-
-# Single source of truth for version / edition / license across the
-# workspace. Bumping `version` here cascades to every member crate;
-# `build.rs` picks up the same value via CARGO_PKG_VERSION_{MAJOR,MINOR}
-# and resets the build counter when the prefix changes.
-[workspace.package]
-version = "1.1.2"
-edition = "2021"
-rust-version = "1.93"
-license = "AGPL-3.0-or-later"
-repository = "https://github.com/mgc8/bairelay"
-homepage = "https://github.com/mgc8/bairelay"
-keywords = ["reolink", "rtsp", "mqtt", "baichuan", "home-assistant"]
-categories = ["multimedia::video", "network-programming"]
-
-# Internal path deps in one place. The `version` field is what
-# crates.io consults on `cargo publish`; the `path` field is what
-# local dev resolves against. `release.sh::update_workspace_version`
-# bumps these four version strings in lockstep with the workspace
-# `version` above — keep the `version = "X.Y.Z"` shape so the sed
-# pattern keeps matching.
-[workspace.dependencies]
-bairelay-neolink-core = { path = "crates/core", version = "1.1.2" }
-bairelay-mqtt = { path = "crates/mqtt", version = "1.1.2" }
-bairelay-rtsp = { path = "crates/rtsp", version = "1.1.2" }
-bairelay-wake-server = { path = "crates/wake-server", version = "1.1.2" }
-
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -89,8 +41,8 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full", "tracing"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -99,12 +51,45 @@ bytes = "1"
 quick-xml = { version = "0.36", features = ["serialize"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 ab_glyph = "0.2"
-time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
+time = { version = "0.3", features = ["macros", "parsing", "formatting", "local-offset"] }
 
-bairelay-neolink-core.workspace = true
-bairelay-mqtt.workspace = true
-bairelay-rtsp.workspace = true
-bairelay-wake-server.workspace = true
+# ── Baichuan protocol (src/baichuan) ──────────────────────────────────
+aes = "0.8.2"
+cfb-mode = "0.8.2"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+cookie-factory = "0.3.2"
+crc32fast = "1.3.2"
+crossbeam-channel = "0.5.8"
+delegate = "0.12.0"
+get_if_addrs = "0.5.3"
+md5 = "0.7.0"
+nom = { version = "7.1.3", features = ["alloc"] }
+rand = "0.8.5"
+regex = "1.7.3"
+zeroize = "1.8"
+tokio-stream = { version = "0.1.12", features = ["sync", "time", "net"] }
+# Cloud bundle minting for account ("cloud") cameras: HTTPS to
+# apis.reolink.com. rustls-tls (no OpenSSL) + gzip + json.
+reqwest = { version = "0.12", default-features = false, features = [
+	"rustls-tls",
+	"gzip",
+	"json",
+	"charset",
+	"http2",
+] }
+
+# ── RTSP server (src/rtsp) ────────────────────────────────────────────
+rtsp-types = "0.1"
+rtp-types = "0.1"
+sdp-types = "0.1"
+subtle = "2"
+tokio-rustls = "0.26"
+
+# ── MQTT bridge (src/mqtt) ────────────────────────────────────────────
+rumqttc = "0.25"
+base64 = "0.22"
 
 rustls = "0.23"
 rustls-pemfile = "2"
@@ -123,6 +108,24 @@ rpassword = "7"
 # Release artefact path scrubbing happens via `--remap-path-prefix` in
 # `release.yml` (stable rustc flag). The unified `trim-paths` profile
 # key is still unstable in Cargo 1.95 — revisit when it stabilises.
+[features]
+# Exposes the in-process protocol test scaffolding (`MockConnection*`,
+# `BcCamera::from_mock_connection`, `BcCamera::test_set_ability`,
+# `MotionData::test_new`) to the integration tests in `tests/`. Off by
+# default so a release build cannot substitute a scripted connection for
+# a real camera. Unit tests inside `src/` see it via `cfg(test)`.
+test-util = []
+
+# Exposes `baichuan::fuzz_api`: public shims around otherwise
+# `pub(crate)` parsers (`Bc::deserialize`, `BcXml::try_parse`) so the
+# out-of-tree `fuzz/` project (libfuzzer-sys, nightly) can drive them.
+fuzz-api = []
+
+# Exposes `baichuan::pcap_decode_api` with the offline-decoder
+# primitives (`Session`, `Direction`) that `tests/scripts/decode-bc-pcap`
+# drives against a captured BcUdp session. Debugging-only surface.
+pcap-decode-api = []
+
 [profile.release]
 strip = "symbols"
 
@@ -132,12 +135,17 @@ predicates = "3"
 tempfile = "3"
 rcgen = "0.13"
 
-# Enable bairelay_neolink_core's test scaffolding (`FakeCamera*`, `MockConnection*`,
-# `BcCamera::from_mock_connection`, `MotionData::test_new`) for the
-# binary's own test suite. The feature is off in production builds, so
-# release `bairelay` cannot accidentally substitute a fake for a real
-# camera.
-bairelay-neolink-core = { workspace = true, features = ["test-util"] }
+assert_matches = "1.5.0"
+indoc = "2.0.1"
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Self-dependency purely to switch on `test-util` when building the
+# integration tests in `tests/`. Those link the library as an external
+# consumer, so `cfg(test)` does not reach them and the protocol test
+# scaffolding would otherwise be absent. Production builds are
+# unaffected — the feature stays off.
+bairelay = { path = ".", features = ["test-util"] }
 
 # tests/fixture_replay.rs drives the real RtspServer::serve over a TCP
 # socket and hand-parses RTP/RTCP bytes off the wire. That requires
@@ -145,4 +153,12 @@ bairelay-neolink-core = { workspace = true, features = ["test-util"] }
 # crate's default feature set). `test-util` enables the virtual-time
 # clock (`tokio::time::advance`, `start_paused = true`) used by the
 # gap-detection unit tests.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[[bench]]
+name = "rtp_packetizer"
+harness = false
+
+[[bench]]
+name = "last_frame_buffer"
+harness = false

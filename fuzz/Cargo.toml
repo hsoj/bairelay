@@ -12,13 +12,11 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bytes = "1"
 
-# Path deps — the fuzz harness drives the same parsers production
-# does. `neolink_core` opts into the `fuzz-api` feature so the small
-# `fuzz_api` shim around `Bc::deserialize` and `BcXml::try_parse`
-# becomes reachable from this out-of-tree crate.
-bairelay-neolink-core = { path = "../crates/core", features = ["fuzz-api"] }
-bairelay_rtsp = { path = "../crates/rtsp" }
-bairelay_wake_server = { path = "../crates/wake-server" }
+# Path dep — the fuzz harness drives the same parsers production does.
+# `bairelay` opts into the `fuzz-api` feature so the small
+# `baichuan::fuzz_api` shim around `Bc::deserialize` and
+# `BcXml::try_parse` becomes reachable from this out-of-tree crate.
+bairelay = { path = "..", features = ["fuzz-api"] }
 
 # Detach from the parent workspace. Without this, cargo would try to
 # pull this crate into the bairelay workspace and `cargo +nightly fuzz

@@ -6,9 +6,9 @@ Static structure and dependency tables live in `docs/architecture.md`.
 
 ---
 
-## `bairelay_neolink_core` API surface
+## `baichuan` API surface
 
-`BcCamera` is the production type. `CameraDriver` is the dyn-compatible trait the binary holds — production code mostly takes `Arc<dyn CameraDriver>`. `CameraHandle` keeps a parallel private `bc_camera_concrete: Arc<BcCamera>` for the two operations that aren't on the trait (`logout()` during shutdown; `StreamSource::start` for video pull loops).
+`BcCamera` is the production type, but nothing outside `src/bc_camera.rs` names it. Production code holds `Arc<dyn Camera>` — the trait declared in `src/camera.rs` — which covers the whole session including `end_session()` (logout) and `start_video()`, so there is no second concrete handle to keep in step.
 
 ### Methods we rely on in production
 
@@ -16,7 +16,7 @@ Static structure and dependency tables live in `docs/architecture.md`.
 |---------------------------------------|-----------------------------------------------------------|
 | `BcCamera::new(&BcCameraOpt)`         | Connects via discovery. Local/direct: 2–15 s. Remote/relay registration retries 5 rounds w/ backoff, up to ~80 s for an asleep cam. |
 | `login_with_maxenc(MaxEncryption)`    | MD5 challenge-response auth.                              |
-| `logout()`                            | Concrete-only (not on `CameraDriver`); call with 5 s timeout. |
+| `logout()`                            | Reached via `Camera::end_session()`; call with 5 s timeout. |
 | `get_linktype()`                      | Used for keepalive (NOT `ping()`; see "Keepalive").       |
 | `get_support()`                       | Capability probe (PTZ, talk, etc.). Cache result.         |
 | `battery_info()`                      | Returns `BatteryInfo`. **`voltage` is i32 millivolts**, not volts. |
@@ -46,7 +46,7 @@ Every async `BcCamera` method can hang indefinitely if the camera drops the TCP 
 
 ### Calls that spawn internal tasks
 
-`listen_on_motion()` and `listen_on_floodlight()` spawn internal tokio tasks inside `bairelay_neolink_core` that hold references to the `BcConnection`. Dropping the outer `BcCamera` (Arc refcount → 0) does not clean them up immediately — they're parked on channel reads.
+`listen_on_motion()` and `listen_on_floodlight()` spawn internal tokio tasks inside `baichuan` that hold references to the `BcConnection`. Dropping the outer `BcCamera` (Arc refcount → 0) does not clean them up immediately — they're parked on channel reads.
 
 **Shutdown sequence (per session, inside `CameraHandle::teardown_session_tasks`):**
 
@@ -55,17 +55,17 @@ Every async `BcCamera` method can hang indefinitely if the camera drops the TCP 
 1. Wait up to **2 seconds** for `JoinSet` tasks (motion / battery / floodlight / PIR / preview-aggregator) to exit gracefully.
 2. After the deadline, call `abort_all()` on the `JoinSet`.
 3. `stop_all_stream_sources().await` — fires cancel + awaits each reader task with a 7 s budget. Reader tasks hold their own `Arc<BcCamera>` clones outside the `JoinSet`; without this await the next session's `start_video` can race a still-running previous reader.
-4. `logout()` with a 5 s timeout (`LOGOUT_TIMEOUT`). Uses the local `concrete: Option<Arc<BcCamera>>` parameter — the trait surface intentionally omits `logout()`.
-5. Clear `bc_camera` + `bc_camera_concrete`, drop the local `concrete` Arc, transition to `Disconnected`.
+4. `Camera::end_session()` with a 5 s timeout (`LOGOUT_TIMEOUT`), through the same port handle the session already holds.
+5. Clear `bc_camera`; the session's `Arc<dyn Camera>` drops when `run_connected_session` returns, transition to `Disconnected`.
 
-Without the abort deadline, shutdown hangs because internal tasks hold references that prevent cleanup. Without step 4's await, a detached reader keeps `Arc<BcCamera>` alive for up to its own `STOP_VIDEO_TIMEOUT` (5 s), which bairelay_neolink_core can't reliably handle when the next `BcCamera::new` is already in flight.
+Without the abort deadline, shutdown hangs because internal tasks hold references that prevent cleanup. Without step 4's await, a detached reader keeps `Arc<BcCamera>` alive for up to its own `STOP_VIDEO_TIMEOUT` (5 s), which the Baichuan module can't reliably handle when the next `BcCamera::new` is already in flight.
 
 ### XML parsing brittleness
 
-Reolink firmware routinely adds and removes XML fields between model generations. `crates/core/src/bc/xml.rs` carries `#[serde(default)]` on every field that could plausibly be omitted. When a new firmware surfaces a parse error in production, the fix is almost always one of:
+Reolink firmware routinely adds and removes XML fields between model generations. `src/baichuan/bc/xml.rs` carries `#[serde(default)]` on every field that could plausibly be omitted. When a new firmware surfaces a parse error in production, the fix is almost always one of:
 
 - Add `#[serde(default)]` to the missing field in the relevant struct.
-- Add a regression test capturing the new XML payload shape in `crates/core/src/bc/xml_tests.rs`.
+- Add a regression test capturing the new XML payload shape in `src/baichuan/bc/xml_tests.rs`.
 
 Inbound deserialisation tolerates absent fields; outbound serialisation still writes the field with its current value, so there's no wire-level regression for messages we send.
 
@@ -80,7 +80,7 @@ Reolink fixed-mount cameras (e.g. Argus Altas) report `<ptzMode>none</ptzMode>` 
 
 ### IR LED is write-only
 
-`crates/core/src/bc_protocol/ledstate.rs::irled_light_set` writes the IR night-vision mode but bairelay_neolink_core has no getter, so bairelay's HA `select` entity (`build_ir`) emits `state_topic: None`. HA shows it as "unknown" forever — fire-and-forget control. Don't confuse with PIR (passive IR motion sensor), which has a separate `get_pirstate` reader.
+`src/baichuan/bc_protocol/ledstate.rs::irled_light_set` writes the IR night-vision mode but the Baichuan module has no getter, so bairelay's HA `select` entity (`build_ir`) emits `state_topic: None`. HA shows it as "unknown" forever — fire-and-forget control. Don't confuse with PIR (passive IR motion sensor), which has a separate `get_pirstate` reader.
 
 ### Time + DST split across two Bc messages
 
@@ -91,7 +91,7 @@ Reolink cameras autonomously track DST in a Bc message *separate* from `<SystemG
 - `msg_id = 105` (`SetGeneral`) accepts the same `<SystemGeneral>` shape. Because the camera double-applies DST otherwise, a SET that wants to land at the host's current local time must compute `<timeZone>` as the host's **base** offset (subtract DST if the host is currently in DST) and `<hour>`/etc. as **UTC**. Sending host-local-effective-offset + host-local-wallclock causes a `+dst_offset` drift.
 - `msg_id = 107` (presumed `SetDst`) is not currently observed on the wire — the Reolink Mac client only reads DST. Don't write DST unless the operator explicitly asks.
 
-`<SystemGeneral>` also surfaces `<deviceId>`, `<loginLock>`, `<lockTime>`, `<allowedTimes>` on current Argus firmware; these are **not** modelled in `crates/core/src/bc/xml.rs::SystemGeneral` and therefore aren't preserved by the read-modify-write in `set_time`. A SET silently round-trips them to default. Either model them or accept the round-trip.
+`<SystemGeneral>` also surfaces `<deviceId>`, `<loginLock>`, `<lockTime>`, `<allowedTimes>` on current Argus firmware; these are **not** modelled in `src/baichuan/bc/xml.rs::SystemGeneral` and therefore aren't preserved by the read-modify-write in `set_time`. A SET silently round-trips them to default. Either model them or accept the round-trip.
 
 ---
 
@@ -220,7 +220,7 @@ Match neolink's wire behaviour exactly:
 
 ### HEVC NAL whitelist (`is_decodable_nal`)
 
-`crates/rtsp/src/codec/nal.rs::is_decodable_nal` is the single point of truth for "what NAL units a standard receiver expects". Outbound `Frame::Video` is filtered through it in `handle_iframe`, `handle_pframe`, and the bridging-replay path.
+`src/rtsp/codec/nal.rs::is_decodable_nal` is the single point of truth for "what NAL units a standard receiver expects". Outbound `Frame::Video` is filtered through it in `handle_iframe`, `handle_pframe`, and the bridging-replay path.
 
 - **H.264**: `nal_unit_type` in `1..=13` (VCL slices 1..=5, SEI 6, SPS 7, PPS 8, AUD 9, EOS 10, EOB 11, FD 12, SPS-ext 13). Drops type 0 and 14..=31.
 - **H.265**: type in `{0..=9, 16..=21, 32..=40}` AND `nuh_layer_id == 0`. Keeps standard VCL (0..=9), IRAP keyframes (16..=21), VPS/SPS/PPS/AUD/EOS/EOB/FD/SEI (32..=40). Drops reserved 10..=15 and 22..=31, reserved non-VCL 41..=47, and unspecified 48..=63 — Reolink Argus emits `UNSPEC62` as proprietary metadata; ffmpeg's RTP-HEVC depacketizer rejects it. Drops anything with `nuh_layer_id != 0` (ffmpeg logs `Multi-layer HEVC coding is not implemented`).
@@ -258,13 +258,13 @@ Video: `max_lead = 3 s`, `initial_latency = 1.5 s`, `snap_on_past = false`. Argu
 Two mechanisms cooperate to keep the wire stream usable, addressing different scales of upstream irregularity:
 
 - **Audio + video pacers (above)** absorb sub-second bursty delivery (Argus's normal "GOP burst then 1.1 s idle" pattern). The video pacer's 1.5 s pre-buffer means a typical idle period is invisible to the receiver.
-- **Gap-bridging** (`GapState::Bridging`, `emit_replay_frame_if_bridging`, the 200 ms ticker in the translator loop) handles **multi-second upstream silences** — camera reconnects, wifi hiccups, motion-pause flapping. When `last_live_frame_at` exceeds `gap_threshold_secs` (default 3 s) the source flips to `Bridging` and re-broadcasts the cached `VideoBurst::iframe_nals` with a synthesised PTS, plus drops live audio so A-V stays correlated on resume. Bridging writes to `broadcast::Sender` directly, bypassing the pacer.
+- **Gap-bridging** (`GapState::Bridging`, `BridgingPolicy::on_tick` driven by `tick_bridging`, the 200 ms ticker in the translator loop) handles **multi-second upstream silences** — camera reconnects, wifi hiccups, motion-pause flapping. When `last_live_frame_at` exceeds `gap_threshold_secs` (default 3 s) the source flips to `Bridging` and re-broadcasts the cached `VideoBurst::iframe_nals` with a synthesised PTS, plus drops live audio so A-V stays correlated on resume. Bridging writes to `broadcast::Sender` directly, bypassing the pacer.
 
 The 3 s threshold sits above the pacer's 1.5 s buffer — a normal inter-burst gap drains the pacer before bridging fires, but the pacer covers it; only a true camera-side silence reaches bridging. With the pacer in place, bridging rarely fires day-to-day; it's still load-bearing for the "show the last frame instead of a buffering spinner" experience during real silences.
 
 ## Per-kind session dispatch
 
-`crates/rtsp/src/server/session_task.rs::run` is a small coordinator. After the PLAY gate it spawns two child tasks — `video_dispatch_loop` and `audio_dispatch_loop` — each holding its own `broadcast::Receiver` (via `resubscribe()`). Each child loops on `frames.recv()`, skips frames of the wrong kind, lazily resolves its `RuntimeTrack` from `session_tracks` on track-miss, and writes RTP packets via the track's transport. The coordinator then awaits cancel + the JoinSet's first completion; either path cascades cancel to the surviving child, awaits both joins, closes transports, and removes the session.
+`src/rtsp/server/session_task.rs::run` is a small coordinator. After the PLAY gate it spawns two child tasks — `video_dispatch_loop` and `audio_dispatch_loop` — each holding its own `broadcast::Receiver` (via `resubscribe()`). Each child loops on `frames.recv()`, skips frames of the wrong kind, lazily resolves its `RuntimeTrack` from `session_tracks` on track-miss, and writes RTP packets via the track's transport. The coordinator then awaits cancel + the JoinSet's first completion; either path cascades cancel to the surviving child, awaits both joins, closes transports, and removes the session.
 
 Why split: the unified loop the per-kind dispatchers replaced consumed `Frame::Video` and `Frame::Audio` from a single `tokio::select!` arm. A 4 K HEVC IDR (~150–370 RTP packets after FU fragmentation) monopolised the dispatch task's TCP-write loop while audio frames piled up in the broadcast queue; receivers saw audio drain in a burst once the video write completed. Splitting into two parallel consumers means the audio loop's `frames.recv()` is always free to fire, and the per-packet TCP-interleaved write mutex (held only for one `$-framed` packet at a time, ≤ MTU) lets audio FU fragments interleave between video FU fragments at packet granularity.
 
@@ -278,7 +278,7 @@ Asymmetry: the video child takes ownership of the original `frames` receiver pas
 
 The session task does not emit periodic Sender Reports. The receiver falls back to RTP-arrival-time A-V sync, which is what live camera feeds actually need at our latency targets — the audio + video pacers hold the wire cadence at `clock_rate` and the receiver derives slope from successive RTP packets directly.
 
-`build_sender_report`, `ntp_now`, and `ntp_minus` are kept in `crates/rtsp/src/server/rtcp.rs` so any future SR-emitting context (e.g. a recording sink that needs precise NTP↔RTP) is one wire-up away. The SR ticker arm has been removed from `run` (per-kind dispatch coordinator no longer hosts a `select!`); an SR-emitting future would spawn its own ticker task.
+`build_sender_report`, `ntp_now`, and `ntp_minus` are kept in `src/rtsp/server/rtcp.rs` so any future SR-emitting context (e.g. a recording sink that needs precise NTP↔RTP) is one wire-up away. The SR ticker arm has been removed from `run` (per-kind dispatch coordinator no longer hosts a `select!`); an SR-emitting future would spawn its own ticker task.
 
 ---
 
@@ -286,7 +286,7 @@ The session task does not emit periodic Sender Reports. The receiver falls back 
 
 If `login_with_maxenc()` returns an authentication error (`AuthFailed`, `CameraLoginFail`, `Credential error`), **stop the retry loop permanently**. Don't hammer the camera with bad credentials every 2 – 60 seconds forever.
 
-Two distinct rejection shapes hide behind that one outcome, and both log a `warn` in `crates/core/src/bc_protocol/login.rs` naming which one fired: `CameraLoginFail` (modern login answered with a non-200 `response_code` — the code is included in the warn) and `AuthFailed` (200 with an empty body, no `DeviceInfo`). The binary's `Authentication failed` error line includes the full error chain, so service logs distinguish them too. The one-shot CLI prints the chain via `error: {:#}` — `bairelay battery <cam>` is the cheapest way for an operator to surface the variant.
+Two distinct rejection shapes hide behind that one outcome, and both log a `warn` in `src/baichuan/bc_protocol/login.rs` naming which one fired: `CameraLoginFail` (modern login answered with a non-200 `response_code` — the code is included in the warn) and `AuthFailed` (200 with an empty body, no `DeviceInfo`). The binary's `Authentication failed` error line includes the full error chain, so service logs distinguish them too. The one-shot CLI prints the chain via `error: {:#}` — `bairelay battery <cam>` is the cheapest way for an operator to surface the variant.
 
 Reconnect on transient network failures still uses `ReconnectBackoff::sleep_with_cancel` (initial 2 s, doubling, capped at 60 s) — the same path production uses and the `drive_reconnect_with_backoff` test seam exercises.
 
@@ -322,7 +322,7 @@ All MQTT publishes log their values at debug level. All control commands log dis
 
 `-v` / `-vv` / `-vvv` on the CLI maps to `info` / `debug` / `trace` via `run_support::cli_output_mode`.
 
-Per-camera `debug = true` (`verbose` is the neolink alias) sets `BcCameraOpt::debug`, which unlocks the Baichuan codec's trace-level dumps of decrypted control payloads (`Payload Txt:` / `Extension Txt:` in `crates/core/src/bc/de.rs`) — combine with `RUST_LOG=info,bairelay_neolink_core::bc::de=trace`. The leading `info,` is load-bearing: a bare `RUST_LOG=bairelay_neolink_core::bc::de=trace` is a single-target allowlist that disables the default `info` baseline, so every normal line (Connecting, discovery, the `response_code` warn) vanishes and the console looks empty — and if `debug = true` is unset on top of that, even the `bc::de` target emits nothing, so the console is genuinely silent. Keep a baseline level before the comma; `-vvv`'s global `trace` also works (it enables everything). The dumps include credential hashes and camera UIDs; `warn_wire_debug_enabled` reminds the operator at startup. Use for wire-level diagnosis (login rejections on new firmware, unmodelled XML), then turn it back off.
+Per-camera `debug = true` (`verbose` is the neolink alias) sets `BcCameraOpt::debug`, which unlocks the Baichuan codec's trace-level dumps of decrypted control payloads (`Payload Txt:` / `Extension Txt:` in `src/baichuan/bc/de.rs`) — combine with `RUST_LOG=info,bairelay::baichuan::bc::de=trace`. The leading `info,` is load-bearing: a bare `RUST_LOG=bairelay::baichuan::bc::de=trace` is a single-target allowlist that disables the default `info` baseline, so every normal line (Connecting, discovery, the `response_code` warn) vanishes and the console looks empty — and if `debug = true` is unset on top of that, even the `bc::de` target emits nothing, so the console is genuinely silent. Keep a baseline level before the comma; `-vvv`'s global `trace` also works (it enables everything). The dumps include credential hashes and camera UIDs; `warn_wire_debug_enabled` reminds the operator at startup. Use for wire-level diagnosis (login rejections on new firmware, unmodelled XML), then turn it back off.
 
 **One-shot stdio writers are plain handles, never `.lock()` guards.** `run_support::run_oneshot` passes `std::io::stdout()` / `std::io::stderr()` into `run_oneshot_to`; the plain handles lock per `write` call. The one-shot future is driven by `block_on` on the main thread and parks whenever camera I/O is in flight, so a `StdoutLock` / `StderrLock` guard held across those awaits deadlocks the whole runtime the moment a spawned task emits a log record: the tracing fmt writer blocks on the stderr lock owned by the parked main thread, the blocked worker never finishes its poll, and no other worker re-acquires the IO driver — socket readiness and timers stop firing process-wide. Stdio locks are reentrant, so records logged from the main thread itself keep working and mask the bug; the first record from a worker-thread task (e.g. the BcUdp discovery reader's trace-level decode dumps) trips it. Tests still inject `Vec<u8>` writers through the `_to` seam.
 
@@ -330,11 +330,11 @@ Per-camera `debug = true` (`verbose` is the neolink alias) sets `BcCameraOpt::de
 
 ## Test infrastructure
 
-Test helpers in `bairelay_neolink_core` (`FakeCameraBuilder`, `MockConnection`, `BcCamera::from_mock_connection`, `BcCamera::test_set_ability`, `MotionData::test_new`) are gated behind a `test-util` Cargo feature so release builds cannot accidentally substitute a fake for a real camera. The crate's own `cfg(test)` unit tests always see them; downstream test crates opt in via `[dev-dependencies] bairelay_neolink_core = { ..., features = ["test-util"] }` (the binary already does). Helpers in `bairelay_mqtt` (`mock_client()`) and the binary (`PacketSource`, `MockVideoStream`, `CameraHandle::set_driver_for_test`, `StreamSource::start_with_packet_source`) compile unconditionally — they're scoped tightly enough that there's no production-leakage risk.
+Test helpers in `baichuan` (`MockConnection`, `BcCamera::from_mock_connection`, `BcCamera::test_set_ability`, `MotionData::test_new`) are gated behind a `test-util` Cargo feature so release builds cannot accidentally substitute a fake for a real camera. The crate's own `cfg(test)` unit tests always see them; downstream test crates opt in via `[dev-dependencies] the Baichuan module = { ..., features = ["test-util"] }` (the binary already does). Helpers in `mqtt` (`mock_client()`) and the binary (`PacketSource`, `MockVideoStream`, `CameraHandle::set_driver_for_test`, `StreamSource::start_with_packet_source`) compile unconditionally — they're scoped tightly enough that there's no production-leakage risk.
 
-### `FakeCameraBuilder` (`bairelay_neolink_core::bc_protocol::fake_camera`)
+### `FakeCameraBuilder` (`bairelay::fake_camera`)
 
-Closure-per-method `CameraDriver` impl:
+Closure-per-method `Camera` impl:
 
 ```rust
 let fake = FakeCameraBuilder::new()
@@ -342,7 +342,7 @@ let fake = FakeCameraBuilder::new()
     .with_snapshot(|| Ok(jpeg_bytes))
     .with_motion_stream(motion_data)
     .build();
-let driver: Arc<dyn CameraDriver> = fake.clone();
+let driver: Arc<dyn Camera> = fake.clone();
 ```
 
 Side-effecting setters (`reboot`, `pir_set`, `set_floodlight_manual`, etc.) record their args in a public `FakeCalls` struct so tests assert dispatch:
@@ -354,7 +354,7 @@ assert_eq!(fake.calls().pir_set.lock().unwrap().clone(), vec![true]);
 
 Unset reads panic with `FakeCamera: <method> not configured for this test` via a single `unset(method) -> !` helper. `*_pending()` builders return a never-resolving future for testing 30 s timeout error branches under `tokio::time::pause`.
 
-### `MockConnection` (`bairelay_neolink_core::bc_protocol::connection::mock`)
+### `MockConnection` (`bairelay::baichuan::bc_protocol::connection::mock`)
 
 Scriptable request → reply harness for testing `BcCamera` command modules without a real socket:
 
@@ -380,7 +380,7 @@ Three reply helpers:
 
 `reply_with_xml(|req, xml| ...)` and `reply_with_xml_opt(|req, xml| ...)` deserialise the request's `BcXml` payload and hand a borrowed reference to the closure before it builds the reply. Use these for set / control tests that need to pin the wire-shape of the request payload — without them, a regression that mapped (e.g.) `LightState::On` → `"close"` instead of `"open"` would still pass a shallow `reply_200_empty` test. Panics if the request is header-only or carries a binary payload — those shapes are caller errors when the test is trying to inspect a set/control request.
 
-### `bairelay_mqtt::test_support::mock_client()`
+### `bairelay::mqtt::test_support::mock_client()`
 
 Returns `(SharedMqttClient, MockHandle)`. The handle exposes:
 
@@ -430,7 +430,7 @@ let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 ### `TlsConfig::build` runs at startup, not on first connection
 
-`bairelay_rtsp::server::TlsConfig` wraps `Arc<rustls::ServerConfig>`. The builder runs `with_single_cert` and (for `Request`/`Require`) `WebPkiClientVerifier::builder(roots).build()` at config-load time, so a bad cert/key pair, empty cert chain, or empty roots store fails fast with a useful operator message instead of surfacing on the first incoming connection.
+`bairelay::rtsp::server::TlsConfig` wraps `Arc<rustls::ServerConfig>`. The builder runs `with_single_cert` and (for `Request`/`Require`) `WebPkiClientVerifier::builder(roots).build()` at config-load time, so a bad cert/key pair, empty cert chain, or empty roots store fails fast with a useful operator message instead of surfacing on the first incoming connection.
 
 ### Scheme/transport mismatch returns 400
 
@@ -445,7 +445,7 @@ let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 Two paths produce the same PKI shape:
 
 - `tests/scripts/gen-test-certs.sh` produces self-signed CA + server leaf (SAN: `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`) + client leaf, all valid 10 years. Output `tests/test-certs/` is gitignored. Used by `tests/scripts/manual-verify.sh --tls`.
-- `crates/rtsp/tests/tls_handshake.rs` uses `rcgen` to mint ephemeral CA + leaves in-memory. `cargo test` is hermetic — no openssl or filesystem state required.
+- `tests/rtsp_tls_handshake.rs` uses `rcgen` to mint ephemeral CA + leaves in-memory. `cargo test` is hermetic — no openssl or filesystem state required.
 
 ### `client_auth = "require"` rejection timing
 
@@ -467,7 +467,7 @@ When `tls_client_auth = "request"` or `"require"`, bairelay verifies the client 
 
 ## Coverage policy
 
-Workspace coverage is measured via `cargo tarpaulin` from project root with `tarpaulin.toml` defaults set to `workspace = true`, `all-targets = true`, `skip-clean = true`, and `fail-under = 87`. Current baseline is **~88.6 %** measured against the full workspace (no source-file exclusions). The 87 % gate is intentionally a hair below the actual baseline so natural coverage drift doesn't trip CI on every PR; raising it requires a coordinated push past the structural under-counters in `src/main.rs` (the `#[tokio::main]` body), `src/cli.rs` (clap-derive macro output), and `src/oneshot/runner.rs` (real-camera socket bind). The per-crate gate stays tighter — each non-binary crate stays ≥ 90 %; `bairelay_wake_server` sits at 94.9 % on its own.
+Workspace coverage is measured via `cargo tarpaulin` from project root with `tarpaulin.toml` defaults set to `workspace = true`, `all-targets = true`, `skip-clean = true`, and `fail-under = 87`. Current baseline is **~88.6 %** measured against the full workspace (no source-file exclusions). The 87 % gate is intentionally a hair below the actual baseline so natural coverage drift doesn't trip CI on every PR; raising it requires a coordinated push past the structural under-counters in `src/main.rs` (the `#[tokio::main]` body), `src/cli.rs` (clap-derive macro output), and `src/oneshot/runner.rs` (real-camera socket bind). The per-crate gate stays tighter — each non-binary crate stays ≥ 90 %; `wake_server` sits at 94.9 % on its own.
 
 Per-file targets:
 
@@ -480,7 +480,7 @@ Files at < 85 % with a documented reason:
 - `src/main.rs` — `#[tokio::main]` body, signal handlers, real socket binds. Fundamentally untestable at unit level.
 - `src/oneshot/runner.rs` — wraps `BcCamera::new + login_with_maxenc + logout`. Real socket required.
 - `src/cli.rs` — `clap` derive macro output.
-- `crates/core/src/bc_protocol/connection/{discovery,udpsource}.rs` — UDP socket internals; the trait-level `CameraDiscoverer` fallback chain is fully covered, the per-method UDP frame parsing covered partially.
+- `src/baichuan/bc_protocol/connection/{discovery,udpsource}.rs` — UDP socket internals; the trait-level `CameraDiscoverer` fallback chain is fully covered, the per-method UDP frame parsing covered partially.
 
 Run coverage:
 
@@ -496,7 +496,7 @@ The full wire-level reverse-engineering — every variant, every field, the came
 
 ### Use the UDP source addr, not `<dev>` from D2R_HB
 
-Cameras put their own LAN IP / port in the `<dev>` block of `D2R_HB`. That value is useless for sending replies back to a NAT'd camera — the public-mapped address is what the OS sees on `recv_from`. The handler in `crates/wake-server/src/register.rs::handle_heartbeat` always upserts with `src` (the address from `recv_from`), never `hb.dev`. Reference implementation calls this out explicitly; we matched it.
+Cameras put their own LAN IP / port in the `<dev>` block of `D2R_HB`. That value is useless for sending replies back to a NAT'd camera — the public-mapped address is what the OS sees on `recv_from`. The handler in `src/wake_server/register.rs::handle_heartbeat` always upserts with `src` (the address from `recv_from`), never `hb.dev`. Reference implementation calls this out explicitly; we matched it.
 
 ### Wake burst: fire-and-forget + first-error-then-break
 
@@ -508,8 +508,8 @@ The 10 × `R2D_C` packets are sent from a `tokio::spawn`'d task so the register 
 
 ### Why no `core::discovery` change
 
-Bairelay's outgoing discovery (`crates/core/src/bc_protocol/connection/discovery.rs`) targets `p2p*.reolink.com:9999` for relay/map modes via DNS. Operator-side DNS redirect makes both cameras and bairelay-itself's discovery resolve to the local box, hitting our wake server. The wake server crate is unaware of `discovery.rs`; `discovery.rs` is unaware of the wake server. Same code path for cloud and self-host — only the DNS answer differs.
+Bairelay's outgoing discovery (`src/baichuan/bc_protocol/connection/discovery.rs`) targets `p2p*.reolink.com:9999` for relay/map modes via DNS. Operator-side DNS redirect makes both cameras and bairelay-itself's discovery resolve to the local box, hitting our wake server. The wake server crate is unaware of `discovery.rs`; `discovery.rs` is unaware of the wake server. Same code path for cloud and self-host — only the DNS answer differs.
 
 ### `u32` wraparound in `bcudp::xml_crypto`
 
-`crates/core/src/bcudp/xml_crypto.rs::{encrypt, decrypt}` use `i.wrapping_add(offset)` rather than plain `i + offset` because the `offset` argument is the packet's `tid: u32` and real cameras emit transaction IDs ≥ ~`0x60000000`. A naive add overflows `u32` in debug builds (panic) for any payload long enough to push `i + offset` past `u32::MAX`. The XOR cipher is symmetric over the full `u32` domain, so wrap-around is correct semantics — encrypt-then-decrypt with the same wrapping recovers the plaintext byte-for-byte. Regression tests in `xml_crypto.rs` cover the high-tid path (`tid = 0xFFFF_FFF0` with a multi-byte payload).
+`src/baichuan/bcudp/xml_crypto.rs::{encrypt, decrypt}` use `i.wrapping_add(offset)` rather than plain `i + offset` because the `offset` argument is the packet's `tid: u32` and real cameras emit transaction IDs ≥ ~`0x60000000`. A naive add overflows `u32` in debug builds (panic) for any payload long enough to push `i + offset` past `u32::MAX`. The XOR cipher is symmetric over the full `u32` domain, so wrap-around is correct semantics — encrypt-then-decrypt with the same wrapping recovers the plaintext byte-for-byte. Regression tests in `xml_crypto.rs` cover the high-tid path (`tid = 0xFFFF_FFF0` with a multi-byte payload).

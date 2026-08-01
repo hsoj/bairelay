@@ -38,8 +38,10 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use bairelay_mqtt::{SharedMqttClient, StatusPublisher};
-use bairelay_wake_server::registry::CameraRegistry;
+use crate::mqtt::SharedMqttClient;
+
+use crate::camera_status::CameraEvent;
+use crate::wake_server::registry::CameraRegistry;
 
 use crate::camera::CameraHandle;
 
@@ -76,14 +78,13 @@ pub async fn run(
 	registry: Arc<CameraRegistry>,
 	cameras: Arc<HashMap<String, Arc<CameraHandle>>>,
 	mqtt: Option<SharedMqttClient>,
-	topic_prefix: String,
 	cancel: CancellationToken,
 ) -> Result<(), PushListenerError> {
 	let addr = SocketAddr::new(cfg.bind_addr, cfg.bind_port);
 	let listener = TcpListener::bind(addr)
 		.await
 		.map_err(|source| PushListenerError::Bind { addr, source })?;
-	run_with_listener(listener, cfg, registry, cameras, mqtt, topic_prefix, cancel).await
+	run_with_listener(listener, cfg, registry, cameras, mqtt, cancel).await
 }
 
 /// Run the accept loop against an already-bound `TcpListener`. The
@@ -95,7 +96,6 @@ pub async fn run_with_listener(
 	registry: Arc<CameraRegistry>,
 	cameras: Arc<HashMap<String, Arc<CameraHandle>>>,
 	mqtt: Option<SharedMqttClient>,
-	topic_prefix: String,
 	cancel: CancellationToken,
 ) -> Result<(), PushListenerError> {
 	tracing::info!(
@@ -115,7 +115,7 @@ pub async fn run_with_listener(
 				match accept {
 					Ok((sock, peer)) => {
 						drop(sock);
-						handle_push(peer.ip(), &registry, &cameras, mqtt.as_ref(), &topic_prefix, &cfg, &cancel);
+						handle_push(peer.ip(), &registry, &cameras, mqtt.as_ref(), &cfg, &cancel);
 					}
 					Err(e) => {
 						tracing::warn!(error = %e, "push listener accept failed");
@@ -135,7 +135,6 @@ fn handle_push(
 	registry: &Arc<CameraRegistry>,
 	cameras: &Arc<HashMap<String, Arc<CameraHandle>>>,
 	mqtt: Option<&SharedMqttClient>,
-	topic_prefix: &str,
 	cfg: &RuntimeConfig,
 	cancel: &CancellationToken,
 ) {
@@ -170,11 +169,10 @@ fn handle_push(
 		return;
 	};
 
-	let prefix = topic_prefix.to_string();
 	let hold = cfg.motion_wake_hold;
 	let cancel = cancel.clone();
 	tokio::spawn(async move {
-		fire_motion(handle, mqtt_client, prefix, hold, cancel).await;
+		fire_motion(handle, mqtt_client, hold, cancel).await;
 	});
 }
 
@@ -215,16 +213,14 @@ pub(crate) fn match_camera_by_uid<'a>(
 async fn fire_motion(
 	handle: Arc<CameraHandle>,
 	mqtt: SharedMqttClient,
-	topic_prefix: String,
 	hold: Duration,
 	cancel: CancellationToken,
 ) {
 	let _guard = handle.wake_lock().acquire();
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, handle.name());
-	if let Err(e) = publisher.publish_motion(true).await {
-		tracing::warn!(camera = %handle.name(), error = %e, "push motion: publish_motion(true) failed");
+	let reporter = handle.status_reporter(&mqtt);
+	if let Err(e) = reporter.report(CameraEvent::Motion(true)).await {
+		tracing::warn!(camera = %handle.name(), error = %e, "push motion: motion-on report failed");
 	}
-	handle.status_cache().set_motion(true);
 
 	// Hold for `hold`, bailing on cancel — same primitive used by the
 	// camera reconnect path so the contract lives in one place.
@@ -235,17 +231,22 @@ async fn fire_motion(
 	// shutdown. 1 s is generous for an alive broker; on shutdown, a
 	// dead broker hits the timeout and we move on quietly.
 	const FALLBACK_PUBLISH_TIMEOUT: Duration = Duration::from_secs(1);
-	match tokio::time::timeout(FALLBACK_PUBLISH_TIMEOUT, publisher.publish_motion(false)).await {
-		Ok(Ok(())) => {
-			handle.status_cache().set_motion(false);
-		}
+	match tokio::time::timeout(
+		FALLBACK_PUBLISH_TIMEOUT,
+		reporter.report(CameraEvent::Motion(false)),
+	)
+	.await
+	{
+		// The sink records the cache write itself, so there is nothing
+		// left for the success arm to do.
+		Ok(Ok(())) => {}
 		Ok(Err(e)) => {
-			tracing::warn!(camera = %handle.name(), error = %e, "push motion: fallback publish_motion(false) failed");
+			tracing::warn!(camera = %handle.name(), error = %e, "push motion: motion-off report failed");
 		}
 		Err(_) => {
 			tracing::debug!(
 				camera = %handle.name(),
-				"push motion: fallback publish_motion(false) timed out (likely shutdown)"
+				"push motion: motion-off report timed out (likely shutdown)"
 			);
 		}
 	}
@@ -353,7 +354,7 @@ mod tests {
 		// the same shape `main.rs` uses to surface bind errors at startup.
 		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let port = listener.local_addr().unwrap().port();
-		let registry = bairelay_wake_server::make_registry();
+		let registry = crate::wake_server::make_registry();
 		let cameras: Arc<HashMap<String, Arc<CameraHandle>>> = Arc::new(HashMap::new());
 		let cancel = CancellationToken::new();
 		let cfg = RuntimeConfig {
@@ -364,16 +365,7 @@ mod tests {
 		};
 		let cancel_clone = cancel.clone();
 		let task = tokio::spawn(async move {
-			run_with_listener(
-				listener,
-				cfg,
-				registry,
-				cameras,
-				None,
-				"bairelay".into(),
-				cancel_clone,
-			)
-			.await
+			run_with_listener(listener, cfg, registry, cameras, None, cancel_clone).await
 		});
 		tokio::time::sleep(Duration::from_millis(20)).await;
 		cancel.cancel();
@@ -386,7 +378,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn run_returns_on_cancel() {
-		let registry = bairelay_wake_server::make_registry();
+		let registry = crate::wake_server::make_registry();
 		let cameras: Arc<HashMap<String, Arc<CameraHandle>>> = Arc::new(HashMap::new());
 		let cancel = CancellationToken::new();
 		let cfg = RuntimeConfig {
@@ -396,17 +388,8 @@ mod tests {
 			stale_after: Duration::from_secs(80),
 		};
 		let cancel_clone = cancel.clone();
-		let task = tokio::spawn(async move {
-			run(
-				cfg,
-				registry,
-				cameras,
-				None,
-				"bairelay".into(),
-				cancel_clone,
-			)
-			.await
-		});
+		let task =
+			tokio::spawn(async move { run(cfg, registry, cameras, None, cancel_clone).await });
 		// Give the listener a moment to bind, then cancel.
 		tokio::time::sleep(Duration::from_millis(20)).await;
 		cancel.cancel();
@@ -424,7 +407,7 @@ mod tests {
 		// occupied port surfaced.
 		let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let port = squatter.local_addr().unwrap().port();
-		let registry = bairelay_wake_server::make_registry();
+		let registry = crate::wake_server::make_registry();
 		let cameras: Arc<HashMap<String, Arc<CameraHandle>>> = Arc::new(HashMap::new());
 		let cancel = CancellationToken::new();
 		let cfg = RuntimeConfig {
@@ -433,7 +416,7 @@ mod tests {
 			motion_wake_hold: Duration::from_millis(10),
 			stale_after: Duration::from_secs(80),
 		};
-		let err = run(cfg, registry, cameras, None, "bairelay".into(), cancel)
+		let err = run(cfg, registry, cameras, None, cancel)
 			.await
 			.expect_err("port is taken; bind must fail");
 		match err {
@@ -448,7 +431,7 @@ mod tests {
 		// that's the `spawn_wake_only` branch. Connect from a
 		// matching peer IP, observe the wake-lock count rises, then
 		// the hold expires.
-		let registry = bairelay_wake_server::make_registry();
+		let registry = crate::wake_server::make_registry();
 		registry.upsert(
 			"WAKEUID00000",
 			"127.0.0.1:55003".parse().unwrap(),
@@ -478,7 +461,6 @@ mod tests {
 				registry,
 				cameras,
 				None, // no MQTT — drives spawn_wake_only
-				"bairelay".into(),
 				cancel_for_run,
 			)
 			.await
@@ -516,7 +498,7 @@ mod tests {
 		// no ALPHA camera to fire either, so the listener's
 		// observable behaviour is silent — no MQTT publish, no wake
 		// lock acquired.
-		let registry = bairelay_wake_server::make_registry();
+		let registry = crate::wake_server::make_registry();
 		registry.upsert(
 			"ALPHAUID0123",
 			"127.0.0.1:55001".parse().unwrap(),
@@ -533,7 +515,7 @@ mod tests {
 		let port = probe.local_addr().unwrap().port();
 		drop(probe);
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let cancel = CancellationToken::new();
 		let cfg = RuntimeConfig {
 			bind_addr: "127.0.0.1".parse().unwrap(),
@@ -550,7 +532,6 @@ mod tests {
 				registry_for_run,
 				cameras_for_run,
 				Some(mqtt),
-				"bairelay".into(),
 				cancel_for_run,
 			)
 			.await
@@ -590,7 +571,7 @@ mod tests {
 		// short UID so the prefix-match resolves. Connect once;
 		// expect status/motion=on within ~1 s and a wake-lock
 		// acquire on that handle.
-		let registry = bairelay_wake_server::make_registry();
+		let registry = crate::wake_server::make_registry();
 		registry.upsert(
 			"FAKEUID01234",
 			"127.0.0.1:55000".parse().unwrap(),
@@ -608,7 +589,7 @@ mod tests {
 		let port = probe.local_addr().unwrap().port();
 		drop(probe);
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let cancel = CancellationToken::new();
 		let cfg = RuntimeConfig {
 			bind_addr: "127.0.0.1".parse().unwrap(),
@@ -625,7 +606,6 @@ mod tests {
 				registry_for_run,
 				cameras_for_run,
 				Some(mqtt),
-				"bairelay".into(),
 				cancel_for_run,
 			)
 			.await
@@ -660,7 +640,7 @@ mod tests {
 	}
 
 	async fn poll_published(
-		mock: &bairelay_mqtt::test_support::MockHandle,
+		mock: &crate::mqtt::test_support::MockHandle,
 		deadline: Duration,
 		mut pred: impl FnMut(&str, &[u8]) -> bool,
 	) -> bool {

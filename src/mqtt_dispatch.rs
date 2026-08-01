@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use bairelay_mqtt::control::{ControlCommand, IrMode, PtzDirection};
-use bairelay_mqtt::{topics, SharedMqttClient, StatusPublisher};
+use crate::mqtt::control::{ControlCommand, IrMode, PtzDirection};
+use crate::mqtt::{topics, SharedMqttClient};
 
-use bairelay_neolink_core::bc_protocol::{Direction, LightState};
+use crate::baichuan::bc_protocol::{Direction, LightState};
 
 use crate::camera::CameraHandle;
 
@@ -116,16 +116,15 @@ pub async fn dispatch_control(
 			};
 			timeout_to_result(timeout(CMD_TIMEOUT, bc.irled_light_set(ls)).await)
 		}
-		ControlCommand::Pir {
-			camera: ref cam_name,
-			state,
-		} => {
+		ControlCommand::Pir { state, .. } => {
 			let result = timeout_to_result(timeout(CMD_TIMEOUT, bc.pir_set(state)).await);
 			if result.is_ok() {
-				// Re-publish PIR state after change
-				let publisher = StatusPublisher::new(mqtt, topic_prefix, cam_name);
-				let _ = publisher.publish_pir(state).await;
-				cam.status_cache().set_pir(state);
+				// Report the new PIR state so HA reflects the change
+				// without waiting for the next connect-time query.
+				let _ = cam
+					.status_reporter(mqtt)
+					.report(crate::camera_status::CameraEvent::Pir(state))
+					.await;
 			}
 			result
 		}
@@ -192,7 +191,7 @@ pub async fn dispatch_control(
 				// `query/ptz/preset`; a miss means either a typo or a
 				// stale dashboard.
 				tracing::warn!(camera = %camera, name = %name, "PTZ preset name not in cache");
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"PTZ preset name not in cache",
 				))
 			}
@@ -200,9 +199,13 @@ pub async fn dispatch_control(
 		ControlCommand::PtzAssign {
 			preset_id, name, ..
 		} => timeout_to_result(timeout(CMD_TIMEOUT, bc.set_ptz_preset(preset_id, name)).await),
-		ControlCommand::Zoom { level, .. } => {
-			timeout_to_result(timeout(CMD_TIMEOUT, bc.zoom_to((level * 1000.0) as u32)).await)
-		}
+		ControlCommand::Zoom { level, .. } => timeout_to_result(
+			timeout(
+				CMD_TIMEOUT,
+				bc.zoom_to(crate::ptz::ZoomLevel::from_factor(level)),
+			)
+			.await,
+		),
 		ControlCommand::Siren { state, .. } => {
 			if state {
 				timeout_to_result(timeout(CMD_TIMEOUT, bc.siren()).await)
@@ -217,10 +220,10 @@ pub async fn dispatch_control(
 		// Query commands -- serialize response as XML to status topic
 		// (non-retained), matching neolink behavior.
 		ControlCommand::QueryBattery { ref camera, .. } => {
-			match timeout(CMD_TIMEOUT, bc.battery_info()).await {
-				Ok(Ok(info)) => {
+			match timeout(CMD_TIMEOUT, bc.battery_status()).await {
+				Ok(Ok(status)) => {
 					let topic = topics::status_battery(topic_prefix, camera);
-					if let Ok(xml) = serialize_xml(&info) {
+					if let Ok(xml) = serialize_xml(&BatteryXmlPayload::from(status)) {
 						let _ = mqtt.publish(&topic, xml.as_bytes()).await;
 					}
 				}
@@ -230,7 +233,7 @@ pub async fn dispatch_control(
 			Ok(())
 		}
 		ControlCommand::QueryPreview { ref camera } => {
-			match timeout(CMD_TIMEOUT, bc.get_snapshot()).await {
+			match timeout(CMD_TIMEOUT, bc.snapshot()).await {
 				Ok(Ok(jpeg)) => {
 					// One-shot render (no shared cache); cheaper than
 					// threading the per-camera OverlayCache in for a
@@ -241,8 +244,11 @@ pub async fn dispatch_control(
 						*cam.preview_state_rx().borrow(),
 						None,
 					);
-					let publisher = StatusPublisher::new(mqtt, topic_prefix, camera);
-					if let Err(e) = publisher.publish_preview(&payload).await {
+					if let Err(e) = cam
+						.status_reporter(mqtt)
+						.report(crate::camera_status::CameraEvent::Preview(payload))
+						.await
+					{
 						tracing::warn!(camera = %camera, error = %e, "QueryPreview publish failed");
 					}
 				}
@@ -254,7 +260,7 @@ pub async fn dispatch_control(
 			Ok(())
 		}
 		ControlCommand::QueryPir { ref camera, .. } => {
-			match timeout(CMD_TIMEOUT, bc.get_pirstate()).await {
+			match timeout(CMD_TIMEOUT, bc.pir_config()).await {
 				Ok(Ok(pir_state)) => {
 					let topic = topics::status_pir(topic_prefix, camera);
 					if let Ok(xml) = serialize_xml(&pir_state) {
@@ -267,13 +273,11 @@ pub async fn dispatch_control(
 			Ok(())
 		}
 		ControlCommand::QueryPtzPreset { ref camera } => {
-			match timeout(CMD_TIMEOUT, bc.get_ptz_preset()).await {
-				Ok(Ok(p)) => {
-					let presets: Vec<(u8, String)> = p
-						.preset_list
-						.preset
+			match timeout(CMD_TIMEOUT, bc.ptz_presets()).await {
+				Ok(Ok(slots)) => {
+					let presets: Vec<(u8, String)> = slots
 						.into_iter()
-						.filter_map(|preset| preset.name.map(|n| (preset.id, n)))
+						.filter_map(|slot| slot.name.map(|n| (slot.id, n)))
 						.collect();
 					cam.replace_preset_cache(presets);
 					if let Err(e) = cam.publish_discovery().await {
@@ -285,10 +289,10 @@ pub async fn dispatch_control(
 					}
 				}
 				Ok(Err(e)) => {
-					tracing::warn!(camera = %camera, error = %e, "QueryPtzPreset: get_ptz_preset failed")
+					tracing::warn!(camera = %camera, error = %e, "QueryPtzPreset: ptz_presets failed")
 				}
 				Err(_) => {
-					tracing::warn!(camera = %camera, "QueryPtzPreset: get_ptz_preset timed out")
+					tracing::warn!(camera = %camera, "QueryPtzPreset: ptz_presets timed out")
 				}
 			}
 			Ok(())
@@ -311,7 +315,7 @@ pub async fn dispatch_control(
 async fn wait_for_bc_camera(
 	cam: &Arc<CameraHandle>,
 	deadline: Duration,
-) -> Option<Arc<dyn bairelay_neolink_core::bc_protocol::CameraDriver>> {
+) -> Option<Arc<dyn crate::camera::Camera>> {
 	let cancel = cam.cancel_token().clone();
 	let cam_clone = Arc::clone(cam);
 	let inner = async move {
@@ -335,15 +339,40 @@ async fn wait_for_bc_camera(
 /// need a fake camera that hangs 30 s.
 pub(crate) fn timeout_to_result<T>(
 	outcome: std::result::Result<
-		std::result::Result<T, bairelay_neolink_core::bc_protocol::Error>,
+		std::result::Result<T, crate::baichuan::bc_protocol::Error>,
 		tokio::time::error::Elapsed,
 	>,
-) -> std::result::Result<T, bairelay_neolink_core::bc_protocol::Error> {
+) -> std::result::Result<T, crate::baichuan::bc_protocol::Error> {
 	outcome.unwrap_or_else(|_| {
-		Err(bairelay_neolink_core::bc_protocol::Error::Other(
+		Err(crate::baichuan::bc_protocol::Error::Other(
 			"Command timed out",
 		))
 	})
+}
+
+/// `query/battery` reply payload. The element names mirror neolink's
+/// `<BatteryInfo>` XML for the fields bairelay carries (percent,
+/// millivolt voltage, charge status, low-power flag) so existing HA
+/// parsers keep matching; fields no consumer ever read (temperature,
+/// current, adapter status) are no longer emitted.
+#[derive(serde::Serialize)]
+#[serde(rename = "BatteryInfo", rename_all = "camelCase")]
+struct BatteryXmlPayload {
+	battery_percent: u8,
+	voltage: i32,
+	charge_status: String,
+	low_power: u32,
+}
+
+impl From<crate::battery::BatteryStatus> for BatteryXmlPayload {
+	fn from(status: crate::battery::BatteryStatus) -> Self {
+		Self {
+			battery_percent: status.percent,
+			voltage: status.voltage.get(),
+			charge_status: status.charge_status,
+			low_power: u32::from(status.low_power),
+		}
+	}
 }
 
 /// Serialize a serde-compatible struct to XML string (matches neolink's
@@ -358,28 +387,27 @@ fn serialize_xml<T: serde::Serialize>(value: &T) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::camera::Camera;
 	use crate::camera::CameraHandle;
 	use crate::config::test_helpers::minimal_camera_config;
-	use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCamera, FakeCameraBuilder};
+	use crate::fake_camera::{FakeCamera, FakeCameraBuilder};
 	use std::sync::Arc as StdArc;
 	use tokio_util::sync::CancellationToken;
 
 	#[test]
 	fn timeout_to_result_forwards_ok_value() {
-		let r: std::result::Result<u32, bairelay_neolink_core::bc_protocol::Error> =
+		let r: std::result::Result<u32, crate::baichuan::bc_protocol::Error> =
 			timeout_to_result(Ok(Ok(42)));
 		assert_eq!(r.unwrap(), 42);
 	}
 
 	#[test]
 	fn timeout_to_result_forwards_inner_error() {
-		let r: std::result::Result<u32, bairelay_neolink_core::bc_protocol::Error> =
-			timeout_to_result(Ok(Err(
-				bairelay_neolink_core::bc_protocol::Error::AuthFailed,
-			)));
+		let r: std::result::Result<u32, crate::baichuan::bc_protocol::Error> =
+			timeout_to_result(Ok(Err(crate::baichuan::bc_protocol::Error::AuthFailed)));
 		assert!(matches!(
 			r.unwrap_err(),
-			bairelay_neolink_core::bc_protocol::Error::AuthFailed
+			crate::baichuan::bc_protocol::Error::AuthFailed
 		));
 	}
 
@@ -387,13 +415,11 @@ mod tests {
 	async fn timeout_to_result_elapsed_becomes_other_command_timed_out() {
 		let elapsed = tokio::time::timeout(
 			Duration::from_millis(1),
-			std::future::pending::<
-				std::result::Result<(), bairelay_neolink_core::bc_protocol::Error>,
-			>(),
+			std::future::pending::<std::result::Result<(), crate::baichuan::bc_protocol::Error>>(),
 		)
 		.await
 		.unwrap_err();
-		let r: std::result::Result<(), bairelay_neolink_core::bc_protocol::Error> =
+		let r: std::result::Result<(), crate::baichuan::bc_protocol::Error> =
 			timeout_to_result(Err(elapsed));
 		let err = r.unwrap_err();
 		assert!(format!("{err}").contains("Command timed out"));
@@ -418,7 +444,7 @@ mod tests {
 	) -> (HashMap<String, Arc<CameraHandle>>, StdArc<FakeCamera>) {
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(minimal_camera_config(name), cancel, None));
-		let driver: Arc<dyn CameraDriver> = fake.clone();
+		let driver: Arc<dyn Camera> = fake.clone();
 		handle.set_driver_for_test(driver);
 		let mut map = HashMap::new();
 		map.insert(name.to_string(), handle);
@@ -476,14 +502,14 @@ mod tests {
 		tokio::time::sleep(Duration::from_millis(20)).await;
 	}
 
-	/// `ControlCommand::Reboot` dispatches to `CameraDriver::reboot`
+	/// `ControlCommand::Reboot` dispatches to `Camera::reboot`
 	/// exactly once. Fake records the invocation count; the OK reply
 	/// is published on the control topic.
 	#[tokio::test]
 	async fn dispatch_reboot_invokes_driver_and_replies_ok() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-reboot", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Reboot {
@@ -516,7 +542,7 @@ mod tests {
 	async fn dispatch_floodlight_on_invokes_driver_with_30s_duration() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-fl", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Floodlight {
@@ -542,7 +568,7 @@ mod tests {
 	async fn dispatch_floodlight_off_invokes_driver_with_30s_duration() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-fl-off", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Floodlight {
@@ -568,7 +594,7 @@ mod tests {
 	async fn dispatch_pir_set_invokes_driver_and_republishes_state() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pir", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Pir {
@@ -609,7 +635,7 @@ mod tests {
 		// FakeCamera-backed CameraHandle has an empty cache.
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-pn", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::PtzPresetByName {
@@ -638,7 +664,7 @@ mod tests {
 	async fn dispatch_ptz_assign_invokes_driver_with_id_and_name() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pt", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::PtzAssign {
@@ -665,11 +691,11 @@ mod tests {
 	/// zero so the test doesn't wait on a real clock.
 	#[tokio::test]
 	async fn dispatch_ptz_directional_move_sends_direction_then_stop() {
-		use bairelay_neolink_core::bc_protocol::Direction;
+		use crate::baichuan::bc_protocol::Direction;
 
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pd", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Ptz {
@@ -696,7 +722,7 @@ mod tests {
 	/// before the command failed should not be left running.
 	#[tokio::test]
 	async fn dispatch_ptz_directional_still_stops_on_error() {
-		use bairelay_neolink_core::bc_protocol::Direction;
+		use crate::baichuan::bc_protocol::Direction;
 
 		// FakeCamera::send_ptz always returns Ok in the scaffolding, so
 		// simulate error via a single-attempt counter-closure is not
@@ -706,7 +732,7 @@ mod tests {
 		// because the second (Stop) is unconditional.
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pe", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Ptz {
@@ -731,7 +757,7 @@ mod tests {
 	async fn dispatch_ptz_preset_invokes_driver_moveto() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pm", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::PtzPreset {
@@ -752,7 +778,7 @@ mod tests {
 	async fn dispatch_led_on_invokes_driver() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-led", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		dispatch_control(
 			ControlCommand::Led {
@@ -776,7 +802,7 @@ mod tests {
 	/// `LightState` and calls `irled_light_set`.
 	#[tokio::test]
 	async fn dispatch_ir_maps_each_mode_variant() {
-		use bairelay_neolink_core::bc_protocol::LightState;
+		use crate::baichuan::bc_protocol::LightState;
 		let cases = [
 			(IrMode::On, LightState::On),
 			(IrMode::Off, LightState::Off),
@@ -785,7 +811,7 @@ mod tests {
 		for (mode, expected) in cases {
 			let fake = FakeCameraBuilder::new().build();
 			let (cameras, fake) = test_cameras_with_fake("cam-ir", fake);
-			let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+			let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 			dispatch_control(
 				ControlCommand::Ir {
 					camera: "cam-ir".to_string(),
@@ -808,7 +834,7 @@ mod tests {
 	async fn dispatch_siren_on_invokes_driver_and_off_is_noop() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-siren", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::Siren {
 				camera: "cam-siren".to_string(),
@@ -845,7 +871,7 @@ mod tests {
 	async fn dispatch_floodlight_tasks_invokes_driver() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-ft", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::FloodlightTasks {
 				camera: "cam-ft".to_string(),
@@ -862,12 +888,12 @@ mod tests {
 		);
 	}
 
-	/// `Zoom { level }` dispatches to `zoom_to((level*1000) as u32)`.
+	/// `Zoom { level }` dispatches to `zoom_to(ZoomLevel::from_factor(level))`.
 	#[tokio::test]
 	async fn dispatch_zoom_scales_level_to_zoom_to() {
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-zoom", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::Zoom {
 				camera: "cam-zoom".to_string(),
@@ -878,24 +904,28 @@ mod tests {
 			"bairelay",
 		)
 		.await;
-		assert_eq!(*fake.calls().zoom_to.lock().unwrap(), vec![500u32]);
+		assert_eq!(
+			*fake.calls().zoom_to.lock().unwrap(),
+			vec![crate::ptz::ZoomLevel::from_factor(0.5)]
+		);
 	}
 
-	/// `QueryBattery` calls `battery_info()` and publishes a
+	/// `QueryBattery` calls `battery_status()` and publishes a
 	/// serialized XML payload to `status/battery`.
 	#[tokio::test]
 	async fn dispatch_query_battery_publishes_xml() {
-		use bairelay_neolink_core::bc::xml::BatteryInfo;
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| {
-				Ok(BatteryInfo {
-					battery_percent: 42,
-					..Default::default()
+			.with_battery_status(|| {
+				Ok(crate::battery::BatteryStatus {
+					percent: 42,
+					voltage: crate::battery::Millivolts(0),
+					charge_status: String::new(),
+					low_power: false,
 				})
 			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qb", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryBattery {
 				camera: "cam-qb".to_string(),
@@ -918,14 +948,14 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_battery_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+			.with_battery_status(|| {
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"battery refused",
 				))
 			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qbe", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryBattery {
 				camera: "cam-qbe".to_string(),
@@ -970,7 +1000,7 @@ mod tests {
 			.with_snapshot(move || Ok(jpeg_clone.clone()))
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qp", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPreview {
 				camera: "cam-qp".to_string(),
@@ -997,10 +1027,10 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_preview_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_snapshot(|| Err(bairelay_neolink_core::bc_protocol::Error::Other("no snap")))
+			.with_snapshot(|| Err(crate::baichuan::bc_protocol::Error::Other("no snap")))
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpe", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPreview {
 				camera: "cam-qpe".to_string(),
@@ -1040,12 +1070,12 @@ mod tests {
 		let mut cfg = minimal_camera_config("cam-qpov");
 		cfg.pause.preview_overlay = false;
 		let handle = Arc::new(CameraHandle::new(cfg, cancel, None));
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		handle.set_driver_for_test(driver);
 		let mut cameras = HashMap::new();
 		cameras.insert("cam-qpov".to_string(), handle);
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPreview {
 				camera: "cam-qpov".to_string(),
@@ -1065,9 +1095,9 @@ mod tests {
 	/// `QueryPir` publishes the camera's PIR state on `status/pir`.
 	#[tokio::test]
 	async fn dispatch_query_pir_publishes_xml() {
-		use bairelay_neolink_core::bc::xml::RfAlarmCfg;
+		use crate::baichuan::bc::xml::RfAlarmCfg;
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| {
+			.with_pir_config(|| {
 				Ok(RfAlarmCfg {
 					enable: 1,
 					..Default::default()
@@ -1075,7 +1105,7 @@ mod tests {
 			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpir", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPir {
 				camera: "cam-qpir".to_string(),
@@ -1096,14 +1126,10 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_query_pir_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"pir refused",
-				))
-			})
+			.with_pir_config(|| Err(crate::baichuan::bc_protocol::Error::Other("pir refused")))
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpe", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPir {
 				camera: "cam-qpe".to_string(),
@@ -1126,26 +1152,19 @@ mod tests {
 	/// is a silent no-op so we only assert the cache + reply here.
 	#[tokio::test]
 	async fn dispatch_query_ptz_preset_refreshes_cache_and_replies_ok() {
-		use bairelay_neolink_core::bc::xml::{Preset, PresetList, PtzPreset};
+		use crate::ptz::PresetSlot;
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| {
-				Ok(PtzPreset {
-					preset_list: PresetList {
-						preset: vec![
-							Preset {
-								id: 1,
-								name: Some("Garden".to_string()),
-								..Default::default()
-							},
-							Preset {
-								id: 2,
-								name: Some("Driveway".to_string()),
-								..Default::default()
-							},
-						],
+			.with_ptz_presets(|| {
+				Ok(vec![
+					PresetSlot {
+						id: 1,
+						name: Some("Garden".to_string()),
 					},
-					..Default::default()
-				})
+					PresetSlot {
+						id: 2,
+						name: Some("Driveway".to_string()),
+					},
+				])
 			})
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qptz", fake);
@@ -1154,7 +1173,7 @@ mod tests {
 			.get("cam-qptz")
 			.unwrap()
 			.set_preset_cache_for_test(vec![(99, "stale".to_string())]);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPtzPreset {
 				camera: "cam-qptz".to_string(),
@@ -1175,23 +1194,19 @@ mod tests {
 			.any(|(t, p, _)| t == "bairelay/cam-qptz/query/ptz/preset" && p == b"OK"));
 	}
 
-	/// When `get_ptz_preset` returns an error, the handler logs and
+	/// When `ptz_presets` returns an error, the handler logs and
 	/// leaves the existing cache intact (no clobber to empty).
 	#[tokio::test]
 	async fn dispatch_query_ptz_preset_driver_error_preserves_cache() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"ptz refused",
-				))
-			})
+			.with_ptz_presets(|| Err(crate::baichuan::bc_protocol::Error::Other("ptz refused")))
 			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qptze", fake);
 		cameras
 			.get("cam-qptze")
 			.unwrap()
 			.set_preset_cache_for_test(vec![(7, "Front".to_string())]);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		dispatch_control(
 			ControlCommand::QueryPtzPreset {
 				camera: "cam-qptze".to_string(),
@@ -1212,17 +1227,17 @@ mod tests {
 			.any(|(t, p, _)| t == "bairelay/cam-qptze/query/ptz/preset" && p == b"OK"));
 	}
 
-	/// When `get_ptz_preset` hangs past `CMD_TIMEOUT` the handler logs
+	/// When `ptz_presets` hangs past `CMD_TIMEOUT` the handler logs
 	/// and replies OK; the cache is left intact.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_query_ptz_preset_timeout_path() {
-		let fake = FakeCameraBuilder::new().with_ptz_preset_pending().build();
+		let fake = FakeCameraBuilder::new().with_ptz_presets_pending().build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qptzt", fake);
 		cameras
 			.get("cam-qptzt")
 			.unwrap()
 			.set_preset_cache_for_test(vec![(3, "Side".to_string())]);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		let dispatch = dispatch_control(
 			ControlCommand::QueryPtzPreset {
 				camera: "cam-qptzt".to_string(),
@@ -1247,11 +1262,11 @@ mod tests {
 	/// move with amount > 0 so the sleep branch runs.)
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_ptz_with_positive_amount_sleeps_before_stop() {
-		use bairelay_neolink_core::bc_protocol::Direction;
+		use crate::baichuan::bc_protocol::Direction;
 
 		let fake = FakeCameraBuilder::new().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-pds", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		// amount = 32 → seconds = 32/32 = 1s of sleep between dir+stop.
 		dispatch_control(
@@ -1278,9 +1293,11 @@ mod tests {
 	/// publishing anything on `status/battery`.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_query_battery_timeout_path() {
-		let fake = FakeCameraBuilder::new().with_battery_info_pending().build();
+		let fake = FakeCameraBuilder::new()
+			.with_battery_status_pending()
+			.build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qbt", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let dispatch = dispatch_control(
 			ControlCommand::QueryBattery {
 				camera: "cam-qbt".to_string(),
@@ -1306,9 +1323,9 @@ mod tests {
 	/// `QueryPir` whose driver hangs past 30 s — same expectation.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_query_pir_timeout_path() {
-		let fake = FakeCameraBuilder::new().with_pirstate_pending().build();
+		let fake = FakeCameraBuilder::new().with_pir_config_pending().build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpit", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let dispatch = dispatch_control(
 			ControlCommand::QueryPir {
 				camera: "cam-qpit".to_string(),
@@ -1331,7 +1348,7 @@ mod tests {
 	async fn dispatch_query_preview_timeout_path() {
 		let fake = FakeCameraBuilder::new().with_snapshot_pending().build();
 		let (cameras, _fake) = test_cameras_with_fake("cam-qpvt", fake);
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let dispatch = dispatch_control(
 			ControlCommand::QueryPreview {
 				camera: "cam-qpvt".to_string(),
@@ -1355,10 +1372,10 @@ mod tests {
 	/// records the call before suspending.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn dispatch_ptz_directional_timeout_still_stops() {
-		use bairelay_neolink_core::bc_protocol::Direction;
+		use crate::baichuan::bc_protocol::Direction;
 		let fake = FakeCameraBuilder::new().with_send_ptz_pending().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-ptt", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		let dispatch = dispatch_control(
 			ControlCommand::Ptz {
 				camera: "cam-ptt".to_string(),
@@ -1395,7 +1412,7 @@ mod tests {
 	async fn dispatch_siren_timeout_path() {
 		let fake = FakeCameraBuilder::new().with_siren_pending().build();
 		let (cameras, fake) = test_cameras_with_fake("cam-st", fake);
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		let dispatch = dispatch_control(
 			ControlCommand::Siren {
 				camera: "cam-st".to_string(),

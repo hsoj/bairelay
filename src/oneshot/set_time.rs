@@ -1,11 +1,11 @@
+use crate::camera::Camera;
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use crate::local_time;
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
+pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
 	// `now_local()` carries the captured UTC offset. The Baichuan
 	// `SystemGeneral` packet encodes both the wall-clock components
 	// and `time_zone = -offset.whole_seconds()`, so the camera's OSD
@@ -20,7 +20,7 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+	use crate::fake_camera::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn set_time_records_call_and_returns_utc_string() {

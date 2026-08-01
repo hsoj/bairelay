@@ -1,8 +1,8 @@
 //! Per-camera capability cache.
 //!
-//! Capabilities are discovered by calling
-//! [`bairelay_neolink_core::bc_protocol::BcCamera::get_support`] once per
-//! successful connect and caching the relevant booleans on
+//! Capabilities are discovered by calling the camera port's
+//! `capabilities()` once per successful connect and caching the
+//! relevant booleans on
 //! [`crate::camera::CameraHandle`]. The HA MQTT discovery publisher
 //! consults this cache to gate capability-dependent entities (PT
 //! buttons on fixed-position cameras, etc.).
@@ -12,7 +12,7 @@
 
 /// Subset of the camera's reported `Support` XML relevant to HA
 /// discovery. `Default` yields "no optional hardware" — the safe
-/// assumption when the `get_support` call fails.
+/// assumption when the capability probe fails.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CameraCapabilities {
 	/// `true` when the camera reports pan-tilt hardware via either
@@ -21,7 +21,7 @@ pub struct CameraCapabilities {
 	pub has_ptz: bool,
 }
 
-impl From<CameraCapabilities> for bairelay_mqtt::discovery::CameraCapabilitiesView {
+impl From<CameraCapabilities> for crate::mqtt::discovery::CameraCapabilitiesView {
 	fn from(caps: CameraCapabilities) -> Self {
 		Self {
 			has_ptz: caps.has_ptz,

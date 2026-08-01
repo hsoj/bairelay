@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 
 use bairelay::camera::CameraHandle;
 use bairelay::config::test_helpers::minimal_camera_config;
+use bairelay::mqtt::control::parse_control_message;
 use bairelay::mqtt_dispatch::dispatch_control;
-use bairelay_mqtt::control::parse_control_message;
 
 /// Default MQTT topic prefix used in these dispatch tests — matches
 /// the bairelay config default.
@@ -15,15 +15,15 @@ const PREFIX: &str = "bairelay";
 /// Create a SharedMqttClient backed by a dummy (unconnected) broker.
 /// The dispatch tests that exercise early-return paths never actually
 /// publish, so the client is never used — but the signature requires one.
-fn dummy_mqtt_client() -> bairelay_mqtt::SharedMqttClient {
-	let cfg = bairelay_mqtt::MqttConfig {
+fn dummy_mqtt_client() -> bairelay::mqtt::SharedMqttClient {
+	let cfg = bairelay::mqtt::MqttConfig {
 		broker_addr: "127.0.0.1".to_string(),
 		port: 0,
 		credentials: None,
 		ca: None,
 		client_auth: None,
 	};
-	let (client, _event_loop) = bairelay_mqtt::connect(&cfg, "test-dispatch", PREFIX).unwrap();
+	let (client, _event_loop) = bairelay::mqtt::connect(&cfg, "test-dispatch", PREFIX).unwrap();
 	client
 }
 

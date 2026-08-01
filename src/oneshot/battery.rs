@@ -1,38 +1,38 @@
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
+use crate::camera::Camera;
 
-pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
-	let info = cam.battery_info().await.context("battery_info failed")?;
-	// Voltage is reported in millivolts (confirmed against captured
-	// samples). Clamp percent to 100 — some Argus firmwares briefly
-	// report 101 on warm boot. We surface mV as the integer the wire
-	// uses, not as a converted float — see Outcome::Battery doc.
+pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+	let status = cam.battery_status().await.context("battery query failed")?;
+	// The port already clamps percent to 0–100 and types voltage as
+	// millivolts; negative mV readings (seen from some firmwares
+	// mid-boot) clamp at this display edge.
 	Ok(Outcome::Battery {
-		percent: info.battery_percent.min(100),
-		voltage_mv: info.voltage.max(0) as u32,
-		charge_status: info.charge_status,
-		low_power: info.low_power != 0,
+		percent: u32::from(status.percent),
+		voltage_mv: status.voltage.get().max(0) as u32,
+		charge_status: status.charge_status,
+		low_power: status.low_power,
 	})
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::BatteryInfo;
-	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use crate::baichuan::bc_protocol::Error;
+
+	use crate::battery::{BatteryStatus, Millivolts};
+	use crate::fake_camera::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn battery_happy_path_maps_fields() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| {
-				Ok(BatteryInfo {
-					battery_percent: 87,
-					voltage: 3942,
+			.with_battery_status(|| {
+				Ok(BatteryStatus {
+					percent: 87,
+					voltage: Millivolts(3942),
 					charge_status: "charging".into(),
-					low_power: 0,
-					..Default::default()
+					low_power: false,
 				})
 			})
 			.build();
@@ -49,35 +49,36 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn battery_clamps_percent_to_100() {
+	async fn battery_clamps_negative_voltage_at_display_edge() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| {
-				Ok(BatteryInfo {
-					battery_percent: 101,
-					voltage: 4200,
+			.with_battery_status(|| {
+				Ok(BatteryStatus {
+					percent: 100,
+					voltage: Millivolts(-1),
 					charge_status: "none".into(),
-					low_power: 1,
-					..Default::default()
+					low_power: true,
 				})
 			})
 			.build();
 		let outcome = run(&*fake).await.unwrap();
 		let Outcome::Battery {
-			percent, low_power, ..
+			voltage_mv,
+			low_power,
+			..
 		} = outcome
 		else {
 			panic!("wrong variant");
 		};
-		assert_eq!(percent, 100);
+		assert_eq!(voltage_mv, 0);
 		assert!(low_power);
 	}
 
 	#[tokio::test]
 	async fn battery_driver_error_propagates_with_context() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| Err(Error::Other("simulated")))
+			.with_battery_status(|| Err(Error::Other("simulated")))
 			.build();
 		let err = run(&*fake).await.unwrap_err();
-		assert!(format!("{:#}", err).contains("battery_info failed"));
+		assert!(format!("{:#}", err).contains("battery query failed"));
 	}
 }

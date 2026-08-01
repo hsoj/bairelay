@@ -4,15 +4,15 @@
 //! gate decisions that `populate_abilities` consumes (see
 //! `docs/implementation.md` § XML parsing brittleness).
 
+use crate::baichuan::bc::xml::{AbilityInfo, AbilityInfoToken};
+use crate::camera::Camera;
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc::xml::{AbilityInfo, AbilityInfoToken};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::{AbilityEntry, Outcome};
 
-pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
+pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
 	let info = cam
-		.get_abilityinfo()
+		.ability_info()
 		.await
 		.context("camera abilityInfo query failed")?;
 	let xml = serialise_xml(&info)?;
@@ -95,8 +95,10 @@ fn flatten(info: &AbilityInfo) -> Vec<AbilityEntry> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::{AbilityInfoSubModule, AbilityInfoToken};
-	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use crate::baichuan::bc::xml::{AbilityInfoSubModule, AbilityInfoToken};
+	use crate::baichuan::bc_protocol::Error;
+
+	use crate::fake_camera::FakeCameraBuilder;
 
 	fn token(values: &[&str]) -> AbilityInfoToken {
 		AbilityInfoToken {
@@ -110,7 +112,7 @@ mod tests {
 	#[tokio::test]
 	async fn run_collects_entries_and_xml_for_typical_response() {
 		let fake = FakeCameraBuilder::new()
-			.with_abilityinfo(|| {
+			.with_ability_info(|| {
 				Ok(AbilityInfo {
 					username: "admin".into(),
 					system: Some(token(&["reboot_rw", "general_ro"])),
@@ -152,7 +154,7 @@ mod tests {
 	#[tokio::test]
 	async fn run_skips_entries_with_unknown_or_missing_kind_suffix() {
 		let fake = FakeCameraBuilder::new()
-			.with_abilityinfo(|| {
+			.with_ability_info(|| {
 				Ok(AbilityInfo {
 					username: "x".into(),
 					// `naked` has no `_rw`/`_ro` suffix; `weird_xx` has a
@@ -175,7 +177,7 @@ mod tests {
 	#[tokio::test]
 	async fn run_handles_camera_with_no_modules_populated() {
 		let fake = FakeCameraBuilder::new()
-			.with_abilityinfo(|| {
+			.with_ability_info(|| {
 				Ok(AbilityInfo {
 					username: "minimal".into(),
 					..Default::default()
@@ -196,7 +198,7 @@ mod tests {
 	#[tokio::test]
 	async fn run_propagates_camera_error_with_context() {
 		let fake = FakeCameraBuilder::new()
-			.with_abilityinfo(|| Err(Error::Other("nope")))
+			.with_ability_info(|| Err(Error::Other("nope")))
 			.build();
 		let err = run(&*fake).await.unwrap_err();
 		assert!(format!("{:#}", err).contains("camera abilityInfo query failed"));

@@ -4,9 +4,9 @@
 //! captured via `bairelay ... --dump-bcmedia <dir>`.
 //!
 //! The [`FakeStreamProvider`] implements
-//! [`bairelay_rtsp::provider::StreamProvider`] by deserializing
+//! [`bairelay::rtsp::provider::StreamProvider`] by deserializing
 //! `BcMedia` packets from a `.bcmedia` file and translating them into
-//! [`bairelay_rtsp::provider::Frame`]s through the SAME
+//! [`bairelay::rtsp::provider::Frame`]s through the SAME
 //! [`bairelay::stream_source::apply_bcmedia_packet`] helper that the
 //! production reader task uses. This is what distinguishes it from the
 //! `MockProvider` used in the RTSP-crate integration tests: `MockProvider`
@@ -31,21 +31,21 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use bairelay::audio_presence::AudioPresence;
-use bairelay::stream_source::{apply_bcmedia_packet, GapState, StreamTranslatorState};
-use bairelay_rtsp::buffer::LastFrameBuffer;
-use bairelay_rtsp::codec::nal::{H264NalType, H265NalType};
-use bairelay_rtsp::codec::VideoCodec;
-use bairelay_rtsp::provider::{
+use bairelay::rtsp::buffer::LastFrameBuffer;
+use bairelay::rtsp::codec::nal::{H264NalType, H265NalType};
+use bairelay::rtsp::codec::VideoCodec;
+use bairelay::rtsp::protocol::auth::UserCred;
+use bairelay::rtsp::provider::{
 	Frame, SessionGuard, StreamError, StreamProvider, SubscriptionHandle,
 };
-use bairelay_rtsp::rtsp::auth::UserCred;
-use bairelay_rtsp::sdp::SdpParams;
-use bairelay_rtsp::server::rtcp::SR_INTERVAL;
-use bairelay_rtsp::server::{RtspServer, ServerConfig};
-use bairelay_rtsp::url::StreamKind as RtspStreamKind;
+use bairelay::rtsp::sdp::SdpParams;
+use bairelay::rtsp::server::rtcp::SR_INTERVAL;
+use bairelay::rtsp::server::{RtspServer, ServerConfig};
+use bairelay::rtsp::url::StreamKind as RtspStreamKind;
+use bairelay::stream_source::{apply_bcmedia_packet, StreamTranslatorState};
 
-use bairelay_neolink_core::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe, VideoType};
-use bairelay_neolink_core::Error as NeolinkError;
+use bairelay::baichuan::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe, VideoType};
+use bairelay::baichuan::Error as NeolinkError;
 
 /// Capacity of the replay broadcast channel. Mirrors production
 /// (`BROADCAST_CAPACITY` in `src/stream_source.rs`) so backpressure
@@ -317,7 +317,6 @@ fn prescan_into_sdp(
 	let mut state = StreamTranslatorState::default();
 	// Prescan only populates SDP + presence; we always pretend upstream
 	// is `Live` here so audio packets aren't dropped by the 	// Bridging gate (DESCRIBE-time discovery must see them).
-	let gap_state = std::sync::Mutex::new(GapState::Live);
 
 	let mut buf = BytesMut::from(bytes);
 	loop {
@@ -332,7 +331,7 @@ fn prescan_into_sdp(
 					sdp_params,
 					audio_presence,
 					&mut state,
-					&gap_state,
+					false,
 				);
 				let (video_ready, audio_ready) = {
 					let snapshot = sdp_params.read().expect("sdp lock poisoned");
@@ -408,7 +407,6 @@ async fn replay_task(
 	let mut state = StreamTranslatorState::default();
 	// Replay always advertises `Live` — we're feeding a finite fixture
 	// from disk, so the gap-bridging semantics don't apply.
-	let gap_state = std::sync::Mutex::new(GapState::Live);
 	let mut buf = BytesMut::from(bytes.as_slice());
 
 	loop {
@@ -463,7 +461,7 @@ async fn replay_task(
 			&sdp_params,
 			&presence,
 			&mut state,
-			&gap_state,
+			false,
 		);
 
 		// When the subscriber side drops, `receiver_count()` hits zero.
@@ -2342,7 +2340,6 @@ async fn fixture_replay_bridges_injected_gap() {
 	let (seed_tx, _seed_rx) = broadcast::channel::<Frame>(4);
 	let presence = Arc::new(RwLock::new(AudioPresence::Unknown));
 	let mut seed_state = StreamTranslatorState::default();
-	let seed_gap = std::sync::Mutex::new(GapState::Live);
 	apply_bcmedia_packet(
 		&BcMedia::Iframe(BcMediaIframe {
 			video_type: VideoType::H265,
@@ -2357,7 +2354,7 @@ async fn fixture_replay_bridges_injected_gap() {
 		&sdp_seed,
 		&presence,
 		&mut seed_state,
-		&seed_gap,
+		false,
 	);
 	let seeded_params = sdp_seed.read().expect("sdp lock poisoned").clone();
 	assert!(

@@ -1,5 +1,5 @@
 use super::errors::{ConfigError, InterruptedError, UsageError};
-use bairelay_neolink_core::bc_protocol::Error as CoreError;
+use crate::baichuan::bc_protocol::Error as CoreError;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNEXPECTED: i32 = 1;
@@ -84,7 +84,7 @@ fn classify_core(err: &CoreError) -> i32 {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc_protocol::Error as CoreError;
+	use crate::baichuan::bc_protocol::Error as CoreError;
 
 	#[test]
 	fn classify_config_error() {

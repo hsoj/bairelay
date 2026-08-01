@@ -1,9 +1,9 @@
+use crate::camera::Camera;
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
+pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
 	cam.siren().await.context("siren trigger failed")?;
 	Ok(Outcome::Siren)
 }
@@ -11,7 +11,7 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+	use crate::fake_camera::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn siren_returns_siren_variant_and_logs_call() {

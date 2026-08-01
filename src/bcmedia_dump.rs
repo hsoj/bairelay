@@ -21,8 +21,8 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bairelay_neolink_core::bcmedia::model::BcMedia;
-use bairelay_rtsp::url::StreamKind as RtspStreamKind;
+use crate::baichuan::bcmedia::model::BcMedia;
+use crate::rtsp::url::StreamKind as RtspStreamKind;
 
 /// Configuration threaded through the handle tree when `--dump-bcmedia` is set.
 ///
@@ -205,7 +205,7 @@ impl FrameDumper {
 /// log and move on.
 #[derive(Debug)]
 pub(crate) enum DumpError {
-	Serialize(bairelay_neolink_core::Error),
+	Serialize(crate::baichuan::Error),
 	Io(io::Error),
 }
 
@@ -300,7 +300,7 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bcmedia::model::{
+	use crate::baichuan::bcmedia::model::{
 		BcMediaAac, BcMediaAdpcm, BcMediaIframe, BcMediaInfoV1, BcMediaInfoV2, BcMediaPframe,
 		VideoType,
 	};

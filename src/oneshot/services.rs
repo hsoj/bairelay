@@ -1,40 +1,16 @@
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::errors::UsageError;
 use super::output::{Outcome, ServiceEntry};
-
-/// Which camera network service to inspect or configure.
-#[derive(Debug, Clone, Copy)]
-pub enum Service {
-	Baichuan,
-	Http,
-	Https,
-	Rtmp,
-	Rtsp,
-	Onvif,
-}
-
-impl Service {
-	fn label(self) -> &'static str {
-		match self {
-			Service::Baichuan => "baichuan",
-			Service::Http => "http",
-			Service::Https => "https",
-			Service::Rtmp => "rtmp",
-			Service::Rtsp => "rtsp",
-			Service::Onvif => "onvif",
-		}
-	}
-}
+use crate::camera::Camera;
+use crate::camera_services::ServiceKind;
 
 /// What to do with the service: read, enable, disable, set port, or both.
 ///
 /// Port is `u16` (matching the CLI surface in `cli.rs::ServiceAction`).
 /// `0` is rejected at dispatch time as `UsageError` (operator typo
-/// guard); the cast to `u32` happens at the `CameraDriver` boundary
-/// since bairelay_neolink_core's `set_http(set_on, set_port: Option<u32>)` etc.
-/// take a wider type.
+/// guard); the cast to `u32` happens at the port boundary since the
+/// camera-side `set_service(…, port: Option<u32>)` takes a wider type.
 #[derive(Debug, Clone)]
 pub enum Action {
 	Get,
@@ -44,7 +20,7 @@ pub enum Action {
 	Set { port: u16, enabled: bool },
 }
 
-pub async fn run(cam: &dyn CameraDriver, service: Service, action: Action) -> Result<Outcome> {
+pub async fn run(cam: &dyn Camera, service: ServiceKind, action: Action) -> Result<Outcome> {
 	// Apply the mutation first (if any), then always read back so the
 	// returned Outcome reflects the camera's current state.
 	match &action {
@@ -57,11 +33,14 @@ pub async fn run(cam: &dyn CameraDriver, service: Service, action: Action) -> Re
 		}
 	}
 
-	let (port, enabled) = read(cam, service).await?;
+	let state = cam
+		.service(service)
+		.await
+		.with_context(|| format!("read {service} service failed"))?;
 	Ok(Outcome::Service {
 		service: service.label().into(),
-		port,
-		enabled,
+		port: state.port,
+		enabled: state.enabled,
 	})
 }
 
@@ -80,22 +59,14 @@ const PER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 /// older firmwares don't expose all six on every channel, and any
 /// individual RPC that exceeds [`PER_RPC_TIMEOUT`] degrades to the
 /// same "unknown" entry instead of starving the remaining reads.
-pub async fn run_all(cam: &dyn CameraDriver) -> Result<Outcome> {
-	const ALL: [Service; 6] = [
-		Service::Baichuan,
-		Service::Http,
-		Service::Https,
-		Service::Rtmp,
-		Service::Rtsp,
-		Service::Onvif,
-	];
-	let mut services = Vec::with_capacity(ALL.len());
-	for svc in ALL {
-		match tokio::time::timeout(PER_RPC_TIMEOUT, read(cam, svc)).await {
-			Ok(Ok((port, enabled))) => services.push(ServiceEntry {
+pub async fn run_all(cam: &dyn Camera) -> Result<Outcome> {
+	let mut services = Vec::with_capacity(ServiceKind::ALL.len());
+	for svc in ServiceKind::ALL {
+		match tokio::time::timeout(PER_RPC_TIMEOUT, cam.service(svc)).await {
+			Ok(Ok(state)) => services.push(ServiceEntry {
 				name: svc.label().into(),
-				port,
-				enabled,
+				port: state.port,
+				enabled: state.enabled,
 			}),
 			Ok(Err(_)) | Err(_) => services.push(ServiceEntry {
 				name: svc.label().into(),
@@ -108,127 +79,55 @@ pub async fn run_all(cam: &dyn CameraDriver) -> Result<Outcome> {
 }
 
 async fn apply_toggle(
-	cam: &dyn CameraDriver,
-	service: Service,
+	cam: &dyn Camera,
+	service: ServiceKind,
 	set_on: Option<bool>,
 	set_port: Option<u16>,
 ) -> Result<()> {
 	if matches!(set_port, Some(0)) {
 		return Err(UsageError::new(format!("port 0 is not valid for {}", service.label())).into());
 	}
-	let set_port = set_port.map(u32::from);
-	match service {
-		Service::Baichuan => cam
-			.set_serverport(set_on, set_port)
-			.await
-			.context("set_serverport failed")?,
-		Service::Http => cam
-			.set_http(set_on, set_port)
-			.await
-			.context("set_http failed")?,
-		Service::Https => cam
-			.set_https(set_on, set_port)
-			.await
-			.context("set_https failed")?,
-		Service::Rtmp => cam
-			.set_rtmp(set_on, set_port)
-			.await
-			.context("set_rtmp failed")?,
-		Service::Rtsp => cam
-			.set_rtsp(set_on, set_port)
-			.await
-			.context("set_rtsp failed")?,
-		Service::Onvif => cam
-			.set_onvif(set_on, set_port)
-			.await
-			.context("set_onvif failed")?,
-	}
+	cam.set_service(service, set_on, set_port.map(u32::from))
+		.await
+		.with_context(|| format!("set {service} service failed"))?;
 	Ok(())
-}
-
-async fn read(cam: &dyn CameraDriver, service: Service) -> Result<(u32, Option<bool>)> {
-	let (port, enable) = match service {
-		Service::Baichuan => {
-			let s = cam
-				.get_serverport()
-				.await
-				.context("get_serverport failed")?;
-			(s.port, s.enable)
-		}
-		Service::Http => {
-			let s = cam.get_http().await.context("get_http failed")?;
-			(s.port, s.enable)
-		}
-		Service::Https => {
-			let s = cam.get_https().await.context("get_https failed")?;
-			(s.port, s.enable)
-		}
-		Service::Rtmp => {
-			let s = cam.get_rtmp().await.context("get_rtmp failed")?;
-			(s.port, s.enable)
-		}
-		Service::Rtsp => {
-			let s = cam.get_rtsp().await.context("get_rtsp failed")?;
-			(s.port, s.enable)
-		}
-		Service::Onvif => {
-			let s = cam.get_onvif().await.context("get_onvif failed")?;
-			(s.port, s.enable)
-		}
-	};
-	Ok((port, enable.map(|e| e != 0)))
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::{
-		HttpPort, HttpsPort, OnvifPort, RtmpPort, RtspPort, ServerPort,
-	};
-	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use crate::baichuan::bc_protocol::Error;
+	use crate::camera_services::ServicePortState;
+	use crate::fake_camera::FakeCameraBuilder;
 
-	fn all_enabled_fake() -> std::sync::Arc<bairelay_neolink_core::bc_protocol::FakeCamera> {
+	fn all_enabled_fake() -> std::sync::Arc<crate::fake_camera::FakeCamera> {
 		FakeCameraBuilder::new()
-			.with_serverport(|| {
-				Ok(ServerPort {
-					port: 9000,
-					enable: Some(1),
-					..Default::default()
-				})
-			})
-			.with_http(|| {
-				Ok(HttpPort {
-					port: 80,
-					enable: Some(1),
-					..Default::default()
-				})
-			})
-			.with_https(|| {
-				Ok(HttpsPort {
-					port: 443,
-					enable: Some(0),
-					..Default::default()
-				})
-			})
-			.with_rtsp(|| {
-				Ok(RtspPort {
-					port: 554,
-					enable: Some(1),
-					..Default::default()
-				})
-			})
-			.with_rtmp(|| {
-				Ok(RtmpPort {
-					port: 1935,
-					enable: Some(1),
-					..Default::default()
-				})
-			})
-			.with_onvif(|| {
-				Ok(OnvifPort {
-					port: 8000,
-					enable: Some(1),
-					..Default::default()
+			.with_service(|kind| {
+				Ok(match kind {
+					ServiceKind::Baichuan => ServicePortState {
+						port: 9000,
+						enabled: Some(true),
+					},
+					ServiceKind::Http => ServicePortState {
+						port: 80,
+						enabled: Some(true),
+					},
+					ServiceKind::Https => ServicePortState {
+						port: 443,
+						enabled: Some(false),
+					},
+					ServiceKind::Rtsp => ServicePortState {
+						port: 554,
+						enabled: Some(true),
+					},
+					ServiceKind::Rtmp => ServicePortState {
+						port: 1935,
+						enabled: Some(true),
+					},
+					ServiceKind::Onvif => ServicePortState {
+						port: 8000,
+						enabled: Some(true),
+					},
 				})
 			})
 			.build()
@@ -236,18 +135,18 @@ mod tests {
 
 	#[tokio::test]
 	async fn service_label_all_variants() {
-		assert_eq!(Service::Baichuan.label(), "baichuan");
-		assert_eq!(Service::Http.label(), "http");
-		assert_eq!(Service::Https.label(), "https");
-		assert_eq!(Service::Rtmp.label(), "rtmp");
-		assert_eq!(Service::Rtsp.label(), "rtsp");
-		assert_eq!(Service::Onvif.label(), "onvif");
+		assert_eq!(ServiceKind::Baichuan.label(), "baichuan");
+		assert_eq!(ServiceKind::Http.label(), "http");
+		assert_eq!(ServiceKind::Https.label(), "https");
+		assert_eq!(ServiceKind::Rtmp.label(), "rtmp");
+		assert_eq!(ServiceKind::Rtsp.label(), "rtsp");
+		assert_eq!(ServiceKind::Onvif.label(), "onvif");
 	}
 
 	#[tokio::test]
 	async fn run_get_http_returns_current_state() {
 		let fake = all_enabled_fake();
-		let outcome = run(&*fake, Service::Http, Action::Get).await.unwrap();
+		let outcome = run(&*fake, ServiceKind::Http, Action::Get).await.unwrap();
 		assert_eq!(
 			outcome,
 			Outcome::Service {
@@ -261,32 +160,34 @@ mod tests {
 	#[tokio::test]
 	async fn run_on_baichuan_records_set_call() {
 		let fake = all_enabled_fake();
-		let _ = run(&*fake, Service::Baichuan, Action::On).await.unwrap();
+		let _ = run(&*fake, ServiceKind::Baichuan, Action::On)
+			.await
+			.unwrap();
 		assert_eq!(
-			*fake.calls().set_serverport.lock().unwrap(),
-			vec![(Some(true), None)]
+			*fake.calls().set_service.lock().unwrap(),
+			vec![(ServiceKind::Baichuan, Some(true), None)]
 		);
 	}
 
 	#[tokio::test]
 	async fn run_off_https_records_set_call() {
 		let fake = all_enabled_fake();
-		let _ = run(&*fake, Service::Https, Action::Off).await.unwrap();
+		let _ = run(&*fake, ServiceKind::Https, Action::Off).await.unwrap();
 		assert_eq!(
-			*fake.calls().set_https.lock().unwrap(),
-			vec![(Some(false), None)]
+			*fake.calls().set_service.lock().unwrap(),
+			vec![(ServiceKind::Https, Some(false), None)]
 		);
 	}
 
 	#[tokio::test]
 	async fn run_port_rtsp_records_set_call() {
 		let fake = all_enabled_fake();
-		let _ = run(&*fake, Service::Rtsp, Action::Port(8554))
+		let _ = run(&*fake, ServiceKind::Rtsp, Action::Port(8554))
 			.await
 			.unwrap();
 		assert_eq!(
-			*fake.calls().set_rtsp.lock().unwrap(),
-			vec![(None, Some(8554))]
+			*fake.calls().set_service.lock().unwrap(),
+			vec![(ServiceKind::Rtsp, None, Some(8554))]
 		);
 	}
 
@@ -295,7 +196,7 @@ mod tests {
 		let fake = all_enabled_fake();
 		let _ = run(
 			&*fake,
-			Service::Rtmp,
+			ServiceKind::Rtmp,
 			Action::Set {
 				port: 1935,
 				enabled: false,
@@ -304,28 +205,28 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(
-			*fake.calls().set_rtmp.lock().unwrap(),
-			vec![(Some(false), Some(1935))]
+			*fake.calls().set_service.lock().unwrap(),
+			vec![(ServiceKind::Rtmp, Some(false), Some(1935))]
 		);
 	}
 
 	#[tokio::test]
 	async fn run_onvif_set_records_call() {
 		let fake = all_enabled_fake();
-		let _ = run(&*fake, Service::Onvif, Action::On).await.unwrap();
+		let _ = run(&*fake, ServiceKind::Onvif, Action::On).await.unwrap();
 		assert_eq!(
-			*fake.calls().set_onvif.lock().unwrap(),
-			vec![(Some(true), None)]
+			*fake.calls().set_service.lock().unwrap(),
+			vec![(ServiceKind::Onvif, Some(true), None)]
 		);
 	}
 
 	#[tokio::test]
 	async fn run_http_set_records_call() {
 		let fake = all_enabled_fake();
-		let _ = run(&*fake, Service::Http, Action::On).await.unwrap();
+		let _ = run(&*fake, ServiceKind::Http, Action::On).await.unwrap();
 		assert_eq!(
-			*fake.calls().set_http.lock().unwrap(),
-			vec![(Some(true), None)]
+			*fake.calls().set_service.lock().unwrap(),
+			vec![(ServiceKind::Http, Some(true), None)]
 		);
 	}
 
@@ -347,24 +248,17 @@ mod tests {
 	#[tokio::test]
 	async fn run_all_failing_service_becomes_unknown_entry() {
 		let fake = FakeCameraBuilder::new()
-			.with_serverport(|| Err(Error::Other("bc down")))
-			.with_http(|| {
-				Ok(HttpPort {
+			.with_service(|kind| match kind {
+				ServiceKind::Http => Ok(ServicePortState {
 					port: 80,
-					enable: Some(1),
-					..Default::default()
-				})
-			})
-			.with_https(|| Err(Error::Other("none")))
-			.with_rtsp(|| {
-				Ok(RtspPort {
+					enabled: Some(true),
+				}),
+				ServiceKind::Rtsp => Ok(ServicePortState {
 					port: 554,
-					enable: None,
-					..Default::default()
-				})
+					enabled: None,
+				}),
+				_ => Err(Error::Other("service down")),
 			})
-			.with_rtmp(|| Err(Error::Other("none")))
-			.with_onvif(|| Err(Error::Other("none")))
 			.build();
 		let outcome = run_all(&*fake).await.unwrap();
 		let Outcome::ServiceList { services } = outcome else {
@@ -391,12 +285,12 @@ mod tests {
 		// camera-side rejection. Map to UsageError → EXIT_USAGE = 2 so
 		// CI scripts can branch cleanly.
 		let fake = all_enabled_fake();
-		let err = run(&*fake, Service::Http, Action::Port(0))
+		let err = run(&*fake, ServiceKind::Http, Action::Port(0))
 			.await
 			.expect_err("port 0 must be rejected");
 		assert!(format!("{err:#}").contains("port 0 is not valid"));
 		// Camera was never asked.
-		assert!(fake.calls().set_http.lock().unwrap().is_empty());
+		assert!(fake.calls().set_service.lock().unwrap().is_empty());
 	}
 
 	#[tokio::test]
@@ -404,7 +298,7 @@ mod tests {
 		let fake = all_enabled_fake();
 		let err = run(
 			&*fake,
-			Service::Rtsp,
+			ServiceKind::Rtsp,
 			Action::Set {
 				port: 0,
 				enabled: true,
@@ -413,6 +307,6 @@ mod tests {
 		.await
 		.expect_err("port 0 must be rejected");
 		assert!(format!("{err:#}").contains("port 0 is not valid"));
-		assert!(fake.calls().set_rtsp.lock().unwrap().is_empty());
+		assert!(fake.calls().set_service.lock().unwrap().is_empty());
 	}
 }

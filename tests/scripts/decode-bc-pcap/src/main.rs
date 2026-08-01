@@ -2,7 +2,7 @@
 //!
 //! Reads a tcpdump capture, demuxes UDP datagrams between the camera and
 //! one peer (bairelay or the official client), drives
-//! `bairelay_neolink_core`'s `pcap_decode_api::Session` to reassemble + decrypt the
+//! `bairelay::baichuan`'s `pcap_decode_api::Session` to reassemble + decrypt the
 //! Bc message stream, and prints the decoded XML for each message.
 //!
 //! Used to identify Bc message IDs and XML schemas bairelay does not
@@ -16,8 +16,11 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use bairelay_neolink_core::pcap_decode_api::{Credentials, DecodedMessage, Direction, Session};
-use log::{Log, Metadata, Record};
+use bairelay::baichuan::pcap_decode_api::{Credentials, DecodedMessage, Direction, Session};
+use tracing::field::{Field, Visit};
+use tracing::Event;
+use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::prelude::*;
 
 const USAGE: &str = "\
 decode-bc-pcap — offline decoder for captured Baichuan-over-UDP sessions.
@@ -128,10 +131,10 @@ fn parse_args() -> Result<Args, String> {
 	})
 }
 
-/// Captures `log::trace!` records from bairelay_neolink_core's BcCodex and
-/// surfaces them via a side channel: the most recent payload XML
-/// (per-thread). The decoder pulls this back after each Bc decode call
-/// to attach the raw decrypted XML to the corresponding output line.
+/// Captures `tracing::trace!` records from bairelay::baichuan's BcCodex
+/// and surfaces them via a side channel: the most recent payload XML.
+/// The decoder pulls this back after each Bc decode call to attach the
+/// raw decrypted XML to the corresponding output line.
 struct CaptureLogger {
 	last_payload: Mutex<Option<String>>,
 	last_extension: Mutex<Option<String>>,
@@ -153,13 +156,9 @@ impl CaptureLogger {
 	}
 }
 
-impl Log for CaptureLogger {
-	fn enabled(&self, _: &Metadata) -> bool {
-		true
-	}
-	fn log(&self, record: &Record) {
-		let msg = format!("{}", record.args());
-		// bairelay_neolink_core's de.rs format strings:
+impl CaptureLogger {
+	fn record_message(&self, msg: &str) {
+		// bairelay::baichuan's de.rs format strings:
 		//   "Extension Txt: {:?}"
 		//   "Payload Txt: {:?}"
 		// where `{:?}` Debug-formats a `String` (so the inner value is
@@ -172,7 +171,31 @@ impl Log for CaptureLogger {
 		// Other trace records (Encoding/Decoding chatter from the
 		// codex layers) are dropped — they're not informative here.
 	}
-	fn flush(&self) {}
+}
+
+/// Pulls the formatted message out of a tracing event. `tracing` records
+/// the format string's output under the reserved `message` field, and
+/// `fmt::Arguments`' `Debug` impl forwards to `Display`, so this yields
+/// exactly the string the old `log::Record::args()` did.
+#[derive(Default)]
+struct MessageVisitor(Option<String>);
+
+impl Visit for MessageVisitor {
+	fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+		if field.name() == "message" {
+			self.0 = Some(format!("{value:?}"));
+		}
+	}
+}
+
+impl<S: tracing::Subscriber> Layer<S> for &'static CaptureLogger {
+	fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+		let mut visitor = MessageVisitor::default();
+		event.record(&mut visitor);
+		if let Some(msg) = visitor.0 {
+			self.record_message(&msg);
+		}
+	}
 }
 
 /// Convert the Debug-format of a Rust `String` (e.g. `"<?xml ...>"`) back
@@ -213,11 +236,15 @@ fn main() {
 		std::process::exit(2);
 	});
 
-	// Install the capture logger before any Bc::deserialize call.
+	// Install the capture subscriber before any Bc::deserialize call.
+	// TRACE is the level the payload records are emitted at, and this
+	// process wants every one of them, so no filter is installed.
 	let captured: &'static CaptureLogger = Box::leak(Box::new(CaptureLogger::new()));
 	let _ = LOGGER.set(captured);
-	log::set_logger(captured).expect("logger init");
-	log::set_max_level(log::LevelFilter::Trace);
+	tracing_subscriber::registry()
+		.with(captured)
+		.with(tracing_subscriber::filter::LevelFilter::TRACE)
+		.init();
 
 	if let Err(e) = run(args, captured) {
 		eprintln!("error: {e}");
@@ -455,10 +482,10 @@ fn print_message(
 	} else {
 		// Either body had no payload, or the payload was binary, or trace
 		// capture missed it (shouldn't happen for XML payloads).
-		use bairelay_neolink_core::bc::model::BcBody;
+		use bairelay::baichuan::bc::model::BcBody;
 		match &msg.bc.body {
 			BcBody::ModernMsg(modern) => match &modern.payload {
-				Some(bairelay_neolink_core::bc::xml::BcPayloads::Binary(b)) => {
+				Some(bairelay::baichuan::bc::xml::BcPayloads::Binary(b)) => {
 					println!("--- Payload binary, {} bytes ---", b.len());
 					print_hex_ascii(b);
 					// Surface a UTF-8 XML view if the raw wire bytes are
@@ -487,7 +514,7 @@ fn print_message(
 						}
 					}
 				}
-				Some(bairelay_neolink_core::bc::xml::BcPayloads::BcXml(_)) => {
+				Some(bairelay::baichuan::bc::xml::BcPayloads::BcXml(_)) => {
 					if !brief {
 						println!("--- Payload (parsed only, raw not captured) ---");
 						println!("{:#?}", modern.payload);

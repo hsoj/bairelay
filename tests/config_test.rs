@@ -1925,7 +1925,7 @@ fn push_listener_cfg(
 		cameras: vec![test_helpers::minimal_camera_config("cam1")],
 		..Default::default()
 	};
-	cfg.wake_server = Some(bairelay_wake_server::WakeServerConfig {
+	cfg.wake_server = Some(bairelay::wake_server::WakeServerConfig {
 		enable: true,
 		..Default::default()
 	});
@@ -2001,7 +2001,7 @@ fn validate_rejects_push_listener_without_wake_server() {
 #[test]
 fn validate_rejects_push_listener_with_disabled_wake_server() {
 	let mut cfg = push_listener_cfg(30.0, 443);
-	cfg.wake_server = Some(bairelay_wake_server::WakeServerConfig {
+	cfg.wake_server = Some(bairelay::wake_server::WakeServerConfig {
 		enable: false,
 		..Default::default()
 	});

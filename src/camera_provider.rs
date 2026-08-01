@@ -1,7 +1,7 @@
 //! Adapter from the RTSP `StreamProvider` trait to the binary's
 //! `CameraHandle` + `StreamSource`.
 //!
-//! Sits between [`bairelay_rtsp`]'s server runtime (which only knows the
+//! Sits between [`rtsp`]'s server runtime (which only knows the
 //! `StreamProvider` trait) and the per-camera task tree owned by the
 //! orchestrator. Looks up the requested camera, enforces any per-camera
 //! ACL, acquires a wake lock for the session lifetime, and hands back a
@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bairelay_rtsp::provider::{StreamError, StreamProvider, SubscriptionHandle};
-use bairelay_rtsp::url::StreamKind;
+use crate::rtsp::provider::{StreamError, StreamProvider, SubscriptionHandle};
+use crate::rtsp::url::StreamKind;
 
 use crate::camera::CameraHandle;
 use crate::wake_lock::WakeLockGuard;
@@ -150,7 +150,7 @@ mod tests {
 
 	#[test]
 	fn classify_present_waits_for_audio_no_bonus() {
-		use bairelay_rtsp::codec::AudioCodec;
+		use crate::rtsp::codec::AudioCodec;
 		let (wait, bonus) = classify_presence(crate::audio_presence::AudioPresence::Present {
 			codec: AudioCodec::Aac,
 		});

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bairelay_mqtt::{Event, Packet, SharedMqttClient, StatusPublisher};
+use crate::mqtt::{Event, Packet, SharedMqttClient, StatusPublisher};
 
 use crate::camera::CameraHandle;
 use crate::config::Config;
@@ -31,11 +31,11 @@ pub fn resolve_topic_prefix(config: &Config) -> String {
 /// Convert the config's `[users]` block into the RTSP server's auth
 /// record shape. Pulled out so a test can assert name / password
 /// propagate correctly without instantiating the full server.
-pub fn build_rtsp_users(config: &Config) -> Vec<bairelay_rtsp::rtsp::auth::UserCred> {
+pub fn build_rtsp_users(config: &Config) -> Vec<crate::rtsp::protocol::auth::UserCred> {
 	config
 		.users
 		.iter()
-		.map(|u| bairelay_rtsp::rtsp::auth::UserCred {
+		.map(|u| crate::rtsp::protocol::auth::UserCred {
 			name: u.name.clone(),
 			password: u.pass.clone(),
 		})
@@ -45,9 +45,9 @@ pub fn build_rtsp_users(config: &Config) -> Vec<bairelay_rtsp::rtsp::auth::UserC
 /// Build the MQTT broker config struct from the parsed TOML form. Pure
 /// data transform; fails only if the caller passes a config without
 /// `[mqtt]` (callers bail before this, so we return Option).
-pub fn build_broker_config(config: &Config) -> Option<bairelay_mqtt::MqttConfig> {
+pub fn build_broker_config(config: &Config) -> Option<crate::mqtt::MqttConfig> {
 	let mqtt_config = config.mqtt.as_ref()?;
-	Some(bairelay_mqtt::MqttConfig {
+	Some(crate::mqtt::MqttConfig {
 		broker_addr: mqtt_config.broker_addr.clone(),
 		port: mqtt_config.port,
 		credentials: mqtt_config.credentials.clone(),
@@ -282,7 +282,7 @@ pub async fn handle_connack(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_mqtt::{ConnAck, ConnectReturnCode, Publish, QoS};
+	use crate::mqtt::{ConnAck, ConnectReturnCode, Publish, QoS};
 
 	fn connack_event() -> Result<Event, &'static str> {
 		Ok(Event::Incoming(Packet::ConnAck(ConnAck {
@@ -333,7 +333,7 @@ mod tests {
 		let ev = pingresp_event();
 		assert!(matches!(classify_event(&ev), EventAction::Ignore));
 
-		let ev: Result<Event, &'static str> = Ok(Event::Outgoing(bairelay_mqtt::Outgoing::PingReq));
+		let ev: Result<Event, &'static str> = Ok(Event::Outgoing(crate::mqtt::Outgoing::PingReq));
 		assert!(matches!(classify_event(&ev), EventAction::Ignore));
 	}
 
@@ -414,7 +414,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn handle_connack_with_empty_cameras_is_noop() {
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
 		handle_connack(&cameras, &mqtt, "bairelay").await;
 		// No panic, no assertions — just the empty-loop path.
@@ -509,7 +509,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn publish_shutdown_fanout_is_noop_on_empty_input() {
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
 		publish_shutdown_fanout(&[], &cameras, &mqtt, "bairelay").await;
 		assert_eq!(mock.count(), 0);
@@ -517,7 +517,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn publish_shutdown_fanout_publishes_one_disconnect_per_camera_name() {
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
 		publish_shutdown_fanout(
 			&["cam-a".to_string(), "cam-b".to_string()],
@@ -535,7 +535,7 @@ mod tests {
 		use crate::config::test_helpers::minimal_camera_config;
 		use tokio_util::sync::CancellationToken;
 
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
 			minimal_camera_config("cam-a"),

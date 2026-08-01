@@ -19,10 +19,10 @@ and no library crate knows what a camera is except `core`.
 graph TD
     BIN["bairelay<br/><i>bin + lib</i><br/>src/"]
 
-    CORE["bairelay-neolink-core<br/><i>Baichuan protocol</i><br/>crates/core/"]
-    RTSP["bairelay-rtsp<br/><i>RTSP/RTSPS server</i><br/>crates/rtsp/"]
-    MQTT["bairelay-mqtt<br/><i>broker bridge + HA discovery</i><br/>crates/mqtt/"]
-    WAKE["bairelay-wake-server<br/><i>local P2P replacement</i><br/>crates/wake-server/"]
+    CORE["baichuan<br/><i>Baichuan protocol</i><br/>src/baichuan/"]
+    RTSP["rtsp<br/><i>RTSP/RTSPS server</i><br/>src/rtsp/"]
+    MQTT["mqtt<br/><i>broker bridge + HA discovery</i><br/>src/mqtt/"]
+    WAKE["wake_server<br/><i>local P2P replacement</i><br/>src/wake_server/"]
 
     BIN --> CORE
     BIN --> RTSP
@@ -63,9 +63,9 @@ graph TD
 
 The dotted edges are the point of the design, and they run the *same* direction
 as the solid ones on purpose: there is no arrow from a library back to the
-binary. `crates/rtsp/` declares `StreamProvider` (`crates/rtsp/src/provider.rs`)
+binary. `src/rtsp/` declares `StreamProvider` (`src/rtsp/provider.rs`)
 and the binary supplies the impl (`src/camera_provider.rs`), so camera concepts
-never enter the RTSP crate. Same for `crates/mqtt/`, which knows about topics
+never enter the RTSP module. Same for `src/mqtt/`, which knows about topics
 and payloads but not cameras.
 
 **Known duplication** (`cargo tree -d`): `rand` 0.8 + 0.9, `thiserror` 1 + 2,
@@ -172,7 +172,7 @@ graph TD
         PP["camera_tasks::preview_poller:307"]
         FP["camera_tasks::floodlight_poller:397"]
         FL["camera_tasks::floodlight_listener:433"]
-        KA["core keepalive<br/>crates/core/src/bc_protocol/keepalive.rs"]
+        KA["core keepalive<br/>src/baichuan/bc_protocol/keepalive.rs"]
     end
 
     G --> MQTTTOK
@@ -181,8 +181,8 @@ graph TD
 
     SUPTOK --> W["watchdog<br/>src/watchdog.rs — 30 s safety net"]
     SUPTOK --> SW["startup_wake::warm_last_frame_buffers<br/>src/startup_wake.rs:58"]
-    SUPTOK --> RS["RtspServer::serve_with_listener<br/>crates/rtsp/src/server/listener.rs:63"]
-    SUPTOK --> WS["wake_server::run_with_sockets<br/>crates/wake-server/src/lib.rs:64"]
+    SUPTOK --> RS["RtspServer::serve_with_listener<br/>src/rtsp/server/listener.rs:63"]
+    SUPTOK --> WS["wake_server::run_with_sockets<br/>src/wake_server/lib.rs:64"]
     SUPTOK --> PL["push_listener::run_with_listener<br/>src/push_listener.rs:92"]
 
     CR --> ML
@@ -200,7 +200,7 @@ graph TD
 
 ## 4. RTSP request path
 
-`crates/rtsp/src/server/`. One task per TCP connection; one task per PLAYing
+`src/rtsp/server/`. One task per TCP connection; one task per PLAYing
 session.
 
 ```mermaid
@@ -254,7 +254,7 @@ challenge and accepts a `Basic` header *unconditionally*, even though
 The session task is a coordinator: after the PLAY gate it spawns two
 independent per-kind dispatch loops, each owning its own
 `broadcast::Receiver`. Periodic **RTCP Sender Reports are deliberately not
-emitted** — the SR helpers in `crates/rtsp/src/server/rtcp.rs` exist for a
+emitted** — the SR helpers in `src/rtsp/server/rtcp.rs` exist for a
 future SR-emitting context (`session_task.rs:1–8`).
 
 ---
@@ -266,7 +266,7 @@ exists to serve.
 
 ```mermaid
 flowchart LR
-    subgraph CAM ["camera — crates/core/"]
+    subgraph CAM ["camera — src/baichuan/"]
         direction TB
         C1["BcCamera::start_video<br/>bc_protocol/stream.rs"]
         C2["BcSubscription<br/>connection/bcsub.rs"]
@@ -284,7 +284,7 @@ flowchart LR
         AA["handle_aac :2217"]
         PACE["media_pacer_task :1065<br/>video_pacer_task :1025<br/>audio_pacer_task :993"]
         BC(["broadcast::Sender&lt;Frame&gt;"])
-        LFB["LastFrameBuffer<br/>crates/rtsp/src/buffer.rs"]
+        LFB["LastFrameBuffer<br/>src/rtsp/buffer.rs"]
 
         R --> T --> AP
         AP --> IF
@@ -297,7 +297,7 @@ flowchart LR
         IF --> LFB
     end
 
-    subgraph OUT ["crates/rtsp/"]
+    subgraph OUT ["src/rtsp/"]
         direction TB
         SUB["session_task::run :281"]
         PK["server/packetizer.rs"]
@@ -420,7 +420,7 @@ flowchart TD
     EL --> CE["mqtt_loop::classify_event :119"]
 
     CE -->|"ConnAck"| CA["handle_connack :216<br/>re-subscribe, republish discovery"]
-    CE -->|"Publish"| PC["mqtt::parse_control_message<br/>crates/mqtt/src/control.rs"]
+    CE -->|"Publish"| PC["mqtt::parse_control_message<br/>src/mqtt/control.rs"]
     CE -->|"Disconnect / error"| RC["reconnect with backoff"]
 
     PC -->|"ASCII allowlist on camera name"| DC["mqtt_dispatch::dispatch_control<br/>src/mqtt_dispatch.rs:16"]
@@ -431,17 +431,17 @@ flowchart TD
     CMD --> C3["Pir / Reboot / SetTime"]
     CMD --> C4["Snapshot / Preview"]
 
-    C1 --> DRV["Arc&lt;dyn CameraDriver&gt;<br/>crates/core/src/bc_protocol/camera_driver.rs:28"]
+    C1 --> DRV["Arc&lt;dyn CameraDriver&gt;<br/>src/baichuan/bc_protocol/camera_driver.rs:28"]
     C2 --> DRV
     C3 --> DRV
     C4 --> DRV
 
-    DRV --> BCC["BcCamera<br/>crates/core/src/bc_protocol.rs"]
+    DRV --> BCC["BcCamera<br/>src/baichuan/bc_protocol.rs"]
 
     subgraph PUB ["outbound"]
         direction TB
-        SP["StatusPublisher<br/>crates/mqtt/src/status.rs"]
-        DP["DiscoveryPublisher<br/>crates/mqtt/src/discovery/publisher.rs"]
+        SP["StatusPublisher<br/>src/mqtt/status.rs"]
+        DP["DiscoveryPublisher<br/>src/mqtt/discovery/publisher.rs"]
         SC["StatusCache<br/>src/status_cache.rs"]
         OV["preview_overlay::rendered_preview<br/>src/preview_overlay.rs"]
     end
@@ -465,7 +465,7 @@ the preview JPEG and draws a `Connecting` / `Sleeping` caption before publish
 camera sleeps — is gap bridging (§6), a different mechanism entirely.
 
 `mqtt_dispatch.rs` is the one genuine layering inversion: at `:195` and `:343`
-it manufactures `bairelay_neolink_core::bc_protocol::Error::Other(…)` for
+it manufactures `bairelay::baichuan::bc_protocol::Error::Other(…)` for
 failures that are purely binary-layer concerns ("PTZ preset name not in cache",
 "Command timed out"). Remediation P3-2.
 
@@ -475,7 +475,7 @@ failures that are purely binary-layer concerns ("PTZ preset name not in cache",
 
 ```mermaid
 flowchart TD
-    NEW["BcCamera::new(opts)<br/>crates/core/src/bc_protocol.rs:483"]
+    NEW["BcCamera::new(opts)<br/>src/baichuan/bc_protocol.rs:483"]
     NEW --> FIND["find_camera :274<br/>→ find_camera_with_discoverer :295"]
 
     FIND --> DM{"DiscoveryMethods<br/>bc_protocol/resolution.rs:47"}
@@ -531,7 +531,7 @@ without any traffic leaving the LAN.
 flowchart LR
     CAMERA(["Reolink battery camera"])
 
-    subgraph WS ["bairelay-wake-server"]
+    subgraph WS ["wake_server"]
         direction TB
         MM["middleman.rs<br/>UDP :9999"]
         RG["register.rs<br/>UDP :58200"]
@@ -724,7 +724,7 @@ graph TD
     class L1,L2,L3,L4,NOTE bad
 ```
 
-The idiom already exists in-tree (`crates/wake-server/src/route.rs:77,83,96`) —
+The idiom already exists in-tree (`src/wake_server/route.rs:77,83,96`) —
 it is simply not applied uniformly. Note these sites use `.expect("… poisoned")`
 rather than `.unwrap()`, so grepping for `unwrap` finds none of them.
 
@@ -739,7 +739,7 @@ it stalls its poll window and reports a *misleading* FAIL.
 ```mermaid
 flowchart LR
     subgraph EMIT ["emitted by"]
-        E1["crates/rtsp/src/server/listener.rs:78"]
+        E1["src/rtsp/server/listener.rs:78"]
         E2["src/main.rs:415"]
         E3["src/startup_wake.rs:102"]
         E4["src/camera.rs:1127"]

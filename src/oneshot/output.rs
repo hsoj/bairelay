@@ -13,14 +13,14 @@ pub enum Outcome {
 	Snapshot {
 		bytes: usize,
 		path: Option<String>,
-		/// `jpeg` for `get_snapshot` output, `h264` or `h265` for
+		/// `jpeg` for snapshot output, `h264` or `h265` for
 		/// `--use-stream` raw-bitstream dumps.
 		format: String,
 	},
 	Battery {
 		percent: u32,
 		/// Battery voltage in raw integer millivolts. Carried on the wire
-		/// as `BatteryInfo.voltage: i32` (millivolts) by bairelay_neolink_core; we
+		/// as `BatteryInfo.voltage: i32` (millivolts) by baichuan; we
 		/// preserve it that way so JSON output is stable. Earlier
 		/// versions emitted `voltage_v: f32` which serialised as
 		/// `3.941000061035156` in `--json` output for some integer-mV

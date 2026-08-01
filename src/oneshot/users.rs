@@ -1,5 +1,5 @@
+use crate::camera::Camera;
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::{Outcome, UserInfo};
 
@@ -35,10 +35,10 @@ pub enum Action {
 	},
 }
 
-pub async fn run(cam: &dyn CameraDriver, action: Action) -> Result<Outcome> {
+pub async fn run(cam: &dyn Camera, action: Action) -> Result<Outcome> {
 	match action {
 		Action::List => {
-			let list = cam.get_users().await.context("get_users failed")?;
+			let list = cam.users().await.context("get_users failed")?;
 			let users = list
 				.user_list
 				.unwrap_or_default()
@@ -87,8 +87,10 @@ pub async fn run(cam: &dyn CameraDriver, action: Action) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::{User, UserList};
-	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use crate::baichuan::bc::xml::{User, UserList};
+	use crate::baichuan::bc_protocol::Error;
+
+	use crate::fake_camera::FakeCameraBuilder;
 
 	fn user(name: &str, level: u8) -> User {
 		User {

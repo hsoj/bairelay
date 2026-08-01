@@ -5,21 +5,170 @@ use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
 
-use bairelay_neolink_core::bc_protocol::{BcCamera, CameraDriver};
-use bairelay_rtsp::buffer::LastFrameBuffer;
-use bairelay_rtsp::provider::StreamError;
-use bairelay_rtsp::url::StreamKind as RtspStreamKind;
+use async_trait::async_trait;
+use time::OffsetDateTime;
+use tokio::sync::mpsc::Receiver;
+
+use crate::baichuan::bc::xml::{
+	AbilityInfo, FloodlightStatusList, LedState, RfAlarmCfg, UserList, VersionInfo,
+};
+use crate::baichuan::bc_protocol::{
+	BcCamera, Direction, LightState, MotionData, StreamKind, VideoStream,
+};
+
+use crate::battery::BatteryStatus;
+use crate::camera_services::{ServiceKind, ServicePortState};
+use crate::capabilities::CameraCapabilities;
+use crate::ptz::{PresetSlot, ZoomLevel};
+use crate::rtsp::buffer::LastFrameBuffer;
+use crate::rtsp::provider::StreamError;
+use crate::rtsp::url::StreamKind as RtspStreamKind;
 
 use crate::audio_presence::AudioPresence;
 use crate::bcmedia_dump::BcMediaDumpConfig;
+use crate::camera_status::{CameraEvent, StatusReporter};
 use crate::camera_tasks;
-use crate::capabilities::CameraCapabilities;
 use crate::config::CameraConfig;
 use crate::grace_period::GracePeriod;
 use crate::preview_state::PreviewState;
 use crate::status_cache::StatusCache;
 use crate::stream_source::{MutexPoisonRecover as _, RwLockPoisonRecover as _, StreamSource};
 use crate::wake_lock::WakeLockCounter;
+
+// ── Camera capability port ────────────────────────────────────────────
+//
+// What the rest of bairelay needs a camera to do, declared here by the
+// code that consumes it rather than by the protocol crate that happens
+// to implement it. `src/bc_camera.rs` implements it over Baichuan;
+// `src/fake_camera.rs` scripts it for tests. Dyn-compatible (plain
+// `async fn` via `async-trait`, no generics) so callers hold
+// `Arc<dyn Camera>`.
+//
+// Some signatures still carry `baichuan` report types
+// (`RfAlarmCfg`, `LedState`, `VersionInfo`, `UserList`, `AbilityInfo`,
+// `MotionData`) and its `Error`. Giving each a local twin would be
+// field-for-field copying with no second implementation to justify it;
+// revisit if another camera backend ever appears.
+
+/// Result of a camera operation.
+pub type CameraResult<T> = std::result::Result<T, crate::baichuan::bc_protocol::Error>;
+
+/// One connected camera session, as the orchestration layer sees it.
+///
+/// Implementations own the whole session: video streams, one-shot
+/// queries, control commands, liveness probing, and teardown
+/// ([`Camera::end_session`]) all go through this one handle, so no
+/// caller ever needs the concrete protocol type.
+#[async_trait]
+pub trait Camera: Send + Sync {
+	// ── Session lifecycle ─────────────────────────────────────────
+
+	/// Politely end the session on the camera side (BC `logout`).
+	/// Battery cameras park faster after an explicit logout than
+	/// after a bare TCP drop.
+	async fn end_session(&self) -> CameraResult<()>;
+
+	/// Cheap "are you still there?" probe. Lenient: a camera that is
+	/// reachable but doesn't understand the probe body counts as
+	/// alive — only transport-level failures are errors.
+	async fn keepalive_probe(&self) -> CameraResult<()>;
+
+	// ── Streaming ─────────────────────────────────────────────────
+
+	/// Start the camera's video stream for `kind` and return a pull
+	/// handle. Dropping the handle (or calling its `shutdown`) sends
+	/// the camera-side stop signal.
+	async fn start_video(&self, kind: StreamKind) -> CameraResult<Box<dyn VideoStream>>;
+
+	/// Explicitly stop the camera-side preview for `kind`. Belt and
+	/// braces over dropping the [`VideoStream`] handle: a battery
+	/// camera whose preview keeps running drains on the wire path.
+	async fn stop_video(&self, kind: StreamKind) -> CameraResult<()>;
+
+	// ── Events ────────────────────────────────────────────────────
+
+	/// Subscribe to motion events; returns a [`MotionData`] stream.
+	async fn listen_on_motion(&self) -> CameraResult<MotionData>;
+	/// Subscribe to floodlight status updates.
+	async fn listen_on_floodlight(&self) -> CameraResult<Receiver<FloodlightStatusList>>;
+
+	// ── Status queries ────────────────────────────────────────────
+
+	/// Current battery state.
+	async fn battery_status(&self) -> CameraResult<BatteryStatus>;
+	/// Current PIR sensor configuration.
+	async fn pir_config(&self) -> CameraResult<RfAlarmCfg>;
+	/// Whether the camera's floodlight tasks engine is enabled.
+	async fn is_floodlight_tasks_enabled(&self) -> CameraResult<bool>;
+	/// Camera capability report (PTZ support, etc.).
+	async fn capabilities(&self) -> CameraResult<CameraCapabilities>;
+	/// The camera's PTZ preset table, including unassigned slots.
+	async fn ptz_presets(&self) -> CameraResult<Vec<PresetSlot>>;
+	/// Camera model / firmware / hardware version block.
+	async fn version(&self) -> CameraResult<VersionInfo>;
+	/// LED + status-light state.
+	async fn led_state(&self) -> CameraResult<LedState>;
+	/// Per-user permission map, keyed by module. Ground truth for
+	/// `MissingAbility` gate decisions.
+	async fn ability_info(&self) -> CameraResult<AbilityInfo>;
+	/// A JPEG snapshot.
+	async fn snapshot(&self) -> CameraResult<Vec<u8>>;
+
+	// ── Control commands ──────────────────────────────────────────
+
+	/// Enable or disable the PIR sensor.
+	async fn pir_set(&self, state: bool) -> CameraResult<()>;
+	/// Enable or disable the floodlight tasks engine.
+	async fn floodlight_tasks_enable(&self, state: bool) -> CameraResult<()>;
+	/// Manually trigger the floodlight for `duration` seconds.
+	async fn set_floodlight_manual(&self, state: bool, duration: u16) -> CameraResult<()>;
+	/// Send a PTZ movement command.
+	async fn send_ptz(&self, direction: Direction, amount: f32) -> CameraResult<()>;
+	/// Create or overwrite a named PTZ preset.
+	async fn set_ptz_preset(&self, preset_id: u8, name: String) -> CameraResult<()>;
+	/// Move the camera to a saved PTZ preset.
+	async fn moveto_ptz_preset(&self, preset_id: u8) -> CameraResult<()>;
+	/// Move the camera's zoom to an absolute position.
+	async fn zoom_to(&self, level: ZoomLevel) -> CameraResult<()>;
+	/// Turn the visible-light LED ring on or off.
+	async fn led_light_set(&self, state: bool) -> CameraResult<()>;
+	/// Set the IR illuminator mode.
+	async fn irled_light_set(&self, state: LightState) -> CameraResult<()>;
+	/// Reboot the camera.
+	async fn reboot(&self) -> CameraResult<()>;
+	/// Trigger the built-in siren.
+	async fn siren(&self) -> CameraResult<()>;
+	/// Set the camera's onboard clock to `timestamp`.
+	async fn set_time(&self, timestamp: OffsetDateTime) -> CameraResult<()>;
+
+	// ── Account administration ────────────────────────────────────
+
+	/// List the camera's configured user accounts.
+	async fn users(&self) -> CameraResult<UserList>;
+	/// Add a new user account.
+	async fn add_user(
+		&self,
+		user_name: String,
+		password: String,
+		user_level: u8,
+	) -> CameraResult<()>;
+	/// Change the password on an existing user account.
+	async fn modify_user(&self, user_name: String, password: String) -> CameraResult<()>;
+	/// Remove a user account.
+	async fn delete_user(&self, user_name: String) -> CameraResult<()>;
+
+	// ── Network services ──────────────────────────────────────────
+
+	/// Read one network service's port/enable state.
+	async fn service(&self, kind: ServiceKind) -> CameraResult<ServicePortState>;
+	/// Update one network service. `None` leaves that field untouched.
+	async fn set_service(
+		&self,
+		kind: ServiceKind,
+		enable: Option<bool>,
+		port: Option<u32>,
+	) -> CameraResult<()>;
+}
 
 // ── Camera State ──────────────────────────────────────────────────────
 
@@ -108,7 +257,7 @@ pub(crate) enum KeepaliveTickOutcome {
 /// `Ok(Ok(_))` is success; everything else (any protocol error, any
 /// timeout) is a failure. The "camera is alive but doesn't speak
 /// link-type" special case used to live here — it now lives one layer
-/// down in [`CameraDriver::keepalive_probe`], which matches on
+/// down in the adapter's [`Camera::keepalive_probe`], which matches on
 /// `Error::UnintelligibleReply` directly instead of stringifying.
 pub(crate) fn classify_keepalive_tick<T, E>(
 	outcome: std::result::Result<std::result::Result<T, E>, tokio::time::error::Elapsed>,
@@ -148,13 +297,12 @@ pub struct CameraHandle {
 	cancel: CancellationToken,
 	wake_lock: WakeLockCounter,
 	state: Arc<RwLock<CameraState>>,
-	bc_camera: std::sync::RwLock<Option<Arc<dyn CameraDriver>>>,
-	/// Concrete `BcCamera` handle kept in parallel with `bc_camera`.
-	/// `stream_source.rs` still needs the concrete type (out of Phase
-	/// 3B scope per design), so the trait-object stored above is
-	/// accompanied by the same `Arc<BcCamera>` for stream spawns.
-	bc_camera_concrete: std::sync::RwLock<Option<Arc<BcCamera>>>,
-	mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+	/// The connected camera session, held through the [`Camera`] trait.
+	/// One handle serves queries, control commands, stream spawns
+	/// ([`Camera::start_video`]) and teardown ([`Camera::end_session`])
+	/// — there is no parallel concrete handle.
+	bc_camera: std::sync::RwLock<Option<Arc<dyn Camera>>>,
+	mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 	/// MQTT topic prefix (e.g. `"bairelay"` or `"neolink"`) propagated
 	/// from the config so every per-camera task publishes under the
 	/// same root. Holds the default `"bairelay"` when MQTT is disabled
@@ -201,7 +349,7 @@ pub struct CameraHandle {
 	/// [`Self::publish_discovery`] and [`Self::unpublish_discovery`]
 	/// are no-ops. Clone-cheap (`SharedMqttClient` is internally
 	/// refcounted).
-	discovery_publisher: Option<bairelay_mqtt::DiscoveryPublisher>,
+	discovery_publisher: Option<crate::mqtt::DiscoveryPublisher>,
 	/// Per-camera preview-state broadcaster. Starts `Sleeping`; the
 	/// camera connect loop flips it to `Connecting` / `Live` as it
 	/// progresses. The MQTT preview publisher subscribes
@@ -242,7 +390,7 @@ impl CameraHandle {
 	pub fn new(
 		config: CameraConfig,
 		parent_cancel: CancellationToken,
-		mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+		mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 	) -> Self {
 		Self::with_bcmedia_dump(config, parent_cancel, mqtt_client, None)
 	}
@@ -258,7 +406,7 @@ impl CameraHandle {
 	pub fn with_bcmedia_dump(
 		config: CameraConfig,
 		parent_cancel: CancellationToken,
-		mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+		mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 		bcmedia_dump: Option<Arc<BcMediaDumpConfig>>,
 	) -> Self {
 		Self::with_bcmedia_dump_and_prefix(
@@ -275,7 +423,7 @@ impl CameraHandle {
 	pub fn with_bcmedia_dump_and_prefix(
 		config: CameraConfig,
 		parent_cancel: CancellationToken,
-		mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+		mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 		topic_prefix: String,
 		bcmedia_dump: Option<Arc<BcMediaDumpConfig>>,
 	) -> Self {
@@ -287,7 +435,6 @@ impl CameraHandle {
 			wake_lock: WakeLockCounter::new(),
 			state: Arc::new(RwLock::new(CameraState::Disconnected)),
 			bc_camera: std::sync::RwLock::new(None),
-			bc_camera_concrete: std::sync::RwLock::new(None),
 			mqtt_client,
 			topic_prefix,
 			disconnect_signal: Arc::new(Notify::new()),
@@ -324,10 +471,7 @@ impl CameraHandle {
 	/// orchestrator is the sole production caller — see
 	/// `Orchestrator::with_bcmedia_dump`.
 	#[must_use]
-	pub fn with_discovery_publisher(
-		mut self,
-		publisher: bairelay_mqtt::DiscoveryPublisher,
-	) -> Self {
+	pub fn with_discovery_publisher(mut self, publisher: crate::mqtt::DiscoveryPublisher) -> Self {
 		self.discovery_publisher = Some(publisher);
 		self
 	}
@@ -428,14 +572,14 @@ impl CameraHandle {
 	/// Intended to be called post-first-connect and on every MQTT
 	/// `ConnAck`. Safe to call repeatedly — retained publishes are
 	/// idempotent and HA deduplicates by `unique_id`.
-	pub async fn publish_discovery(&self) -> Result<(), bairelay_mqtt::MqttError> {
+	pub async fn publish_discovery(&self) -> Result<(), crate::mqtt::MqttError> {
 		let Some(publisher) = self.discovery_publisher.as_ref() else {
 			return Ok(());
 		};
 		let Some(caps) = self.capabilities() else {
 			return Ok(());
 		};
-		let flags = bairelay_mqtt::CameraEnableFlags::from(&self.config.mqtt);
+		let flags = crate::mqtt::CameraEnableFlags::from(&self.config.mqtt);
 		let presets = self.preset_cache();
 		publisher
 			.publish(
@@ -468,6 +612,21 @@ impl CameraHandle {
 		Arc::clone(&self.status_cache)
 	}
 
+	/// Build this camera's outbound status port. Every per-camera task
+	/// reports through it, so publishing and republish-cache bookkeeping
+	/// stay paired in one place (`src/mqtt_status.rs`).
+	pub(crate) fn status_reporter(
+		&self,
+		mqtt: &crate::mqtt::SharedMqttClient,
+	) -> Arc<dyn StatusReporter> {
+		Arc::new(crate::mqtt_status::MqttStatusReporter::new(
+			mqtt.clone(),
+			&self.topic_prefix,
+			&self.config.name,
+			self.status_cache(),
+		))
+	}
+
 	/// `true` once `battery_poller` has concluded this camera has no
 	/// battery hardware and given up. Sticky for the process lifetime;
 	/// gates the poller respawn in [`Self::spawn_session_tasks`].
@@ -482,26 +641,24 @@ impl CameraHandle {
 	///
 	/// No-op when the camera has no MQTT client attached or when no
 	/// status has ever been published yet (cache fully empty).
-	pub async fn republish_cached_status(&self) -> Result<(), bairelay_mqtt::MqttError> {
+	pub async fn republish_cached_status(&self) -> Result<(), crate::camera_status::StatusError> {
 		let Some(ref mqtt) = self.mqtt_client else {
 			return Ok(());
 		};
-		let publisher =
-			bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-		if let Some(level) = self.status_cache.battery_level() {
-			publisher.publish_battery_level(level).await?;
-		}
-		if let Some(motion) = self.status_cache.motion() {
-			publisher.publish_motion(motion).await?;
-		}
-		if let Some(on) = self.status_cache.floodlight() {
-			publisher.publish_floodlight(on).await?;
-		}
-		if let Some(enabled) = self.status_cache.floodlight_tasks() {
-			publisher.publish_floodlight_tasks_enabled(enabled).await?;
-		}
-		if let Some(enabled) = self.status_cache.pir() {
-			publisher.publish_pir(enabled).await?;
+		let reporter = self.status_reporter(mqtt);
+		let cached = [
+			self.status_cache
+				.battery_level()
+				.map(CameraEvent::BatteryLevel),
+			self.status_cache.motion().map(CameraEvent::Motion),
+			self.status_cache.floodlight().map(CameraEvent::Floodlight),
+			self.status_cache
+				.floodlight_tasks()
+				.map(CameraEvent::FloodlightTasks),
+			self.status_cache.pir().map(CameraEvent::Pir),
+		];
+		for event in cached.into_iter().flatten() {
+			reporter.report(event).await?;
 		}
 		Ok(())
 	}
@@ -510,14 +667,14 @@ impl CameraHandle {
 	/// by publishing an empty retained payload on every topic
 	/// `publish_discovery` would emit. Same early-return rules apply.
 	/// Intended for graceful shutdown so HA clears the entity set.
-	pub async fn unpublish_discovery(&self) -> Result<(), bairelay_mqtt::MqttError> {
+	pub async fn unpublish_discovery(&self) -> Result<(), crate::mqtt::MqttError> {
 		let Some(publisher) = self.discovery_publisher.as_ref() else {
 			return Ok(());
 		};
 		let Some(caps) = self.capabilities() else {
 			return Ok(());
 		};
-		let flags = bairelay_mqtt::CameraEnableFlags::from(&self.config.mqtt);
+		let flags = crate::mqtt::CameraEnableFlags::from(&self.config.mqtt);
 		let presets = self.preset_cache();
 		publisher
 			.unpublish(
@@ -563,10 +720,10 @@ impl CameraHandle {
 
 	/// Returns the currently-connected camera as a trait object, if any.
 	///
-	/// Returning `Arc<dyn CameraDriver>` (rather than the concrete
+	/// Returning `Arc<dyn Camera>` (rather than the concrete
 	/// `BcCamera`) lets unit tests substitute a fake camera at this
 	/// boundary without touching the binary's call-sites.
-	pub fn bc_camera(&self) -> Option<Arc<dyn CameraDriver>> {
+	pub fn bc_camera(&self) -> Option<Arc<dyn Camera>> {
 		self.bc_camera.read_recover().clone()
 	}
 
@@ -663,19 +820,13 @@ impl CameraHandle {
 			)));
 		}
 
-		// Need to start a new source. Grab the concrete BcCamera handle —
-		// StreamSource still takes `Arc<BcCamera>` (out of scope
-		// per design).
-		let camera = self
-			.bc_camera_concrete
-			.read_recover()
-			.clone()
-			.ok_or_else(|| {
-				StreamError::Unavailable(format!(
-					"camera '{}' is not currently connected",
-					self.config.name
-				))
-			})?;
+		// Need to start a new source against the connected session.
+		let camera = self.bc_camera().ok_or_else(|| {
+			StreamError::Unavailable(format!(
+				"camera '{}' is not currently connected",
+				self.config.name
+			))
+		})?;
 
 		// Start the source. `StreamSource::start` only spawns a task and
 		// returns immediately, so it's cheap to do while the async mutex
@@ -770,7 +921,7 @@ impl CameraHandle {
 		let guard = self.stream_sources.read_recover();
 		guard
 			.values()
-			.any(|s| s.gap_state() == crate::stream_source::GapState::Bridging)
+			.any(|s| s.gap_state() == crate::gap_bridging::GapState::Bridging)
 	}
 
 	/// Stop every registered stream source and clear the registry. Called
@@ -815,12 +966,12 @@ impl CameraHandle {
 	}
 
 	/// Send periodic keepalive probes to detect connection loss.
-	/// Uses [`CameraDriver::keepalive_probe`] (a lenient wrapper over
-	/// `get_linktype()` matching neolink's choice) and tolerates up to
+	/// Uses [`Camera::keepalive_probe`] (a lenient wrapper over the
+	/// link-type query, matching neolink's choice) and tolerates up to
 	/// [`Self::KEEPALIVE_MAX_FAILURES`] consecutive failures before
 	/// disconnecting. Cadence and per-probe timeout are both
 	/// [`Self::KEEPALIVE_INTERVAL`].
-	async fn keepalive_loop(&self, camera: &dyn CameraDriver, session_cancel: &CancellationToken) {
+	async fn keepalive_loop(&self, camera: &dyn Camera, session_cancel: &CancellationToken) {
 		let mut interval = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
 		let mut consecutive_failures: u32 = 0;
 
@@ -925,45 +1076,37 @@ impl CameraHandle {
 	/// probe, session-task spawn, keepalive loop, graceful teardown.
 	///
 	/// Extracted from `run()` so tests can drive the whole thing with a
-	/// scripted `Arc<dyn CameraDriver>` + `concrete: None`. When
-	/// `concrete` is `Some`, stream-source spawns via
-	/// [`Self::stream_source`] work and logout is attempted at the end
-	/// of teardown; when `None` (test mode) both paths are skipped.
-	async fn run_connected_session(
-		self: &Arc<Self>,
-		driver: Arc<dyn CameraDriver>,
-		concrete: Option<Arc<BcCamera>>,
-	) {
+	/// scripted `Arc<dyn Camera>` — the fake records `end_session` and
+	/// scripts `start_video` like any other port method, so the
+	/// production and test paths are identical.
+	async fn run_connected_session(self: &Arc<Self>, driver: Arc<dyn Camera>) {
 		self.set_state(CameraState::Connected);
 		self.set_preview_state(PreviewState::Live);
 		tracing::info!(camera = %self.config.name, "Connected");
 
 		// Publish connected status via MQTT.
 		if let Some(ref mqtt) = self.mqtt_client {
-			let publisher =
-				bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-			if let Err(e) = publisher.publish_connection(true).await {
+			if let Err(e) = self
+				.status_reporter(mqtt)
+				.report(CameraEvent::Connection(true))
+				.await
+			{
 				tracing::warn!(camera = %self.config.name, error = %e, "Failed to publish connected status");
 			}
 		}
 
 		*self.bc_camera.write_recover() = Some(Arc::clone(&driver));
-		*self.bc_camera_concrete.write_recover() = concrete.clone();
 
 		// Populate the capability cache for HA discovery.
-		// `get_support()` is idempotent and read-only. On success we
+		// `capabilities()` is idempotent and read-only. On success we
 		// cache the view; on failure we leave the cache `None` so the
-		// next reconnect re-probes — a transient `get_support` error
-		// must not stick `has_ptz = false` for the whole session (HA
-		// discovery would then never emit PT buttons even for a PT-
-		// capable cam that only fluked one probe).
-		match driver.get_support().await {
-			Ok(support) => {
-				let has_ptz = crate::capabilities::ptz_mode_indicates_ptz(
-					support.ptz_mode.as_deref(),
-					support.ptz_cfg,
-				);
-				*self.capabilities.write_recover() = Some(CameraCapabilities { has_ptz });
+		// next reconnect re-probes — a transient probe error must not
+		// stick `has_ptz = false` for the whole session (HA discovery
+		// would then never emit PT buttons even for a PT-capable cam
+		// that only fluked one probe).
+		match driver.capabilities().await {
+			Ok(caps) => {
+				*self.capabilities.write_recover() = Some(caps);
 
 				// Populate the preset cache for HA discovery's
 				// `PtPreset` select. Only meaningful when has_ptz
@@ -971,14 +1114,12 @@ impl CameraHandle {
 				// any read error as "no presets" (empty Vec) and
 				// keep the discovery publish going; the select
 				// just won't be emitted.
-				if has_ptz {
-					match driver.get_ptz_preset().await {
-						Ok(p) => {
-							let presets: Vec<(u8, String)> = p
-								.preset_list
-								.preset
+				if caps.has_ptz {
+					match driver.ptz_presets().await {
+						Ok(slots) => {
+							let presets: Vec<(u8, String)> = slots
 								.into_iter()
-								.filter_map(|preset| preset.name.map(|n| (preset.id, n)))
+								.filter_map(|slot| slot.name.map(|n| (slot.id, n)))
 								.collect();
 							*self.preset_cache.write_recover() = presets;
 						}
@@ -986,7 +1127,7 @@ impl CameraHandle {
 							tracing::debug!(
 								camera = %self.config.name,
 								error = %e,
-								"get_ptz_preset failed; leaving preset cache empty"
+								"ptz_presets failed; leaving preset cache empty"
 							);
 						}
 					}
@@ -1004,7 +1145,7 @@ impl CameraHandle {
 				tracing::warn!(
 					camera = %self.config.name,
 					error = %e,
-					"Failed to query camera capabilities via get_support(); leaving cache empty for re-probe on next reconnect"
+					"Failed to query camera capabilities; leaving cache empty for re-probe on next reconnect"
 				);
 			}
 		}
@@ -1027,7 +1168,7 @@ impl CameraHandle {
 		// Connection lost or shutdown -- cancel all session tasks
 		// and tear down everything that depends on the live driver.
 		session_cancel.cancel();
-		self.teardown_session_tasks(tasks, concrete).await;
+		self.teardown_session_tasks(tasks, &driver).await;
 	}
 
 	/// Spawn the per-session tasks that hold their own clones of the
@@ -1038,7 +1179,7 @@ impl CameraHandle {
 	/// `keepalive_loop` returns.
 	async fn spawn_session_tasks(
 		self: &Arc<Self>,
-		driver: &Arc<dyn CameraDriver>,
+		driver: &Arc<dyn Camera>,
 		session_cancel: &CancellationToken,
 	) -> tokio::task::JoinSet<()> {
 		let mut tasks = tokio::task::JoinSet::new();
@@ -1053,16 +1194,15 @@ impl CameraHandle {
 		}
 
 		if let Some(ref mqtt) = self.mqtt_client {
+			let reporter = self.status_reporter(mqtt);
 			if self.config.mqtt.enable_motion {
 				tasks.spawn(camera_tasks::motion_listener(
 					self.config.name.clone(),
 					Arc::clone(driver),
-					mqtt.clone(),
-					self.topic_prefix.clone(),
+					Arc::clone(&reporter),
 					self.wake_lock.clone(),
 					session_cancel.clone(),
 					Duration::from_secs_f64(self.config.motion_wake_hold_secs),
-					self.status_cache(),
 				));
 			}
 			// `battery_unsupported` latches when the poller concludes the
@@ -1073,11 +1213,9 @@ impl CameraHandle {
 				tasks.spawn(camera_tasks::battery_poller(
 					self.config.name.clone(),
 					Arc::clone(driver),
-					mqtt.clone(),
-					self.topic_prefix.clone(),
+					Arc::clone(&reporter),
 					self.config.mqtt.battery_update,
 					session_cancel.clone(),
-					self.status_cache(),
 					Arc::clone(&self.battery_unsupported),
 				));
 			}
@@ -1085,28 +1223,22 @@ impl CameraHandle {
 				tasks.spawn(camera_tasks::floodlight_poller(
 					self.config.name.clone(),
 					Arc::clone(driver),
-					mqtt.clone(),
-					self.topic_prefix.clone(),
+					Arc::clone(&reporter),
 					self.config.mqtt.floodlight_update,
 					session_cancel.clone(),
-					self.status_cache(),
 				));
 				tasks.spawn(camera_tasks::floodlight_listener(
 					self.config.name.clone(),
 					Arc::clone(driver),
-					mqtt.clone(),
-					self.topic_prefix.clone(),
+					Arc::clone(&reporter),
 					session_cancel.clone(),
-					self.status_cache(),
 				));
 			}
 			if self.config.mqtt.enable_pir {
 				camera_tasks::publish_pir_state(
 					self.config.name.clone(),
 					Arc::clone(driver),
-					mqtt.clone(),
-					self.topic_prefix.clone(),
-					self.status_cache(),
+					Arc::clone(&reporter),
 				)
 				.await;
 			}
@@ -1134,15 +1266,15 @@ impl CameraHandle {
 
 	/// Tear down a session: drain the spawned task `JoinSet` (2 s
 	/// graceful window then `abort_all`), stop every live stream
-	/// source, log out via the concrete `BcCamera` handle if present,
-	/// clear the camera's driver/concrete slots, and publish the
-	/// disconnected MQTT status. Symmetric with
-	/// [`spawn_session_tasks`]; the caller is expected to have
-	/// already cancelled `session_cancel` before invoking this.
+	/// source, end the camera-side session via the port, clear the
+	/// camera's driver slot, and publish the disconnected MQTT
+	/// status. Symmetric with [`spawn_session_tasks`]; the caller is
+	/// expected to have already cancelled `session_cancel` before
+	/// invoking this.
 	async fn teardown_session_tasks(
 		self: &Arc<Self>,
 		mut tasks: tokio::task::JoinSet<()>,
-		concrete: Option<Arc<BcCamera>>,
+		driver: &Arc<dyn Camera>,
 	) {
 		// Give tasks a brief window to exit gracefully, then abort.
 		let drain_deadline = tokio::time::sleep(Duration::from_secs(2));
@@ -1167,43 +1299,32 @@ impl CameraHandle {
 		self.stop_all_stream_sources().await;
 
 		// Per-session courtesy logout, capped with `LOGOUT_TIMEOUT` so a
-		// wedged camera can't stall teardown. Uses the local `concrete`
-		// handle (the same Arc that `bc_camera_concrete` exposes) — the
-		// trait surface intentionally omits `logout()` because no other
-		// call-site needs it. `concrete = None` is the test-mode path
-		// (`run_connected_session_for_test`); skip cleanly.
-		//
-		// This is the documented step-4 of the per-session shutdown
-		// sequence in `docs/implementation.md` § "Calls that spawn
-		// internal tasks". Pre-fix, the only `logout()` call lived in
-		// `run()`'s post-loop block, but `bc_camera_concrete` was
-		// always nulled before that block ran, so `cam_for_logout` was
-		// always `None` and logout was unreachable in production.
-		if let Some(ref cam) = concrete {
-			match tokio::time::timeout(Self::LOGOUT_TIMEOUT, cam.logout()).await {
-				Ok(Ok(())) => tracing::debug!(camera = %self.config.name, "Logged out"),
-				Ok(Err(e)) => {
-					tracing::debug!(camera = %self.config.name, error = %e, "Logout failed")
-				}
-				Err(_) => tracing::debug!(camera = %self.config.name, "Logout timed out, dropping"),
+		// wedged camera can't stall teardown. This is the documented
+		// step-4 of the per-session shutdown sequence in
+		// `docs/implementation.md` § "Calls that spawn internal tasks".
+		match tokio::time::timeout(Self::LOGOUT_TIMEOUT, driver.end_session()).await {
+			Ok(Ok(())) => tracing::debug!(camera = %self.config.name, "Logged out"),
+			Ok(Err(e)) => {
+				tracing::debug!(camera = %self.config.name, error = %e, "Logout failed")
 			}
+			Err(_) => tracing::debug!(camera = %self.config.name, "Logout timed out, dropping"),
 		}
 
+		// Clear the slot; the caller's `driver` Arc drops when
+		// `run_connected_session` returns, releasing the session's
+		// backing connection threads.
 		*self.bc_camera.write_recover() = None;
-		*self.bc_camera_concrete.write_recover() = None;
-
-		// Drop the concrete handle (Arc<BcCamera>) so its backing
-		// connection threads can shut down.
-		drop(concrete);
 
 		self.set_state(CameraState::Disconnected);
 		tracing::info!(camera = %self.config.name, "Disconnected");
 
 		// Publish disconnected status via MQTT.
 		if let Some(ref mqtt) = self.mqtt_client {
-			let publisher =
-				bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-			if let Err(e) = publisher.publish_connection(false).await {
+			if let Err(e) = self
+				.status_reporter(mqtt)
+				.report(CameraEvent::Connection(false))
+				.await
+			{
 				tracing::warn!(camera = %self.config.name, error = %e, "Failed to publish disconnected status");
 			}
 		}
@@ -1213,10 +1334,9 @@ impl CameraHandle {
 	pub async fn run(self: &Arc<Self>) {
 		// Publish initial "disconnected" / "unknown" states before connecting.
 		if let Some(ref mqtt) = self.mqtt_client {
-			let publisher =
-				bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-			let _ = publisher.publish_connection(false).await;
-			let _ = publisher.publish_motion_unknown().await;
+			let reporter = self.status_reporter(mqtt);
+			let _ = reporter.report(CameraEvent::Connection(false)).await;
+			let _ = reporter.report(CameraEvent::MotionUnknown).await;
 		}
 
 		// Spawn the preview publisher at camera lifetime (NOT session
@@ -1230,8 +1350,7 @@ impl CameraHandle {
 					self.config.name.clone(),
 					Arc::clone(self),
 					Arc::clone(&self.last_frame_main),
-					mqtt.clone(),
-					self.topic_prefix.clone(),
+					self.status_reporter(mqtt),
 					self.config.mqtt.preview_update,
 					self.preview_state_rx(),
 					self.config.pause.preview_overlay,
@@ -1271,7 +1390,7 @@ impl CameraHandle {
 			tracing::info!(camera = %self.config.name, "Connecting...");
 
 			// Wrap connection attempt in a timeout + cancellation guard
-			// so that Ctrl+C works even if bairelay_neolink_core is stuck
+			// so that Ctrl+C works even if baichuan is stuck
 			let connect_result = tokio::select! {
 				_ = self.cancel.cancelled() => break,
 				result = tokio::time::timeout(Self::CONNECT_TIMEOUT, self.try_connect()) => {
@@ -1286,11 +1405,9 @@ impl CameraHandle {
 			};
 			match connect_result {
 				Ok(camera) => {
-					let driver: Arc<dyn CameraDriver> =
-						Arc::clone(&camera) as Arc<dyn CameraDriver>;
+					let driver: Arc<dyn Camera> = camera;
 					backoff.reset();
-					self.run_connected_session(driver, Some(Arc::clone(&camera)))
-						.await;
+					self.run_connected_session(driver).await;
 				}
 				Err(e) => {
 					if is_login_failure(&e) {
@@ -1379,15 +1496,15 @@ async fn aggregate_preview_state_loop(
 /// should not be retried.
 ///
 /// Walks the anyhow source chain and matches typed
-/// `bairelay_neolink_core::Error::AuthFailed | CameraLoginFail`. The Debug-
+/// `crate::baichuan::Error::AuthFailed | CameraLoginFail`. The Debug-
 /// substring fallback below catches synthesised `anyhow::anyhow!(...)`
 /// errors used by some test paths and any future intermediate wrapper
 /// that doesn't preserve a downcastable source — keeping it as a
-/// belt-and-braces guard so a future bairelay_neolink_core error-type rename
+/// belt-and-braces guard so a future baichuan error-type rename
 /// doesn't silently regress to "retry auth failures forever" — the
 /// brute-force scenario flagged during the strict-code audit.
 fn is_login_failure(err: &anyhow::Error) -> bool {
-	use bairelay_neolink_core::Error as CoreError;
+	use crate::baichuan::Error as CoreError;
 	for cause in err.chain() {
 		if let Some(core) = cause.downcast_ref::<CoreError>() {
 			if matches!(core, CoreError::AuthFailed | CoreError::CameraLoginFail) {
@@ -1524,7 +1641,7 @@ impl CameraHandle {
 	pub(crate) fn subscribe_stream_for_test(
 		&self,
 		kind: RtspStreamKind,
-	) -> tokio::sync::broadcast::Receiver<bairelay_rtsp::provider::Frame> {
+	) -> tokio::sync::broadcast::Receiver<crate::rtsp::provider::Frame> {
 		let guard = self.stream_sources.read_recover();
 		guard
 			.get(&kind)
@@ -1532,29 +1649,24 @@ impl CameraHandle {
 			.subscribe_for_test()
 	}
 
-	/// Test helper: install a `CameraDriver` (typically a
+	/// Test helper: install a [`Camera`] port impl (typically a
 	/// `FakeCamera`) + flip state to `Connected` so
 	/// `mqtt_dispatch::dispatch_control` finds a driver via
 	/// `bc_camera()` and proceeds past the disconnected short-circuit.
-	/// Bypasses `try_connect`; the concrete `bc_camera_concrete` slot
-	/// stays `None` because fakes are trait-only.
+	/// Bypasses `try_connect`.
 	#[allow(dead_code)] // used by upcoming mqtt_dispatch tests in this phase
-	pub(crate) fn set_driver_for_test(&self, driver: Arc<dyn CameraDriver>) {
+	pub(crate) fn set_driver_for_test(&self, driver: Arc<dyn Camera>) {
 		*self.bc_camera.write_recover() = Some(driver);
 		self.set_state(CameraState::Connected);
 	}
 
 	/// Test-only entry into the post-connect session lifecycle.
-	/// Runs [`Self::run_connected_session`] with `concrete = None`,
-	/// skipping the stream-source spawn / logout paths that require a
-	/// real [`BcCamera`]. Use together with a scripted `FakeCamera` to
-	/// exercise the capability probe + session-tasks + keepalive +
-	/// teardown code without a live TCP socket.
-	pub(crate) async fn run_connected_session_for_test(
-		self: &Arc<Self>,
-		driver: Arc<dyn CameraDriver>,
-	) {
-		self.run_connected_session(driver, None).await
+	/// Runs [`Self::run_connected_session`] with a scripted
+	/// `FakeCamera` to exercise the capability probe + session-tasks +
+	/// keepalive + teardown code without a live TCP socket. The fake's
+	/// `end_session` call log records the teardown logout.
+	pub(crate) async fn run_connected_session_for_test(self: &Arc<Self>, driver: Arc<dyn Camera>) {
+		self.run_connected_session(driver).await
 	}
 }
 
@@ -1787,9 +1899,9 @@ mod tests {
 		assert_eq!(classify_keepalive_tick(raw), KeepaliveTickOutcome::Ok);
 	}
 
-	// The "UnintelligibleReply ↦ Ok" mapping moved to
-	// `CameraDriver::keepalive_probe` and is unit-tested in
-	// `crates/core/src/bc_protocol/link.rs`.
+	// The "UnintelligibleReply ↦ Ok" mapping lives in the adapter's
+	// `Camera::keepalive_probe` and is unit-tested in
+	// `src/bc_camera.rs`.
 
 	#[test]
 	fn classify_other_err_is_failed() {
@@ -1930,20 +2042,20 @@ mod tests {
 
 	// ── is_login_failure (typed match + Debug-substring fallback) ───
 
-	/// Pin the production contract: a real `bairelay_neolink_core::Error::AuthFailed`
+	/// Pin the production contract: a real `crate::baichuan::Error::AuthFailed`
 	/// (the variant `try_connect()` actually returns) must drive the
 	/// permanent-bail. Pre-fix, this would have only worked accidentally
 	/// via the Debug-substring fallback; with typed downcast it's
 	/// guaranteed by the `From` impl in anyhow.
 	#[test]
 	fn is_login_failure_recognises_typed_auth_failed() {
-		let e: anyhow::Error = bairelay_neolink_core::Error::AuthFailed.into();
+		let e: anyhow::Error = crate::baichuan::Error::AuthFailed.into();
 		assert!(is_login_failure(&e));
 	}
 
 	#[test]
 	fn is_login_failure_recognises_typed_camera_login_fail() {
-		let e: anyhow::Error = bairelay_neolink_core::Error::CameraLoginFail.into();
+		let e: anyhow::Error = crate::baichuan::Error::CameraLoginFail.into();
 		assert!(is_login_failure(&e));
 	}
 
@@ -1952,7 +2064,7 @@ mod tests {
 	#[test]
 	fn is_login_failure_recognises_typed_auth_failed_through_context() {
 		use anyhow::Context;
-		let e: anyhow::Result<()> = Err(bairelay_neolink_core::Error::AuthFailed.into());
+		let e: anyhow::Result<()> = Err(crate::baichuan::Error::AuthFailed.into());
 		let wrapped = e.context("connect_with_retry").unwrap_err();
 		assert!(is_login_failure(&wrapped));
 	}
@@ -2253,7 +2365,7 @@ mod tests {
 		use crate::config::test_helpers::minimal_camera_config;
 		use tokio_util::sync::CancellationToken;
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let mut config = minimal_camera_config("cam-init");
 		config.idle_disconnect = true;
 		let cancel = CancellationToken::new();
@@ -2467,8 +2579,8 @@ mod tests {
 		use std::collections::HashSet;
 		use tokio_util::sync::CancellationToken;
 
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
-		let publisher = bairelay_mqtt::DiscoveryPublisher::new(
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
+		let publisher = crate::mqtt::DiscoveryPublisher::new(
 			mqtt,
 			"bairelay".to_string(),
 			"homeassistant".to_string(),
@@ -2493,18 +2605,18 @@ mod tests {
 	/// `publish_discovery` emits MQTT traffic and `unpublish_discovery`
 	/// emits retained-empty payloads on the same topics. We only
 	/// assert the published count increases; the exact topic set is
-	/// owned by the bairelay_mqtt crate and has its own tests.
+	/// owned by the mqtt crate and has its own tests.
 	#[tokio::test]
 	async fn discovery_publishes_and_unpublishes_with_caps() {
 		use crate::config::test_helpers::minimal_camera_config;
 		use std::collections::HashSet;
 		use tokio_util::sync::CancellationToken;
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let mut features = HashSet::new();
-		features.insert(bairelay_mqtt::discovery::Feature::Camera);
-		features.insert(bairelay_mqtt::discovery::Feature::Motion);
-		let publisher = bairelay_mqtt::DiscoveryPublisher::new(
+		features.insert(crate::mqtt::discovery::Feature::Camera);
+		features.insert(crate::mqtt::discovery::Feature::Motion);
+		let publisher = crate::mqtt::DiscoveryPublisher::new(
 			mqtt,
 			"bairelay".to_string(),
 			"homeassistant".to_string(),
@@ -2555,34 +2667,108 @@ mod tests {
 		assert!(matches!(err, StreamError::Unavailable(_)));
 	}
 
-	/// With state already `Connected` (via `set_driver_for_test`)
-	/// but no concrete `BcCamera` available, `stream_source()`
-	/// returns `Unavailable` on the "bc_camera_concrete is None"
-	/// branch — because `FakeCamera` only installs the trait object.
+	/// `Connected` state but an empty driver slot — the teardown-window
+	/// race — surfaces as `Unavailable` rather than spawning a reader
+	/// against a session that is already gone.
 	#[tokio::test]
-	async fn stream_source_returns_unavailable_without_concrete_bc() {
+	async fn stream_source_returns_unavailable_without_a_connected_session() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 		use tokio_util::sync::CancellationToken;
 
-		let fake = FakeCameraBuilder::new().build();
-		let driver: Arc<dyn CameraDriver> = fake;
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
 			minimal_camera_config("cam-nc2"),
 			cancel,
 			None,
 		));
-		handle.set_driver_for_test(driver);
+		// State says Connected; the driver slot was already cleared.
+		handle.set_state(CameraState::Connected);
 
 		let err = handle
 			.stream_source(RtspStreamKind::Main)
 			.await
 			.err()
-			.expect("no concrete → Unavailable");
+			.expect("no session → Unavailable");
 		assert!(
 			matches!(err, StreamError::Unavailable(ref msg) if msg.contains("not currently connected")),
 			"got {err:?}"
+		);
+	}
+
+	/// The whole stream lifecycle now runs through the [`Camera`] port:
+	/// a `FakeCamera` — with no concrete `BcCamera` anywhere — can back
+	/// a live `StreamSource`, and teardown sends the camera-side stop.
+	/// This is what the deleted `bc_camera_concrete` slot used to make
+	/// impossible.
+	#[tokio::test]
+	async fn stream_source_spawns_through_the_port_and_stops_video() {
+		use crate::baichuan::bc_protocol::{StreamKind as CoreStreamKind, VideoStream};
+		use crate::baichuan::bcmedia::model::BcMedia;
+		use crate::config::test_helpers::minimal_camera_config;
+		use tokio_util::sync::CancellationToken;
+
+		/// Never yields a packet, so the translator loop parks until
+		/// the source is cancelled — the reader's `stop_video` cleanup
+		/// is what we're here to observe.
+		struct IdleStream;
+
+		#[async_trait::async_trait]
+		impl VideoStream for IdleStream {
+			async fn get_data(
+				&mut self,
+			) -> std::result::Result<
+				std::result::Result<BcMedia, crate::baichuan::Error>,
+				crate::baichuan::Error,
+			> {
+				std::future::pending::<()>().await;
+				unreachable!()
+			}
+			async fn shutdown(&mut self) -> std::result::Result<(), crate::baichuan::Error> {
+				Ok(())
+			}
+		}
+
+		let fake = crate::fake_camera::FakeCameraBuilder::new()
+			.with_video_stream(Box::new(IdleStream))
+			.build();
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::new(
+			minimal_camera_config("cam-port-stream"),
+			cancel,
+			None,
+		));
+		handle.set_driver_for_test(fake.clone());
+
+		let source = tokio::time::timeout(
+			Duration::from_secs(5),
+			handle.stream_source(RtspStreamKind::Main),
+		)
+		.await
+		.expect("stream_source must not hang")
+		.expect("fake-backed session must yield a source");
+
+		// The reader races `start_video` against its cancel token and
+		// skips the stop when cancelled first, so wait for the start to
+		// land before tearing down — otherwise this test is a coin flip.
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while fake.calls().start_video.lock().unwrap().is_empty() {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("reader must call start_video through the port");
+
+		// Teardown drives the reader's cleanup, which sends stop_video
+		// through the port.
+		source
+			.stop_and_wait(Duration::from_secs(5))
+			.await
+			.expect("reader must exit within budget");
+
+		assert_eq!(
+			*fake.calls().stop_video.lock().unwrap(),
+			vec![CoreStreamKind::Main],
+			"reader cleanup must stop the camera-side preview via the port"
 		);
 	}
 
@@ -2595,8 +2781,8 @@ mod tests {
 	#[tokio::test]
 	async fn stop_all_stream_sources_clears_registry() {
 		use crate::config::test_helpers::minimal_camera_config;
+		use crate::rtsp::url::StreamKind;
 		use crate::stream_source::StreamSource;
-		use bairelay_rtsp::url::StreamKind;
 		use tokio_util::sync::CancellationToken;
 
 		let cancel = CancellationToken::new();
@@ -2619,12 +2805,12 @@ mod tests {
 	#[tokio::test]
 	async fn stream_source_fast_path_returns_preregistered_source() {
 		use crate::config::test_helpers::minimal_camera_config;
+		use crate::fake_camera::FakeCameraBuilder;
 		use crate::stream_source::StreamSource;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
 		use tokio_util::sync::CancellationToken;
 
 		let fake = FakeCameraBuilder::new().build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
 			minimal_camera_config("cam-fast"),
@@ -2692,9 +2878,10 @@ mod tests {
 	///   publish_pir_state) — configured via `enable_*` flags.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn run_connected_session_covers_full_lifecycle() {
+		use crate::baichuan::bc::xml::{FloodlightStatusList, RfAlarmCfg};
 		use crate::config::test_helpers::minimal_camera_config;
-		use bairelay_neolink_core::bc::xml::{FloodlightStatusList, RfAlarmCfg, Support};
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+
+		use crate::fake_camera::FakeCameraBuilder;
 
 		let mut config = minimal_camera_config("cam-sess");
 		config.mqtt.enable_motion = true;
@@ -2704,52 +2891,49 @@ mod tests {
 		config.mqtt.battery_update = 60_000;
 		config.mqtt.floodlight_update = 60_000;
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		// Scripted streams: empty but accept traffic so the two
 		// listen_on_* calls succeed cleanly. The floodlight channel
 		// is closed so its listener exits via `None → break`.
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (_motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(1);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 		let (fl_tx, fl_rx) = tokio::sync::mpsc::channel::<FloodlightStatusList>(1);
 		drop(fl_tx); // close → listener returns
 
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.with_floodlight_stream(fl_rx)
-			.with_battery_info(|| {
-				Ok(bairelay_neolink_core::bc::xml::BatteryInfo {
-					battery_percent: 42,
-					..Default::default()
+			.with_battery_status(|| {
+				Ok(crate::battery::BatteryStatus {
+					percent: 42,
+					voltage: crate::battery::Millivolts(0),
+					charge_status: String::new(),
+					low_power: false,
 				})
 			})
 			.with_is_floodlight_tasks_enabled(|| Ok(false))
-			.with_pirstate(|| {
+			.with_pir_config(|| {
 				Ok(RfAlarmCfg {
 					enable: 1,
 					..Default::default()
 				})
 			})
-			.with_support(|| {
-				Ok(Support {
-					ptz_mode: Some("pt".to_string()),
-					..Default::default()
-				})
-			})
-			.with_ptz_preset(|| Ok(bairelay_neolink_core::bc::xml::PtzPreset::default()))
-			.with_linktype(|| {
+			.with_capabilities(|| Ok(CameraCapabilities { has_ptz: true }))
+			.with_ptz_presets(|| Ok(Vec::new()))
+			.with_keepalive_probe(|| {
 				// Always error → keepalive_loop terminates after
 				// MAX_FAILURES consecutive failures.
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"scripted link fail",
 				))
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake.clone();
+		let driver: Arc<dyn Camera> = fake.clone();
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::with_bcmedia_dump_and_prefix(
@@ -2776,7 +2960,7 @@ mod tests {
 		assert_eq!(handle.state(), CameraState::Disconnected);
 		assert!(handle.bc_camera().is_none());
 
-		// Capability cache populated (get_support returned Ok).
+		// Capability cache populated (capabilities probe returned Ok).
 		let caps = handle.capabilities().expect("caps populated from fake");
 		assert!(caps.has_ptz);
 
@@ -2814,24 +2998,24 @@ mod tests {
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn battery_poller_not_respawned_once_camera_is_known_batteryless() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+		use crate::fake_camera::FakeCameraBuilder;
 
 		let mut config = minimal_camera_config("cam-nobat");
 		config.mqtt.enable_battery = true;
 		config.mqtt.battery_update = 10;
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let fake = FakeCameraBuilder::new()
-			// battery_info deliberately unset — a spawned poller panics.
-			.with_support(|| Ok(bairelay_neolink_core::bc::xml::Support::default()))
-			.with_linktype(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+			// battery_status deliberately unset — a spawned poller panics.
+			.with_capabilities(|| Ok(CameraCapabilities::default()))
+			.with_keepalive_probe(|| {
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"scripted link fail",
 				))
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake.clone();
+		let driver: Arc<dyn Camera> = fake.clone();
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::with_bcmedia_dump_and_prefix(
@@ -2862,30 +3046,26 @@ mod tests {
 		);
 	}
 
-	/// `get_support` returning Err leaves `capabilities()` as None —
-	/// the deliberate "retry on reconnect" path. The session still
-	/// runs to completion; the get_support Err-arm is now covered.
+	/// The capabilities probe returning Err leaves `capabilities()` as
+	/// None — the deliberate "retry on reconnect" path. The session
+	/// still runs to completion; the probe's Err-arm is covered.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn run_connected_session_tolerates_get_support_error() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+		use crate::fake_camera::FakeCameraBuilder;
 
 		let config = minimal_camera_config("cam-no-caps");
 		// No MQTT so publish paths short-circuit.
 
 		let fake = FakeCameraBuilder::new()
-			.with_support(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+			.with_capabilities(|| {
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"support probe refused",
 				))
 			})
-			.with_linktype(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"link fail",
-				))
-			})
+			.with_keepalive_probe(|| Err(crate::baichuan::bc_protocol::Error::Other("link fail")))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(config, cancel, None));
@@ -2900,7 +3080,7 @@ mod tests {
 		// Caps cache stays None → "retry on next reconnect" contract.
 		assert!(
 			handle.capabilities().is_none(),
-			"get_support Err must leave caps cache empty",
+			"capabilities Err must leave caps cache empty",
 		);
 		assert_eq!(handle.state(), CameraState::Disconnected);
 	}
@@ -2912,22 +3092,17 @@ mod tests {
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn run_connected_session_idle_disconnect_grace_path() {
 		use crate::config::test_helpers::minimal_camera_config;
-		use bairelay_neolink_core::bc::xml::Support;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+		use crate::fake_camera::FakeCameraBuilder;
 
 		let mut config = minimal_camera_config("cam-idle");
 		config.idle_disconnect = true;
 		config.idle_disconnect_timeout_secs = Some(1.0);
 
 		let fake = FakeCameraBuilder::new()
-			.with_support(|| Ok(Support::default()))
-			.with_linktype(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"link fail",
-				))
-			})
+			.with_capabilities(|| Ok(CameraCapabilities::default()))
+			.with_keepalive_probe(|| Err(crate::baichuan::bc_protocol::Error::Other("link fail")))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(config, cancel, None));
@@ -2960,7 +3135,7 @@ mod tests {
 		assert!(!handle.any_stream_source_bridging());
 
 		// Flip the source to `Bridging`.
-		source.set_gap_state_for_test(crate::stream_source::GapState::Bridging);
+		source.set_gap_state_for_test(crate::gap_bridging::GapState::Bridging);
 		assert!(handle.any_stream_source_bridging());
 
 		// Back to Live.
@@ -2973,8 +3148,8 @@ mod tests {
 mod prune_grace_tests {
 	use super::*;
 	use crate::config::test_helpers::minimal_camera_config;
+	use crate::rtsp::url::StreamKind;
 	use crate::stream_source::StreamSource;
-	use bairelay_rtsp::url::StreamKind;
 	use std::time::{Duration, Instant};
 
 	const GRACE: Duration = Duration::from_secs(60);

@@ -1,10 +1,12 @@
+use crate::baichuan::bc_protocol::Direction;
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::{CameraDriver, Direction};
+
+use crate::camera::Camera;
 
 use super::output::{Outcome, Preset};
 
 /// Move to a preset or, if `preset_id` is `None`, list the camera's presets.
-pub async fn preset(cam: &dyn CameraDriver, preset_id: Option<u8>) -> Result<Outcome> {
+pub async fn preset(cam: &dyn Camera, preset_id: Option<u8>) -> Result<Outcome> {
 	match preset_id {
 		Some(id) => {
 			cam.moveto_ptz_preset(id)
@@ -13,13 +15,8 @@ pub async fn preset(cam: &dyn CameraDriver, preset_id: Option<u8>) -> Result<Out
 			Ok(Outcome::PtzMoveTo { preset_id: id })
 		}
 		None => {
-			let ptz = cam
-				.get_ptz_preset()
-				.await
-				.context("get_ptz_preset failed")?;
-			let presets = ptz
-				.preset_list
-				.preset
+			let slots = cam.ptz_presets().await.context("ptz_presets failed")?;
+			let presets = slots
 				.into_iter()
 				.map(|p| Preset {
 					id: p.id,
@@ -31,7 +28,7 @@ pub async fn preset(cam: &dyn CameraDriver, preset_id: Option<u8>) -> Result<Out
 	}
 }
 
-pub async fn assign(cam: &dyn CameraDriver, preset_id: u8, name: String) -> Result<Outcome> {
+pub async fn assign(cam: &dyn Camera, preset_id: u8, name: String) -> Result<Outcome> {
 	cam.set_ptz_preset(preset_id, name.clone())
 		.await
 		.context("set_ptz_preset failed")?;
@@ -39,7 +36,7 @@ pub async fn assign(cam: &dyn CameraDriver, preset_id: u8, name: String) -> Resu
 }
 
 pub async fn control(
-	cam: &dyn CameraDriver,
+	cam: &dyn Camera,
 	direction: Direction,
 	amount: u32,
 	speed: Option<u32>,
@@ -58,11 +55,12 @@ pub async fn control(
 	})
 }
 
-pub async fn zoom(cam: &dyn CameraDriver, amount: f32) -> Result<Outcome> {
-	// `zoom_to` takes u32 zoom position. The CLI accepts a float to
-	// match neolink's interface; multiply by 1000 and clamp to a u32.
-	let pos = (amount * 1000.0).round().max(0.0) as u32;
-	cam.zoom_to(pos).await.context("zoom_to failed")?;
+pub async fn zoom(cam: &dyn Camera, amount: f32) -> Result<Outcome> {
+	// The CLI accepts the user-facing zoom factor to match neolink's
+	// interface; `ZoomLevel`'s constructor owns the wire scaling.
+	cam.zoom_to(crate::ptz::ZoomLevel::from_factor(amount))
+		.await
+		.context("zoom_to failed")?;
 	Ok(Outcome::PtzZoom { amount })
 }
 
@@ -79,8 +77,8 @@ fn direction_label(dir: Direction) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::{Preset as XmlPreset, PresetList, PtzPreset};
-	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+	use crate::fake_camera::FakeCameraBuilder;
+	use crate::ptz::{PresetSlot, ZoomLevel};
 
 	#[tokio::test]
 	async fn preset_move_to_logs_call_and_returns_moveto() {
@@ -93,17 +91,11 @@ mod tests {
 	#[tokio::test]
 	async fn preset_list_returns_presets() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| {
-				Ok(PtzPreset {
-					preset_list: PresetList {
-						preset: vec![XmlPreset {
-							id: 5,
-							name: Some("deck".into()),
-							..Default::default()
-						}],
-					},
-					..Default::default()
-				})
+			.with_ptz_presets(|| {
+				Ok(vec![PresetSlot {
+					id: 5,
+					name: Some("deck".into()),
+				}])
 			})
 			.build();
 		let outcome = preset(&*fake, None).await.unwrap();
@@ -168,17 +160,24 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn zoom_scales_amount_to_u32_position() {
+	async fn zoom_scales_amount_through_zoom_level() {
 		let fake = FakeCameraBuilder::new().build();
 		let outcome = zoom(&*fake, 1.5).await.unwrap();
 		assert_eq!(outcome, Outcome::PtzZoom { amount: 1.5 });
-		assert_eq!(*fake.calls().zoom_to.lock().unwrap(), vec![1500u32]);
+		assert_eq!(
+			*fake.calls().zoom_to.lock().unwrap(),
+			vec![ZoomLevel::from_factor(1.5)]
+		);
+		assert_eq!(ZoomLevel::from_factor(1.5).camera_units(), 1500);
 	}
 
 	#[tokio::test]
 	async fn zoom_negative_clamps_to_zero() {
 		let fake = FakeCameraBuilder::new().build();
 		let _ = zoom(&*fake, -4.0).await.unwrap();
-		assert_eq!(*fake.calls().zoom_to.lock().unwrap(), vec![0u32]);
+		assert_eq!(
+			*fake.calls().zoom_to.lock().unwrap(),
+			vec![ZoomLevel::from_factor(0.0)]
+		);
 	}
 }

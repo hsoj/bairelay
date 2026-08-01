@@ -40,8 +40,8 @@ async fn full_lifecycle_smoke_test() {
 
 #[test]
 fn mqtt_control_round_trip() {
-	use bairelay_mqtt::control::parse_control_message;
-	use bairelay_mqtt::topics;
+	use bairelay::mqtt::control::parse_control_message;
+	use bairelay::mqtt::topics;
 
 	let prefix = "bairelay";
 	let topic = topics::control_floodlight(prefix, "garden");
@@ -116,7 +116,7 @@ fn camera_state_enum_helpers() {
 
 #[test]
 fn wakeup_cap_rejected_above_1440() {
-	let cmd = bairelay_mqtt::control::parse_control_message(
+	let cmd = bairelay::mqtt::control::parse_control_message(
 		"bairelay",
 		"bairelay/cam/control/wakeup",
 		b"1441",
@@ -126,7 +126,7 @@ fn wakeup_cap_rejected_above_1440() {
 
 #[test]
 fn wakeup_max_accepted() {
-	let cmd = bairelay_mqtt::control::parse_control_message(
+	let cmd = bairelay::mqtt::control::parse_control_message(
 		"bairelay",
 		"bairelay/cam/control/wakeup",
 		b"1440",
@@ -136,7 +136,7 @@ fn wakeup_max_accepted() {
 
 #[test]
 fn wakeup_zero_rejected() {
-	let cmd = bairelay_mqtt::control::parse_control_message(
+	let cmd = bairelay::mqtt::control::parse_control_message(
 		"bairelay",
 		"bairelay/cam/control/wakeup",
 		b"0",
@@ -146,7 +146,7 @@ fn wakeup_zero_rejected() {
 
 #[test]
 fn wakeup_one_accepted() {
-	let cmd = bairelay_mqtt::control::parse_control_message(
+	let cmd = bairelay::mqtt::control::parse_control_message(
 		"bairelay",
 		"bairelay/cam/control/wakeup",
 		b"1",
@@ -164,15 +164,15 @@ fn wakeup_one_accepted() {
 // guards that stop `publish`/`unpublish` from generating MQTT
 // traffic under the wrong conditions.
 
-fn dummy_discovery_publisher() -> bairelay_mqtt::DiscoveryPublisher {
+fn dummy_discovery_publisher() -> bairelay::mqtt::DiscoveryPublisher {
 	// The `compute_payloads` path exercised by `publish`/`unpublish`
 	// is pure — the stub client's event loop is never driven.
-	let shared = bairelay_mqtt::SharedMqttClient::for_test_stub("integration-test");
-	bairelay_mqtt::DiscoveryPublisher::new(
+	let shared = bairelay::mqtt::SharedMqttClient::for_test_stub("integration-test");
+	bairelay::mqtt::DiscoveryPublisher::new(
 		shared,
 		"bairelay".to_string(),
 		"homeassistant".to_string(),
-		bairelay_mqtt::discovery::Feature::ALL
+		bairelay::mqtt::discovery::Feature::ALL
 			.iter()
 			.copied()
 			.collect(),

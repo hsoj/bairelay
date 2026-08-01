@@ -17,9 +17,11 @@ description = "Offline decoder for captured Reolink Baichuan-over-UDP sessions. 
 # `pcap-decode-api` is the feature gate that exposes `Session` + `Direction`
 # for offline decoding. Off in production builds; never compiled into the
 # bairelay binary.
-bairelay-neolink-core = { path = "../../../crates/core", features = ["pcap-decode-api"] }
-# Captures `bairelay_neolink_core`'s `log::trace!("Payload Txt: ...")` records,
-# which carry the raw decrypted XML *before* serde parsing — the only
-# place unmodeled fields in unknown msg_ids surface (a parsed-struct
-# view silently drops them).
-log = "0.4"
+bairelay = { path = "../../..", features = ["pcap-decode-api"] }
+# Captures `bairelay_neolink_core`'s `tracing::trace!("Payload Txt: ...")`
+# records, which carry the raw decrypted XML *before* serde parsing — the
+# only place unmodeled fields in unknown msg_ids surface (a parsed-struct
+# view silently drops them). Must stay on the same telemetry system as
+# the core crate; when core moved off `log`, this moved with it.
+tracing = "0.1"
+tracing-subscriber = "0.3"

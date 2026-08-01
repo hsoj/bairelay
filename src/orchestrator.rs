@@ -12,9 +12,9 @@ use crate::config::Config;
 pub struct Orchestrator {
 	cameras: Arc<HashMap<String, Arc<CameraHandle>>>,
 	cancel: CancellationToken,
-	wake_server_config: Option<bairelay_wake_server::WakeServerConfig>,
+	wake_server_config: Option<crate::wake_server::WakeServerConfig>,
 	push_listener_config: Option<crate::config::PushListenerConfig>,
-	mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+	mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 	topic_prefix: String,
 }
 
@@ -22,7 +22,7 @@ impl Orchestrator {
 	pub fn new(
 		config: Config,
 		cancel: CancellationToken,
-		mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+		mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 	) -> Self {
 		Self::with_bcmedia_dump(config, cancel, mqtt_client, None)
 	}
@@ -33,14 +33,14 @@ impl Orchestrator {
 	pub fn with_bcmedia_dump(
 		config: Config,
 		cancel: CancellationToken,
-		mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+		mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 		bcmedia_dump: Option<Arc<BcMediaDumpConfig>>,
 	) -> Self {
 		Self::with_bcmedia_dump_and_discovery(config, cancel, mqtt_client, bcmedia_dump, None)
 	}
 
 	/// Full constructor that also takes an optional
-	/// [`bairelay_mqtt::DiscoveryPublisher`]. Only the binary builds
+	/// [`crate::mqtt::DiscoveryPublisher`]. Only the binary builds
 	/// this when `[mqtt.discovery]` is present in config; tests and
 	/// the bcmedia-dump variant pass `None`. Cloned into each
 	/// `CameraHandle` so `publish_discovery`/`unpublish_discovery` can
@@ -48,9 +48,9 @@ impl Orchestrator {
 	pub fn with_bcmedia_dump_and_discovery(
 		config: Config,
 		cancel: CancellationToken,
-		mqtt_client: Option<bairelay_mqtt::SharedMqttClient>,
+		mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 		bcmedia_dump: Option<Arc<BcMediaDumpConfig>>,
-		discovery_publisher: Option<bairelay_mqtt::DiscoveryPublisher>,
+		discovery_publisher: Option<crate::mqtt::DiscoveryPublisher>,
 	) -> Self {
 		// Capture the configured MQTT topic prefix before the config is
 		// moved. Default to "bairelay" when MQTT is disabled — no
@@ -104,7 +104,7 @@ impl Orchestrator {
 		}
 	}
 
-	pub fn wake_server_config(&self) -> Option<&bairelay_wake_server::WakeServerConfig> {
+	pub fn wake_server_config(&self) -> Option<&crate::wake_server::WakeServerConfig> {
 		self.wake_server_config.as_ref()
 	}
 
@@ -112,7 +112,7 @@ impl Orchestrator {
 		self.push_listener_config.as_ref()
 	}
 
-	pub fn mqtt_client(&self) -> Option<&bairelay_mqtt::SharedMqttClient> {
+	pub fn mqtt_client(&self) -> Option<&crate::mqtt::SharedMqttClient> {
 		self.mqtt_client.as_ref()
 	}
 
@@ -232,7 +232,7 @@ mod tests {
 		});
 		// Set wake_server + push_listener so the optional getters
 		// return Some.
-		cfg.wake_server = Some(bairelay_wake_server::WakeServerConfig {
+		cfg.wake_server = Some(crate::wake_server::WakeServerConfig {
 			enable: true,
 			..Default::default()
 		});

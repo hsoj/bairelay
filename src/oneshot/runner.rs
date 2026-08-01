@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
+use crate::baichuan::bc_protocol::BcCamera;
 use anyhow::{anyhow, Context, Result};
-use bairelay_neolink_core::bc_protocol::BcCamera;
 use futures::future::BoxFuture;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;

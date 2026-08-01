@@ -41,7 +41,7 @@ async fn republish_cached_status_emits_each_set_field_as_retained() {
 	use bairelay::config::test_helpers::minimal_camera_config;
 	use tokio_util::sync::CancellationToken;
 
-	let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+	let (mqtt, mock) = bairelay::mqtt::test_support::mock_client();
 	let cancel = CancellationToken::new();
 	let cam = CameraHandle::new(minimal_camera_config("cam1"), cancel, Some(mqtt));
 
@@ -90,7 +90,7 @@ async fn republish_cached_status_is_noop_when_cache_empty() {
 	use bairelay::config::test_helpers::minimal_camera_config;
 	use tokio_util::sync::CancellationToken;
 
-	let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+	let (mqtt, mock) = bairelay::mqtt::test_support::mock_client();
 	let cancel = CancellationToken::new();
 	let cam = CameraHandle::new(minimal_camera_config("cam1"), cancel, Some(mqtt));
 

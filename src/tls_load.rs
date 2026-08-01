@@ -1,7 +1,7 @@
 //! Load and parse the TLS PEMs referenced by [`Config`].
 //!
 //! All file I/O happens here so `main.rs` only sees a parsed
-//! [`bairelay_rtsp::server::TlsConfig`]. Errors carry the offending path
+//! [`crate::rtsp::server::TlsConfig`]. Errors carry the offending path
 //! so operators do not have to grep their config to find what bairelay
 //! tried to open.
 
@@ -9,14 +9,14 @@ use std::fs;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use crate::rtsp::server::{ClientAuthMode, TlsConfig};
 use anyhow::{anyhow, Context, Result};
-use bairelay_rtsp::server::{ClientAuthMode, TlsConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::RootCertStore;
 
 use crate::config::TlsClientAuth;
 
-/// Parsed TLS material ready to hand to `bairelay_rtsp::server::ServerConfig`.
+/// Parsed TLS material ready to hand to `crate::rtsp::server::ServerConfig`.
 #[derive(Debug)]
 pub struct LoadedTls {
 	pub tls_config: TlsConfig,
@@ -124,10 +124,10 @@ mod tests {
 	use tempfile::NamedTempFile;
 
 	fn install_crypto() {
-		// Forward to the shared `bairelay_rtsp::server::install_crypto_provider`
+		// Forward to the shared `crate::rtsp::server::install_crypto_provider`
 		// helper so the OnceLock + Err-swallow semantics live in exactly one
 		// place across the workspace.
-		bairelay_rtsp::server::install_crypto_provider();
+		crate::rtsp::server::install_crypto_provider();
 	}
 
 	fn write_temp_pem(contents: &[u8]) -> NamedTempFile {

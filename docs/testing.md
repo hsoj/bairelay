@@ -70,12 +70,12 @@ tests/
 
 ## Test infrastructure crates expose
 
-`bairelay_neolink_core`'s test helpers are gated behind the crate's `test-util` Cargo feature; the binary's `[dev-dependencies]` opts in. The other crates' helpers compile unconditionally. See `docs/implementation.md` § Test infrastructure for full API:
+The Baichuan protocol test helpers are gated behind the crate's `test-util` feature, which `[dev-dependencies]` turns on for the integration tests in `tests/`. Unit tests inside `src/` see them via `cfg(test)`. The other modules' helpers compile unconditionally. See `docs/implementation.md` § Test infrastructure for full API:
 
-- `bairelay_neolink_core::bc_protocol::FakeCameraBuilder` + `FakeCalls`
-- `bairelay_neolink_core::bc_protocol::connection::mock::MockConnection`
-- `bairelay_neolink_core::bc_protocol::connection::discovery::test_support::ScriptedDiscoverer`
-- `bairelay_mqtt::test_support::mock_client()` + `MockHandle`
+- `bairelay::fake_camera::FakeCameraBuilder` + `FakeCalls` (implements the `Camera` trait)
+- `bairelay::baichuan::bc_protocol::connection::mock::MockConnection`
+- `bairelay::baichuan::bc_protocol::connection::discovery::test_support::ScriptedDiscoverer`
+- `bairelay::mqtt::test_support::mock_client()` + `MockHandle`
 - `bairelay::stream_source::PacketSource` (binary)
 - `bairelay::oneshot::snapshot::MockVideoStream` (binary, test-only)
 
@@ -83,9 +83,9 @@ tests/
 
 ## Offline Bc-protocol decoder (`tests/scripts/decode-bc-pcap/`)
 
-Replays a `tcpdump` capture of a Reolink Baichuan-over-UDP session through `bairelay_neolink_core`'s production parsers + AES-CFB primitives and prints each Bc message's header + decrypted payload. Use it to identify message IDs and XML schemas that bairelay does not yet model.
+Replays a `tcpdump` capture of a Reolink Baichuan-over-UDP session through `baichuan`'s production parsers + AES-CFB primitives and prints each Bc message's header + decrypted payload. Use it to identify message IDs and XML schemas that bairelay does not yet model.
 
-Standalone cargo project, excluded from the workspace, opts `bairelay_neolink_core` into the `pcap-decode-api` feature (off in production builds). Requires `tshark` on PATH for capture extraction.
+Standalone out-of-tree cargo project; depends on `bairelay` by path and opts into the `pcap-decode-api` feature (off in production builds). Requires `tshark` on PATH for capture extraction.
 
 Quick invocation:
 
@@ -137,7 +137,7 @@ ffprobe -rtsp_transport tcp rtsp://127.0.0.1:8554/<cam>/sub
 ffprobe -rtsp_transport tcp rtsp://127.0.0.1:8554/<cam>/extern
 ```
 
-Many battery cameras fall back to Sub when Extern is unavailable (`subscribe_with_extern_fallback` in `crates/rtsp/src/server/`); if you get Sub bytes in an `<cam>-extern.bcmedia` file, that's the camera's choice, not a capture-pipeline bug.
+Many battery cameras fall back to Sub when Extern is unavailable (`subscribe_with_extern_fallback` in `src/rtsp/server/`); if you get Sub bytes in an `<cam>-extern.bcmedia` file, that's the camera's choice, not a capture-pipeline bug.
 
 ### File layout
 
@@ -154,8 +154,8 @@ Argus emits **H.265 on main, H.264 on sub.** The replay test asserts the codec i
 
 ```rust
 use bytes::BytesMut;
-use bairelay_neolink_core::bcmedia::model::BcMedia;
-use bairelay_neolink_core::Error;
+use bairelay::baichuan::bcmedia::model::BcMedia;
+use bairelay::baichuan::Error;
 
 let raw = std::fs::read("tests/fixtures/cam1-main.bcmedia")?;
 let mut buf = BytesMut::from(raw.as_slice());
@@ -524,7 +524,7 @@ Issues at this surface are usually:
 
 ## Manual live-camera harness
 
-`tests/scripts/manual-verify.sh` exercises the RTSP server + MQTT bridge against real cameras. On-demand only — not wired into `cargo test`. Discovers installed client tools, parses non-secret bits of the real `config.toml` (cameras, MQTT broker, credentials), spawns bairelay with `RUST_LOG=bairelay=debug,bairelay_rtsp=debug`, runs the probe matrix, tears down. Logs go to `tests/logs/manual-verify/` (gitignored).
+`tests/scripts/manual-verify.sh` exercises the RTSP server + MQTT bridge against real cameras. On-demand only — not wired into `cargo test`. Discovers installed client tools, parses non-secret bits of the real `config.toml` (cameras, MQTT broker, credentials), spawns bairelay with `RUST_LOG=bairelay=debug,bairelay::rtsp=debug`, runs the probe matrix, tears down. Logs go to `tests/logs/manual-verify/` (gitignored).
 
 ### Prerequisites
 
@@ -616,4 +616,4 @@ After flipping the resolver, sleeping cameras may take up to one heartbeat cycle
 7. manual-verify.sh — should remain at its current pass count.
 ```
 
-In-process correctness coverage lives in `crates/wake-server/tests/udp_loopback.rs`; the live-verify above is the integration check, not a CI gate.
+In-process correctness coverage lives in `tests/wake_server_udp_loopback.rs`; the live-verify above is the integration check, not a CI gate.

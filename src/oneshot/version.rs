@@ -1,9 +1,9 @@
+use crate::camera::Camera;
 use anyhow::{Context, Result};
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
+pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
 	let info = cam.version().await.context("camera version query failed")?;
 	Ok(Outcome::Version {
 		model: info.model.unwrap_or_else(|| "unknown".into()),
@@ -16,8 +16,10 @@ pub async fn run(cam: &dyn CameraDriver) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bc::xml::VersionInfo;
-	use bairelay_neolink_core::bc_protocol::{Error, FakeCameraBuilder};
+	use crate::baichuan::bc::xml::VersionInfo;
+	use crate::baichuan::bc_protocol::Error;
+
+	use crate::fake_camera::FakeCameraBuilder;
 
 	#[tokio::test]
 	async fn version_maps_all_fields() {

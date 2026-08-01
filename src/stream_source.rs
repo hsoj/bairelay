@@ -7,9 +7,9 @@
 //!
 //! Responsibilities:
 //! 1. Spawn a tokio task that pulls `BcMedia` packets from
-//!    [`bairelay_neolink_core`].
+//!    [`baichuan`].
 //! 2. Split Annex-B NAL streams, detect the video codec, and translate
-//!    each packet into [`bairelay_rtsp::provider::Frame`].
+//!    each packet into [`crate::rtsp::provider::Frame`].
 //! 3. Update the shared [`LastFrameBuffer`] on I-frames / P-frames.
 //! 4. Maintain the [`SdpParams`] needed to render the RTSP `DESCRIBE`
 //!    body for this source (codec, SPS/PPS/VPS).
@@ -35,17 +35,21 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use bairelay_rtsp::buffer::{LastFrameBuffer, VideoBurst};
-use bairelay_rtsp::codec::nal::{
+use crate::rtsp::buffer::{LastFrameBuffer, VideoBurst};
+use crate::rtsp::codec::nal::{
 	detect_codec, is_decodable_nal, split_annex_b, H264NalType, H265NalType,
 };
-use bairelay_rtsp::codec::VideoCodec;
-use bairelay_rtsp::provider::Frame;
-use bairelay_rtsp::sdp::{SdpParams, VideoParams};
-use bairelay_rtsp::url::StreamKind as RtspStreamKind;
+use crate::rtsp::codec::VideoCodec;
+use crate::rtsp::provider::Frame;
+use crate::rtsp::sdp::{SdpParams, VideoParams};
+use crate::rtsp::url::StreamKind as RtspStreamKind;
 
-use bairelay_neolink_core::bc_protocol::{BcCamera, StreamKind as CoreStreamKind};
-use bairelay_neolink_core::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
+use crate::baichuan::bc_protocol::StreamKind as CoreStreamKind;
+
+use crate::baichuan::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
+use crate::camera::Camera;
+use crate::gap_bridging::BridgingPolicy;
+pub use crate::gap_bridging::GapState;
 
 use crate::bcmedia_dump::{BcMediaDumpConfig, FrameDumper};
 
@@ -132,22 +136,6 @@ impl<T> MutexPoisonRecover<T> for Mutex<T> {
 	}
 }
 
-/// Upstream live-frame presence for a [`StreamSource`], maintained by
-/// `reader_task`.
-///
-/// - `Live` — a real `Frame::Video` arrived from the camera more
-///   recently than `gap_threshold` ago.
-/// - `Bridging` — the reader has been silent for longer than
-///   `gap_threshold`, so Task 6 will start emitting
-///   placeholder frames to keep subscriber pipelines from stalling.
-///
-/// Task 5 only tracks the state; no frames are emitted yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GapState {
-	Live,
-	Bridging,
-}
-
 /// A live `(camera, stream_kind)` media source. See module docs.
 pub struct StreamSource {
 	tx: broadcast::Sender<Frame>,
@@ -192,56 +180,17 @@ pub struct StreamSource {
 	/// sentinel `Duration::MAX` (set when `PauseConfig::bridge_gaps` is
 	/// false) disables gap emission entirely — the ticker never fires.
 	gap_threshold: Duration,
-	/// Shared upstream-presence state. `reader_task` flips this to
-	/// `Bridging` from its 200 ms gap-detection ticker when the upstream
-	/// has been silent for longer than `gap_threshold`, and flips back
-	/// to `Live` as soon as a real `Frame::Video` is forwarded. Brief
-	/// lock-and-release, never held across `.await`, so `std::sync::Mutex`
-	/// is the right primitive here.
-	gap_state: Arc<Mutex<GapState>>,
-	/// Last time a real live `Frame::Video` was forwarded. Compared
-	/// against `gap_threshold` by the gap-detection ticker. Seeded with
-	/// `tokio::time::Instant::now()` at source construction so the
-	/// initial state is `Live` (no spurious `Bridging` at startup).
+	/// Gap-bridging policy for this source: upstream-liveness tracking,
+	/// the `Live ⇄ Bridging` transition, and replay-PTS synthesis. The
+	/// decision logic is pure ([`crate::gap_bridging`]); this handle
+	/// only shares it with the reader task, so a mid-stream reader
+	/// re-spawn rebinds the same counters and synth PTS stays monotonic
+	/// across a Baichuan reconnect — the same pattern as
+	/// `translator_state`.
 	///
-	/// Uses `tokio::time::Instant` rather than `std::time::Instant` so
-	/// the gap-detection unit tests can drive transitions under
-	/// `tokio::test(start_paused = true)` + `tokio::time::advance`.
-	/// Outside paused tests `tokio::time::Instant::now()` is backed by
-	/// the same monotonic clock as `std::time::Instant`.
-	///
-	/// Only read by `reader_task` (via a cloned `Arc`); the copy on
-	/// `StreamSource` exists to keep the state alive across any future
-	/// reader re-spawn, matching the same pattern as `translator_state`.
-	#[allow(dead_code)]
-	last_live_frame_at: Arc<Mutex<tokio::time::Instant>>,
-	/// 90 kHz RTP timestamp of the last [`Frame::Video`] broadcast on
-	/// this source, regardless of whether it was a live frame or a
-	/// Bridging replay. `None` until the first emit. Updated by
-	/// `reader_task` (and its test stand-in) on every successful video
-	/// broadcast. Used by the replay-frame synth to advance PTS
-	/// monotonically across the `Live → Bridging → Live` boundary.
-	///
-	/// `Option<u32>` rather than `0` sentinel: the previous "rebind only
-	/// when *guard == 0" rule both (a) failed to rebind on a legitimate
-	/// 32-bit-wraparound zero and (b) coupled with a `now`-initialised
-	/// `last_emit_wallclock_at` to produce an unbounded first-replay PTS
-	/// jump (process-uptime × 90 kHz).
-	///
-	/// Held in an `Arc<Mutex<_>>` so a mid-stream reader re-spawn re-
-	/// binds the same state — synth PTS stays monotonic across the
-	/// reconnect, mirroring the `translator_state` pattern.
-	#[allow(dead_code)]
-	last_emitted_pts_90khz: Arc<Mutex<Option<u32>>>,
-	/// Wall-clock instant of the last [`Frame::Video`] broadcast (live
-	/// or replay). Paired with `last_emitted_pts_90khz` to derive the
-	/// next replay PTS as `last_pts + Δwall × 90_000`. `None` until the
-	/// first emit so the first replay's wall-clock delta is 0 (the
-	/// burst's `captured_pts_90khz` anchor stands alone). Uses
-	/// `tokio::time::Instant` so the replay tests can drive transitions
-	/// under `tokio::test(start_paused = true)`.
-	#[allow(dead_code)]
-	last_emit_wallclock_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+	/// Brief lock-and-release, never held across `.await`, so
+	/// `std::sync::Mutex` is the right primitive.
+	bridging: Arc<Mutex<BridgingPolicy>>,
 }
 
 /// Shared parts of a [`StreamSource`] that are independent of the
@@ -259,10 +208,7 @@ struct StreamSourceParts {
 	translator_state: Arc<Mutex<StreamTranslatorState>>,
 	cancel: CancellationToken,
 	gap_threshold: Duration,
-	gap_state: Arc<Mutex<GapState>>,
-	last_live_frame_at: Arc<Mutex<tokio::time::Instant>>,
-	last_emitted_pts_90khz: Arc<Mutex<Option<u32>>>,
-	last_emit_wallclock_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+	bridging: Arc<Mutex<BridgingPolicy>>,
 }
 
 impl StreamSourceParts {
@@ -287,10 +233,7 @@ impl StreamSourceParts {
 			translator_state: Arc::new(Mutex::new(StreamTranslatorState::default())),
 			cancel: CancellationToken::new(),
 			gap_threshold,
-			gap_state: Arc::new(Mutex::new(GapState::Live)),
-			last_live_frame_at: Arc::new(Mutex::new(tokio::time::Instant::now())),
-			last_emitted_pts_90khz: Arc::new(Mutex::new(None)),
-			last_emit_wallclock_at: Arc::new(Mutex::new(None)),
+			bridging: Arc::new(Mutex::new(BridgingPolicy::new(gap_threshold, now_std()))),
 		}
 	}
 
@@ -304,10 +247,7 @@ impl StreamSourceParts {
 			task: Mutex::new(Some(task)),
 			last_idle_since: Mutex::new(None),
 			gap_threshold: self.gap_threshold,
-			gap_state: self.gap_state,
-			last_live_frame_at: self.last_live_frame_at,
-			last_emitted_pts_90khz: self.last_emitted_pts_90khz,
-			last_emit_wallclock_at: self.last_emit_wallclock_at,
+			bridging: self.bridging,
 		})
 	}
 }
@@ -316,7 +256,7 @@ impl StreamSourceParts {
 /// `reader_task` previously took 16 individual parameters. Bundling keeps
 /// the signature stable when fields are added.
 struct ReaderTaskArgs {
-	camera: Arc<BcCamera>,
+	camera: Arc<dyn Camera>,
 	camera_name: String,
 	rtsp_kind: RtspStreamKind,
 	core_kind: CoreStreamKind,
@@ -340,11 +280,7 @@ struct ReaderTaskArgs {
 	bcmedia_dump: Option<Arc<BcMediaDumpConfig>>,
 	audio_presence: Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	translator_state: Arc<Mutex<StreamTranslatorState>>,
-	gap_threshold: Duration,
-	gap_state: Arc<Mutex<GapState>>,
-	last_live_frame_at: Arc<Mutex<tokio::time::Instant>>,
-	last_emitted_pts_90khz: Arc<Mutex<Option<u32>>>,
-	last_emit_wallclock_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+	bridging: Arc<Mutex<BridgingPolicy>>,
 }
 
 /// Mutable state owned by the reader task's translator loop.
@@ -382,13 +318,13 @@ pub struct StreamTranslatorState {
 impl StreamSource {
 	/// Start a new source: spawn the reader task and return the handle.
 	///
-	/// `camera` is the connected `BcCamera` to pull video from,
+	/// `camera` is the connected camera port handle to pull video from,
 	/// `camera_name` is the logical name (used in the SDP `s=` line),
 	/// `kind` is the bairelay-side stream kind (mapped to the underlying
-	/// `bairelay_neolink_core::StreamKind` internally), and `last_frame` is the
+	/// `crate::baichuan::StreamKind` internally), and `last_frame` is the
 	/// camera-scoped buffer shared across all sources for this camera.
 	pub fn start(
-		camera: Arc<BcCamera>,
+		camera: Arc<dyn Camera>,
 		camera_name: String,
 		kind: RtspStreamKind,
 		last_frame: Arc<LastFrameBuffer>,
@@ -447,11 +383,7 @@ impl StreamSource {
 			bcmedia_dump: bcmedia_dump.clone(),
 			audio_presence: Arc::clone(&audio_presence),
 			translator_state: Arc::clone(&parts.translator_state),
-			gap_threshold,
-			gap_state: Arc::clone(&parts.gap_state),
-			last_live_frame_at: Arc::clone(&parts.last_live_frame_at),
-			last_emitted_pts_90khz: Arc::clone(&parts.last_emitted_pts_90khz),
-			last_emit_wallclock_at: Arc::clone(&parts.last_emit_wallclock_at),
+			bridging: Arc::clone(&parts.bridging),
 		};
 		let task = tokio::spawn(async move {
 			reader_task(reader_args).await;
@@ -497,11 +429,7 @@ impl StreamSource {
 			bcmedia_dump: None,
 			audio_presence: Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown)),
 			translator_state: Arc::clone(&parts.translator_state),
-			gap_threshold,
-			gap_state: Arc::clone(&parts.gap_state),
-			last_live_frame_at: Arc::clone(&parts.last_live_frame_at),
-			last_emitted_pts_90khz: Arc::clone(&parts.last_emitted_pts_90khz),
-			last_emit_wallclock_at: Arc::clone(&parts.last_emit_wallclock_at),
+			bridging: Arc::clone(&parts.bridging),
 		};
 		let task = tokio::spawn(async move {
 			let mut s = source;
@@ -602,7 +530,7 @@ impl StreamSource {
 	/// Current upstream-presence state as maintained by `reader_task`'s
 	/// 200 ms gap-detection ticker. See [`GapState`].
 	pub fn gap_state(&self) -> GapState {
-		*lock_recover(&self.gap_state)
+		lock_recover(&self.bridging).state()
 	}
 
 	/// Request the reader task to exit. Idempotent.
@@ -721,7 +649,7 @@ impl StreamSource {
 	/// `pub` (not `pub(crate)`) so the Task 11 integration test
 	/// in `tests/fixture_replay.rs` can wire a real `StreamSource` behind
 	/// a `StreamProvider` shim and exercise production's gap-detection
-	/// ticker + `emit_replay_frame_if_bridging` end-to-end. The
+	/// ticker + `tick_bridging` end-to-end. The
 	/// `#[cfg(test)]` gate on the enclosing `impl` block keeps this out
 	/// of release builds.
 	pub fn start_inert_for_test_with_gap_and_last_frame_and_injector(
@@ -732,23 +660,18 @@ impl StreamSource {
 		// coverage exercises the single parts builder both ways.
 		let parts = StreamSourceParts::new("test", RtspStreamKind::Main, last_frame, gap_threshold);
 
-		let gap_state_task = Arc::clone(&parts.gap_state);
-		let last_live_frame_at_task = Arc::clone(&parts.last_live_frame_at);
-		let last_emitted_pts_task = Arc::clone(&parts.last_emitted_pts_90khz);
-		let last_emit_wallclock_task = Arc::clone(&parts.last_emit_wallclock_at);
+		let bridging_task = Arc::clone(&parts.bridging);
 		let last_frame_task = Arc::clone(&parts.last_frame);
 		let tx_task = parts.tx.clone();
 		let cancel_task = parts.cancel.clone();
 		let injector = FakeFrameInjector {
-			gap_state: Arc::clone(&parts.gap_state),
-			last_live_frame_at: Arc::clone(&parts.last_live_frame_at),
+			bridging: Arc::clone(&parts.bridging),
 			tx: parts.tx.clone(),
 		};
 		// Ticker-only stand-in for `reader_task` — enough to exercise
-		// Task 5's Live→Bridging transition and Task 6's replay-frame
-		// emission under virtual time. Shares
-		// `check_gap_and_update_state` / `emit_replay_frame_if_bridging`
-		// with the production path so the two call sites cannot drift.
+		// the Live→Bridging transition and replay-frame emission under
+		// virtual time. Shares `tick_bridging` with the production path
+		// so the two call sites cannot drift.
 		let task = tokio::spawn(async move {
 			let mut ticker = tokio::time::interval(GAP_DETECTION_TICK);
 			ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -756,18 +679,7 @@ impl StreamSource {
 				tokio::select! {
 					_ = cancel_task.cancelled() => break,
 					_ = ticker.tick() => {
-						check_gap_and_update_state(
-							&last_live_frame_at_task,
-							&gap_state_task,
-							gap_threshold,
-						);
-						emit_replay_frame_if_bridging(
-							&tx_task,
-							&last_frame_task,
-							&gap_state_task,
-							&last_emitted_pts_task,
-							&last_emit_wallclock_task,
-						);
+						tick_bridging(&tx_task, &last_frame_task, &bridging_task);
 					}
 				}
 			}
@@ -787,7 +699,7 @@ impl StreamSource {
 	/// tests that need to observe "source is bridging" transitions in
 	/// sub-millisecond time.
 	pub(crate) fn set_gap_state_for_test(&self, state: GapState) {
-		*lock_recover(&self.gap_state) = state;
+		lock_recover(&self.bridging).set_state_for_test(state);
 	}
 
 	/// Test-only: overwrite the SDP parameters on this source. The inert
@@ -812,57 +724,47 @@ impl StreamSource {
 /// keeps this out of release builds; the `test-util` feature is only
 /// pulled in by `bairelay`'s own `[dev-dependencies]` self-reference.
 pub struct FakeFrameInjector {
-	gap_state: Arc<Mutex<GapState>>,
-	last_live_frame_at: Arc<Mutex<tokio::time::Instant>>,
+	bridging: Arc<Mutex<BridgingPolicy>>,
 	tx: broadcast::Sender<Frame>,
 }
 
 impl FakeFrameInjector {
-	/// Mark the source as having just received a real live video frame.
-	/// Mirrors a SUBSET of the state updates that `reader_task` performs
-	/// after a successful `BcMedia::Iframe` / `Pframe` translation.
+	/// Mark the source as having just received a real live video frame:
+	/// upstream liveness refreshed and the gap closed, mirroring what
+	/// `reader_task` does after a successful translation.
 	///
-	/// Of production's four live-frame state mutations, this helper
-	/// replicates two and skips two:
-	///
-	/// Replicated:
-	/// - `last_live_frame_at` — bumped to `Instant::now()` so the gap
-	///   ticker sees a fresh live frame.
-	/// - `gap_state` — forced back to `GapState::Live`.
-	///
-	/// Skipped:
-	/// - `last_emitted_pts_90khz` — real reader advances this from the
-	///   decoded frame's PTS so replay can synthesize continuous
-	///   timestamps; tests that assert PTS continuity must set it
-	///   manually.
-	/// - `last_emit_wallclock_at` — real reader stamps wall-clock per
-	///   emit so the Bridging ticker knows when to fire; tests that
-	///   depend on ticker phase must set it manually.
+	/// The replay-PTS counters are deliberately left alone — this helper
+	/// has no frame, so it has no timestamp to record. Use
+	/// [`Self::broadcast_live_video_frame`] when the PTS matters.
 	///
 	/// Does NOT broadcast — use [`Self::broadcast_live_video_frame`]
 	/// when a downstream subscriber needs to actually see the frame.
 	pub fn inject_fake_video_frame(&self) {
-		*lock_recover(&self.last_live_frame_at) = tokio::time::Instant::now();
-		*lock_recover(&self.gap_state) = GapState::Live;
+		let mut policy = lock_recover(&self.bridging);
+		policy.on_upstream_packet(now_std());
+		policy.set_state_for_test(GapState::Live);
 	}
 
-	/// Near-reader-task-equivalent "live video frame arrived" event:
-	/// broadcast `frame` on the source's tx channel AND update the
-	/// gap-detection markers so the ticker stays in `Live` state.
-	/// Used by the Task 11 integration test in
+	/// Full "live video frame arrived" event: broadcast `frame` on the
+	/// source's tx channel and drive the bridging policy exactly as
+	/// `process_stream_result` does — upstream arrival plus the
+	/// broadcast's own PTS, so replay synthesis continues from the real
+	/// timeline. Used by the integration test in
 	/// `tests/fixture_replay.rs` to drive a real `StreamSource` through
-	/// `Live → Bridging → Live` transitions with frames that actually
-	/// reach attached RTSP subscribers.
-	///
-	/// NOT a full production mock. Delegates to
-	/// [`Self::inject_fake_video_frame`] for state updates, which only
-	/// touches `last_live_frame_at` + `gap_state`. Production's
-	/// `last_emitted_pts_90khz` and `last_emit_wallclock_at` are NOT
-	/// advanced here — a future test author who needs PTS-continuity or
-	/// ticker-phase accuracy must write those directly.
+	/// `Live → Bridging → Live` with frames that reach RTSP subscribers.
 	pub fn broadcast_live_video_frame(&self, frame: Frame) {
+		let pts = match &frame {
+			Frame::Video { pts_90khz, .. } => Some(*pts_90khz),
+			Frame::Audio { .. } => None,
+		};
 		let _ = self.tx.send(frame);
-		self.inject_fake_video_frame();
+		let now = now_std();
+		let mut policy = lock_recover(&self.bridging);
+		policy.on_upstream_packet(now);
+		match pts {
+			Some(pts) => policy.on_broadcast(pts, now),
+			None => policy.set_state_for_test(GapState::Live),
+		}
 	}
 }
 
@@ -1142,115 +1044,63 @@ fn micros_to_90khz(micros: u32) -> u32 {
 	((micros as u64).wrapping_mul(9) / 100) as u32
 }
 
-/// Check whether the gap threshold has elapsed since the last live
-/// frame; flip `gap_state` to `Bridging` if so. Called on every
-/// gap-detection tick from both [`reader_task`] and its test stand-in
-/// in [`StreamSource::start_inert_for_test_with_gap_and_injector`].
-/// Kept as a free fn so the two call sites cannot drift.
-fn check_gap_and_update_state(
-	last_live_frame_at: &Mutex<tokio::time::Instant>,
-	gap_state: &Mutex<GapState>,
-	gap_threshold: Duration,
-) {
-	let last = *lock_recover(last_live_frame_at);
-	if last.elapsed() > gap_threshold {
-		*lock_recover(gap_state) = GapState::Bridging;
-	}
+/// Current time as the pure [`BridgingPolicy`] sees it.
+///
+/// Goes through `tokio::time::Instant` so `#[tokio::test(start_paused
+/// = true)]` + `tokio::time::advance` still drive gap transitions
+/// deterministically; `into_std` preserves the virtual clock's value.
+fn now_std() -> std::time::Instant {
+	tokio::time::Instant::now().into_std()
 }
 
-/// if `gap_state` is `Bridging` and a cached
-/// [`VideoBurst`] is available, synthesise a replay [`Frame::Video`]
-/// from the burst's `iframe_nals` with a PTS derived from the last
-/// emitted PTS + wall-clock delta. Called on every gap-detection tick
-/// from both [`reader_task`] and its test stand-in — sharing this
-/// helper keeps the two code paths from drifting.
+/// One gap-detection tick: advance the policy and perform whatever I/O
+/// it decides on.
 ///
-/// PTS synth: `synth_pts = last_emitted_pts + Δwall × 90_000`. On the
-/// first replay after a Live→Bridging transition, `last_emitted_pts`
-/// carries the last live frame's timestamp; on subsequent replays it
-/// carries the previous replay's synth value, so the counter advances
-/// monotonically through the gap. On return to `Live`, the next live
-/// frame's PTS is typically larger (camera's 90 kHz clock kept
-/// ticking), so the timeline stays monotonic across the resumption.
+/// The decision logic — threshold comparison, `Live ⇄ Bridging`, and
+/// replay-PTS synthesis — lives in [`BridgingPolicy`]. This driver only
+/// supplies the clock, looks up the cached burst, and broadcasts.
+/// Called from both [`reader_task`] and its test stand-in in
+/// [`StreamSource::start_inert_for_test_with_gap_and_injector`], so the
+/// two paths cannot drift.
 ///
 /// Parameter sets (VPS/SPS/PPS) are already stripped from cached
 /// `iframe_nals` by [`extract_iframe_parts`] — the SDP `sprop-*` fmtp
 /// attributes carry them out-of-band. We defensively re-filter via
-/// [`is_parameter_set_nal`] here so a future burst-capture change
-/// can't reintroduce in-band parameter sets on the replay path.
-fn emit_replay_frame_if_bridging(
+/// [`is_parameter_set_nal`] here so a future burst-capture change can't
+/// reintroduce in-band parameter sets on the replay path. Non-decodable
+/// NAL types (HEVC type 62 / multi-layer) are dropped for the same
+/// belt-and-braces reason.
+fn tick_bridging(
 	tx: &broadcast::Sender<Frame>,
 	last_frame: &Arc<LastFrameBuffer>,
-	gap_state: &Mutex<GapState>,
-	last_emitted_pts_90khz: &Mutex<Option<u32>>,
-	last_emit_wallclock_at: &Mutex<Option<tokio::time::Instant>>,
+	bridging: &Mutex<BridgingPolicy>,
 ) {
-	if *lock_recover(gap_state) != GapState::Bridging {
-		return;
-	}
-	let Some(burst) = last_frame.video_snapshot() else {
-		// No burst ever captured for this source — nothing to replay.
-		// Leave state as `Bridging`; the watchdog/reader will surface
-		// the upstream problem through other paths.
+	// Prepare the replayable payload before locking the policy: an
+	// empty NAL list after filtering counts as "nothing to replay", so
+	// the policy must not advance its PTS counters for it.
+	let replayable = last_frame.video_snapshot().and_then(|burst| {
+		let nals: Vec<Bytes> = burst
+			.iframe_nals
+			.iter()
+			.filter(|n| !is_parameter_set_nal(n, burst.codec) && is_decodable_nal(n, burst.codec))
+			.map(|n| Bytes::copy_from_slice(n))
+			.collect();
+		(!nals.is_empty()).then_some((burst.codec, nals, burst.captured_pts_90khz))
+	});
+
+	let anchor = replayable.as_ref().map(|(_, _, pts)| *pts);
+	let Some(synth_pts) = lock_recover(bridging).on_tick(now_std(), anchor) else {
 		return;
 	};
+	let (codec, nals, _) = replayable.expect("policy only emits when an anchor was supplied");
 
-	// Defensive param-set strip ('s `extract_iframe_parts`
-	// already filters these at capture, but replaying anyway costs a
-	// cheap header-byte scan and makes the replay path robust to any
-	// future burst-capture change). Also drop any non-decodable NAL
-	// types (HEVC type 62 / multi-layer) — `extract_iframe_parts`
-	// already only emits IDR slices, but layer the filter so a future
-	// capture change can't reintroduce the breakage.
-	let nals: Vec<Bytes> = burst
-		.iframe_nals
-		.iter()
-		.filter(|n| !is_parameter_set_nal(n, burst.codec) && is_decodable_nal(n, burst.codec))
-		.map(|n| Bytes::copy_from_slice(n))
-		.collect();
-	if nals.is_empty() {
-		return;
-	}
-
-	// Synth PTS: advance from last emitted by Δwall × 90_000. Wrapping
-	// arithmetic matches RTP convention (intentional 2^32 wrap).
-	//
-	// First-emit semantics: when `last_emit_wallclock_at` is `None`, the
-	// wall-clock delta is treated as zero — there's no prior emission to
-	// derive an interval from, and seeding from `now - construction-time`
-	// would inject process-uptime into the receiver's RTP timeline. The
-	// PTS anchor on the same first emit is the burst's
-	// `captured_pts_90khz`, which aligns the ticker-driven replay stream
-	// with `session_task::replay_burst`'s one-shot PLAY-time replay (both
-	// derive their first PTS from the same captured anchor).
-	let now = tokio::time::Instant::now();
-	let delta_90khz = {
-		let last_at_opt = *lock_recover(last_emit_wallclock_at);
-		match last_at_opt {
-			Some(last_at) => {
-				let delta = now.saturating_duration_since(last_at);
-				(delta.as_nanos().saturating_mul(90_000) / 1_000_000_000) as u32
-			}
-			None => 0,
-		}
-	};
-	let synth_pts = {
-		let mut pts_guard = lock_recover(last_emitted_pts_90khz);
-		let base = pts_guard.unwrap_or(burst.captured_pts_90khz);
-		let synth = base.wrapping_add(delta_90khz);
-		*pts_guard = Some(synth);
-		synth
-	};
-	*lock_recover(last_emit_wallclock_at) = Some(now);
-
-	let frame = Frame::Video {
-		codec: burst.codec,
+	let _ = tx.send(Frame::Video {
+		codec,
 		nals,
 		pts_90khz: synth_pts,
 		keyframe: true,
 		access_unit_end: true,
-	};
-	let _ = tx.send(frame);
+	});
 }
 
 /// Reader loop driving one `(camera, stream_kind)` source.
@@ -1275,14 +1125,10 @@ async fn reader_task(args: ReaderTaskArgs) {
 		bcmedia_dump,
 		audio_presence,
 		translator_state,
-		gap_threshold,
-		gap_state,
-		last_live_frame_at,
-		last_emitted_pts_90khz,
-		last_emit_wallclock_at,
+		bridging,
 	} = args;
 	let start_video_future =
-		tokio::time::timeout(START_VIDEO_TIMEOUT, camera.start_video(core_kind, 0, false));
+		tokio::time::timeout(START_VIDEO_TIMEOUT, camera.start_video(core_kind));
 	let stream_data = tokio::select! {
 		_ = cancel.cancelled() => {
 			tracing::debug!(camera = %camera_name, stream = ?core_kind,
@@ -1322,11 +1168,7 @@ async fn reader_task(args: ReaderTaskArgs) {
 		bcmedia_dump,
 		audio_presence,
 		translator_state,
-		gap_threshold,
-		gap_state,
-		last_live_frame_at,
-		last_emitted_pts_90khz,
-		last_emit_wallclock_at,
+		bridging,
 	};
 	// Run the translator loop on a dedicated task and await its
 	// JoinHandle so a panic inside `drive_translator_loop` (mutex
@@ -1391,11 +1233,7 @@ struct TranslatorLoopArgs {
 	bcmedia_dump: Option<Arc<BcMediaDumpConfig>>,
 	audio_presence: Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	translator_state: Arc<Mutex<StreamTranslatorState>>,
-	gap_threshold: Duration,
-	gap_state: Arc<Mutex<GapState>>,
-	last_live_frame_at: Arc<Mutex<tokio::time::Instant>>,
-	last_emitted_pts_90khz: Arc<Mutex<Option<u32>>>,
-	last_emit_wallclock_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+	bridging: Arc<Mutex<BridgingPolicy>>,
 }
 
 /// Abstract "next packet" source for the translator loop. Production
@@ -1404,23 +1242,19 @@ struct TranslatorLoopArgs {
 trait PacketSource: Send {
 	async fn get_data(
 		&mut self,
-	) -> Result<
-		std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-		bairelay_neolink_core::Error,
-	>;
+	) -> Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error>;
 }
 
-/// Production adapter wrapping `BcCamera::StreamData`.
-struct StreamDataSource(bairelay_neolink_core::bc_protocol::StreamData);
+/// Production adapter wrapping the port's [`VideoStream`] pull handle.
+///
+/// [`VideoStream`]: crate::baichuan::bc_protocol::VideoStream
+struct StreamDataSource(Box<dyn crate::baichuan::bc_protocol::VideoStream>);
 
 #[async_trait::async_trait]
 impl PacketSource for StreamDataSource {
 	async fn get_data(
 		&mut self,
-	) -> Result<
-		std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-		bairelay_neolink_core::Error,
-	> {
+	) -> Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error> {
 		self.0.get_data().await
 	}
 }
@@ -1443,11 +1277,7 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 		bcmedia_dump,
 		audio_presence,
 		translator_state,
-		gap_threshold,
-		gap_state,
-		last_live_frame_at,
-		last_emitted_pts_90khz,
-		last_emit_wallclock_at,
+		bridging,
 	} = args;
 
 	let mut dumper: Option<FrameDumper> = None;
@@ -1463,14 +1293,7 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 				break;
 			}
 			_ = gap_ticker.tick() => {
-				check_gap_and_update_state(&last_live_frame_at, &gap_state, gap_threshold);
-				emit_replay_frame_if_bridging(
-					&tx,
-					&last_frame,
-					&gap_state,
-					&last_emitted_pts_90khz,
-					&last_emit_wallclock_at,
-				);
+				tick_bridging(&tx, &last_frame, &bridging);
 			}
 			result = source.get_data() => {
 				if !process_stream_result(
@@ -1484,10 +1307,7 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 					&sdp_params,
 					&audio_presence,
 					&translator_state,
-					&gap_state,
-					&last_live_frame_at,
-					&last_emitted_pts_90khz,
-					&last_emit_wallclock_at,
+					&bridging,
 					bcmedia_dump.as_ref(),
 					&mut dumper,
 					&mut dumper_init_failed,
@@ -1521,10 +1341,7 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 ///   Log + break.
 #[allow(clippy::too_many_arguments)]
 fn process_stream_result(
-	result: Result<
-		std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-		bairelay_neolink_core::Error,
-	>,
+	result: Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error>,
 	camera_name: &str,
 	rtsp_kind: RtspStreamKind,
 	tx: &broadcast::Sender<Frame>,
@@ -1534,10 +1351,7 @@ fn process_stream_result(
 	sdp_params: &Arc<RwLock<SdpParams>>,
 	audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	translator_state: &Arc<Mutex<StreamTranslatorState>>,
-	gap_state: &Arc<Mutex<GapState>>,
-	last_live_frame_at: &Arc<Mutex<tokio::time::Instant>>,
-	last_emitted_pts_90khz: &Arc<Mutex<Option<u32>>>,
-	last_emit_wallclock_at: &Arc<Mutex<Option<tokio::time::Instant>>>,
+	bridging: &Mutex<BridgingPolicy>,
 	bcmedia_dump: Option<&Arc<BcMediaDumpConfig>>,
 	dumper: &mut Option<FrameDumper>,
 	dumper_init_failed: &mut bool,
@@ -1567,9 +1381,12 @@ fn process_stream_result(
 			// metadata-only packet would fail to refresh `last_live_frame_at`
 			// and Bridging could fire spuriously.
 			if matches!(packet, BcMedia::Iframe(_) | BcMedia::Pframe(_)) {
-				*lock_recover(last_live_frame_at) = tokio::time::Instant::now();
+				lock_recover(bridging).on_upstream_packet(now_std());
 			}
 
+			// Read the gate once per packet: `apply_bcmedia_packet` is
+			// synchronous, so the answer cannot change underneath it.
+			let is_bridging = lock_recover(bridging).is_bridging();
 			let broadcast_pts = {
 				let mut s = lock_recover(translator_state);
 				apply_bcmedia_packet(
@@ -1581,17 +1398,12 @@ fn process_stream_result(
 					sdp_params,
 					audio_presence,
 					&mut s,
-					gap_state,
+					is_bridging,
 				)
 			};
 
 			if let Some(pts_90khz) = broadcast_pts {
-				let now = tokio::time::Instant::now();
-				let mut g = lock_recover(gap_state);
-				*g = GapState::Live;
-				drop(g);
-				*lock_recover(last_emitted_pts_90khz) = Some(pts_90khz);
-				*lock_recover(last_emit_wallclock_at) = Some(now);
+				lock_recover(bridging).on_broadcast(pts_90khz, now_std());
 			}
 			true
 		}
@@ -1692,7 +1504,7 @@ pub fn apply_bcmedia_packet(
 	sdp_params: &Arc<RwLock<SdpParams>>,
 	audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	state: &mut StreamTranslatorState,
-	gap_state: &Mutex<GapState>,
+	bridging: bool,
 ) -> Option<u32> {
 	match packet {
 		BcMedia::Iframe(iframe) => {
@@ -1707,7 +1519,7 @@ pub fn apply_bcmedia_packet(
 				sdp_params,
 				audio_presence,
 				state,
-				gap_state,
+				bridging,
 			);
 			None
 		}
@@ -1719,7 +1531,7 @@ pub fn apply_bcmedia_packet(
 				sdp_params,
 				audio_presence,
 				state,
-				gap_state,
+				bridging,
 			);
 			None
 		}
@@ -2202,7 +2014,7 @@ pub(crate) fn aac_samples_per_au(aot: u8) -> Option<u32> {
 ///
 /// The packet carries ADTS-framed AAC audio (sync 0xFFF, profile,
 /// sr_idx, channels, frame_length, body). We parse the ADTS header
-/// via `bairelay_rtsp::codec::aac::parse_adts` and strip it before
+/// via `crate::rtsp::codec::aac::parse_adts` and strip it before
 /// broadcasting — the RTP packetizer wraps raw AU data in the RFC 3640
 /// AU-hbr payload itself. SDP population is one-shot: subsequent
 /// packets skip the SDP write because `sdp_params.audio` is already
@@ -2215,20 +2027,20 @@ pub(crate) fn aac_samples_per_au(aot: u8) -> Option<u32> {
 /// invariant details (SDP populates first, `audio_presence` untouched, PTS
 /// counter held so Live resume continues cleanly).
 fn handle_aac(
-	aac: &bairelay_neolink_core::bcmedia::model::BcMediaAac,
+	aac: &crate::baichuan::bcmedia::model::BcMediaAac,
 	tx: &broadcast::Sender<Frame>,
 	audio_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
 	sdp_params: &Arc<RwLock<SdpParams>>,
 	audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	state: &mut StreamTranslatorState,
-	gap_state: &Mutex<GapState>,
+	bridging: bool,
 ) {
-	use bairelay_rtsp::codec::aac::{
+	use crate::rtsp::codec::aac::{
 		build_audio_specific_config_hex, parse_adts, AAC_PAYLOAD_TYPE, ADTS_HEADER_LEN,
 	};
-	use bairelay_rtsp::codec::AudioCodec;
-	use bairelay_rtsp::provider::AudioPayload;
-	use bairelay_rtsp::sdp::AudioParams;
+	use crate::rtsp::codec::AudioCodec;
+	use crate::rtsp::provider::AudioPayload;
+	use crate::rtsp::sdp::AudioParams;
 
 	let Some(header) = parse_adts(&aac.data) else {
 		tracing::debug!("ADTS header parse failed; dropping AAC packet");
@@ -2386,7 +2198,7 @@ fn handle_aac(
 	// would spam. SDP and presence state are untouched: we already
 	// did the SDP write above (DESCRIBE stays accurate), and presence
 	// should reflect frames that actually reached subscribers.
-	if *lock_recover(gap_state) == GapState::Bridging {
+	if bridging {
 		return;
 	}
 
@@ -2482,19 +2294,19 @@ fn dispatch_paced_audio(
 /// invariant details (SDP populates first, `audio_presence` untouched, PTS
 /// counter held so Live resume continues cleanly).
 fn handle_adpcm(
-	adpcm: &bairelay_neolink_core::bcmedia::model::BcMediaAdpcm,
+	adpcm: &crate::baichuan::bcmedia::model::BcMediaAdpcm,
 	tx: &broadcast::Sender<Frame>,
 	audio_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
 	sdp_params: &Arc<RwLock<SdpParams>>,
 	audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	state: &mut StreamTranslatorState,
-	gap_state: &Mutex<GapState>,
+	bridging: bool,
 ) {
-	use bairelay_rtsp::codec::g711::{encode as g711_encode, G711_PAYLOAD_TYPE};
-	use bairelay_rtsp::codec::AudioCodec;
-	use bairelay_rtsp::provider::AudioPayload;
-	use bairelay_rtsp::sdp::AudioParams;
-	use bairelay_rtsp::transcode::{adpcm::AdpcmDecoder, resample::decimate_16_to_8};
+	use crate::rtsp::codec::g711::{encode as g711_encode, G711_PAYLOAD_TYPE};
+	use crate::rtsp::codec::AudioCodec;
+	use crate::rtsp::provider::AudioPayload;
+	use crate::rtsp::sdp::AudioParams;
+	use crate::rtsp::transcode::{adpcm::AdpcmDecoder, resample::decimate_16_to_8};
 
 	let mut dec = AdpcmDecoder::new();
 	let pcm_16k = match dec.decode_block(&adpcm.data) {
@@ -2548,7 +2360,7 @@ fn handle_adpcm(
 	// drop live audio while `Bridging`. See `handle_aac` for
 	// the full reasoning — same invariants apply (silent drop, SDP
 	// already populated, presence untouched).
-	if *lock_recover(gap_state) == GapState::Bridging {
+	if bridging {
 		return;
 	}
 
@@ -2571,15 +2383,7 @@ fn handle_adpcm(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, BcMediaPframe, VideoType};
-
-	/// Bench helper: a fresh `Mutex<GapState::Live>` for unit tests that
-	/// don't care about gap-bridging. 's audio-drop gate uses
-	/// this to represent "live upstream"; tests that specifically want
-	/// to exercise the Bridging drop construct their own mutex inline.
-	fn live_gap_state() -> Mutex<GapState> {
-		Mutex::new(GapState::Live)
-	}
+	use crate::baichuan::bcmedia::model::{BcMediaIframe, BcMediaPframe, VideoType};
 
 	/// Compile-time check that `Arc<StreamSource>` is `Send + Sync` so it
 	/// can be shared across tokio tasks (and stored in the per-camera
@@ -2618,7 +2422,7 @@ mod tests {
 	/// frames pace at exactly one per AU duration.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn audio_pacer_drains_at_codec_rate() {
-		use bairelay_rtsp::provider::AudioPayload;
+		use crate::rtsp::provider::AudioPayload;
 		let (broadcast_tx, mut broadcast_rx) = broadcast::channel::<Frame>(64);
 		let (pace_tx, pace_rx) = mpsc::channel::<PacedFrame>(16);
 		let cancel = CancellationToken::new();
@@ -2925,7 +2729,7 @@ mod tests {
 	#[test]
 	fn handle_aac_drops_frame_during_bridging() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -2943,7 +2747,6 @@ mod tests {
 		data.extend_from_slice(&[0xAA; 9]);
 		let packet = BcMedia::Aac(BcMediaAac { data });
 
-		let gap_state = Mutex::new(GapState::Bridging);
 		apply_bcmedia_packet(
 			&packet,
 			&tx,
@@ -2953,7 +2756,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&gap_state,
+			true,
 		);
 
 		// No audio frame reached the broadcast.
@@ -2978,7 +2781,7 @@ mod tests {
 	#[test]
 	fn handle_adpcm_drops_frame_during_bridging() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
+		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -2996,7 +2799,6 @@ mod tests {
 		let data = vec![0u8; 4 + 16];
 		let packet = BcMedia::Adpcm(BcMediaAdpcm { data });
 
-		let gap_state = Mutex::new(GapState::Bridging);
 		apply_bcmedia_packet(
 			&packet,
 			&tx,
@@ -3006,7 +2808,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&gap_state,
+			true,
 		);
 
 		assert!(
@@ -3034,7 +2836,7 @@ mod tests {
 	#[test]
 	fn handle_aac_pts_advances_through_bridging_and_resumes_in_live() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(16);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3054,7 +2856,7 @@ mod tests {
 		};
 
 		// Two Live frames (expect 2 × 1024 PTS advance + 2 broadcasts).
-		let live = Mutex::new(GapState::Live);
+		let live = false;
 		apply_bcmedia_packet(
 			&build_packet(),
 			&tx,
@@ -3064,7 +2866,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live,
+			live,
 		);
 		apply_bcmedia_packet(
 			&build_packet(),
@@ -3075,7 +2877,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live,
+			live,
 		);
 		assert_eq!(state.aac_pts_next, 2 * 1024);
 		for _ in 0..2 {
@@ -3084,7 +2886,7 @@ mod tests {
 
 		// Three Bridging frames — dropped, but counter keeps advancing
 		// (3 × 1024 = 3072 ticks more, for 5120 total).
-		let bridging = Mutex::new(GapState::Bridging);
+		let bridging = true;
 		for _ in 0..3 {
 			apply_bcmedia_packet(
 				&build_packet(),
@@ -3095,7 +2897,7 @@ mod tests {
 				&sdp_params,
 				&presence,
 				&mut state,
-				&bridging,
+				bridging,
 			);
 		}
 		assert_eq!(
@@ -3116,7 +2918,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live,
+			live,
 		);
 		match rx.try_recv() {
 			Ok(Frame::Audio { pts, .. }) => {
@@ -3198,7 +3000,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		assert!(
 			broadcast_pts.is_none(),
@@ -3250,7 +3052,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		assert!(
 			broadcast_pts.is_none(),
@@ -3302,7 +3104,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		apply_bcmedia_packet(
 			&pframe,
@@ -3313,7 +3115,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 
 		// Codec detection must have latched H.265 on the first NAL.
@@ -3369,7 +3171,7 @@ mod tests {
 		// dedicated tests.) Both info variants share the same ignore arm
 		// today, but covering both pins the contract in case the match
 		// arm ever splits.
-		use bairelay_neolink_core::bcmedia::model::{BcMediaInfoV1, BcMediaInfoV2};
+		use crate::baichuan::bcmedia::model::{BcMediaInfoV1, BcMediaInfoV2};
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3428,7 +3230,7 @@ mod tests {
 				&sdp_params,
 				&presence,
 				&mut state,
-				&live_gap_state(),
+				false,
 			);
 		}
 		assert_eq!(state.aac_pts_next, 0, "info packets must not touch AAC PTS");
@@ -3452,9 +3254,9 @@ mod tests {
 	#[test]
 	fn apply_bcmedia_packet_emits_aac_frame_and_updates_sdp_and_presence() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
-		use bairelay_rtsp::codec::AudioCodec;
-		use bairelay_rtsp::provider::AudioPayload;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
+		use crate::rtsp::codec::AudioCodec;
+		use crate::rtsp::provider::AudioPayload;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3488,7 +3290,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 
 		// SDP populated with AAC params.
@@ -3529,9 +3331,9 @@ mod tests {
 	#[test]
 	fn apply_bcmedia_packet_transcodes_adpcm_to_g711_and_updates_presence() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
-		use bairelay_rtsp::codec::AudioCodec;
-		use bairelay_rtsp::provider::AudioPayload;
+		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
+		use crate::rtsp::codec::AudioCodec;
+		use crate::rtsp::provider::AudioPayload;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3561,7 +3363,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 
 		// SDP populated with G.711 µ-law.
@@ -3611,7 +3413,7 @@ mod tests {
 		//   3. NOT upgrade audio_presence — presence tracks frames that
 		//      actually reached the broadcast; we dropped this one.
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3641,7 +3443,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 
 		// (1) No audio frame broadcast.
@@ -3681,7 +3483,7 @@ mod tests {
 		// access units carry 1024 samples each; the RTP clock equals the
 		// audio sample rate; so each emitted frame must advance the
 		// counter by exactly 1024 ticks. This test pins the contract.
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3711,7 +3513,7 @@ mod tests {
 					&sdp_params,
 					&presence,
 					&mut state,
-					&live_gap_state(),
+					false,
 				);
 				match rx.try_recv().expect("audio frame") {
 					Frame::Audio { pts, .. } => pts,
@@ -3734,7 +3536,7 @@ mod tests {
 		// `pts: 0` on every frame. G.711 uses a static 8 kHz RTP clock
 		// (RFC 3551 PT 0) and encodes one tick per output sample, so the
 		// counter must advance by the per-frame sample count.
-		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
+		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(8);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3765,11 +3567,11 @@ mod tests {
 				&sdp_params,
 				&presence,
 				&mut state,
-				&live_gap_state(),
+				false,
 			);
 			match rx.try_recv().expect("audio frame") {
 				Frame::Audio {
-					payload: bairelay_rtsp::provider::AudioPayload::G711Ulaw { samples },
+					payload: crate::rtsp::provider::AudioPayload::G711Ulaw { samples },
 					pts,
 				} => {
 					observed_pts.push(pts);
@@ -3796,8 +3598,8 @@ mod tests {
 
 	#[tokio::test(flavor = "current_thread")]
 	async fn await_sdp_both_returns_when_audio_arrives() {
-		use bairelay_rtsp::codec::AudioCodec;
-		use bairelay_rtsp::sdp::{AudioParams, VideoParams};
+		use crate::rtsp::codec::AudioCodec;
+		use crate::rtsp::sdp::{AudioParams, VideoParams};
 		use std::time::Duration;
 
 		let sdp = Arc::new(RwLock::new(SdpParams {
@@ -3838,7 +3640,7 @@ mod tests {
 
 	#[tokio::test(flavor = "current_thread")]
 	async fn await_sdp_both_times_out_when_audio_never_arrives() {
-		use bairelay_rtsp::sdp::VideoParams;
+		use crate::rtsp::sdp::VideoParams;
 		use std::time::Duration;
 
 		// Video populated, audio never. Must Err.
@@ -3886,7 +3688,7 @@ mod tests {
 			sdp_params: &Arc<RwLock<SdpParams>>,
 			audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
 			state: &mut StreamTranslatorState,
-			gap_state: &Mutex<GapState>,
+			bridging: bool,
 		) {
 			apply_bcmedia_packet(
 				packet,
@@ -3897,7 +3699,7 @@ mod tests {
 				sdp_params,
 				audio_presence,
 				state,
-				gap_state,
+				bridging,
 			);
 		}
 	}
@@ -3921,7 +3723,7 @@ mod tests {
 		// is the capability A3 added. The actual reader_task re-spawn
 		// wiring (if any is needed for the production path) is verified
 		// empirically by V2 live-verify on the Argus fleet.
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 
 		let (tx, _rx) = broadcast::channel::<Frame>(16);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -3962,7 +3764,7 @@ mod tests {
 					&sdp_params,
 					&audio_presence,
 					&mut s,
-					&live_gap_state(),
+					false,
 				);
 			}
 			assert_eq!(s.aac_pts_next, 3 * 1024, "three AAC-LC frames → 3072 ticks");
@@ -3987,7 +3789,7 @@ mod tests {
 					&sdp_params,
 					&audio_presence,
 					&mut s,
-					&live_gap_state(),
+					false,
 				);
 			}
 			assert_eq!(
@@ -4024,7 +3826,7 @@ mod tests {
 		// `aot - 1`. AOT=1 → profile=0 → byte2 top two bits cleared.
 		// Copying the AOT=2 fixture ADTS header and flipping those two
 		// bits keeps sr_idx / channels / frame_length unchanged.
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
@@ -4053,7 +3855,7 @@ mod tests {
 			&sdp_params,
 			&audio_presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 
 		// PTS counter must NOT advance on an unsupported AOT.
@@ -4094,7 +3896,7 @@ mod tests {
 			&sdp_params,
 			&audio_presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		assert_eq!(state.aac_pts_next, 0);
 		assert_eq!(state.aac_aot, Some(1));
@@ -4109,7 +3911,7 @@ mod tests {
 	#[test]
 	fn handle_aac_drops_on_malformed_adts_header() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4134,7 +3936,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		assert!(rx.try_recv().is_err(), "no frame emitted on bad ADTS");
 		assert_eq!(state.aac_pts_next, 0);
@@ -4144,7 +3946,7 @@ mod tests {
 	#[test]
 	fn handle_adpcm_drops_on_empty_data() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
+		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4167,7 +3969,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		assert!(rx.try_recv().is_err());
 		assert_eq!(state.g711_pts_next, 0);
@@ -4210,8 +4012,8 @@ mod tests {
 			session_id: "0".to_string(),
 			session_name: "unit".to_string(),
 			video: None,
-			audio: Some(bairelay_rtsp::sdp::AudioParams {
-				codec: bairelay_rtsp::codec::AudioCodec::G711Ulaw,
+			audio: Some(crate::rtsp::sdp::AudioParams {
+				codec: crate::rtsp::codec::AudioCodec::G711Ulaw,
 				payload_type: 0,
 				sample_rate: 8000,
 				channels: 1,
@@ -4246,8 +4048,8 @@ mod tests {
 			server_ip: "0.0.0.0".to_string(),
 			session_id: "0".to_string(),
 			session_name: "unit".to_string(),
-			video: Some(bairelay_rtsp::sdp::VideoParams {
-				codec: bairelay_rtsp::codec::VideoCodec::H264,
+			video: Some(crate::rtsp::sdp::VideoParams {
+				codec: crate::rtsp::codec::VideoCodec::H264,
 				payload_type: 96,
 				sps: vec![],
 				pps: vec![],
@@ -4278,8 +4080,8 @@ mod tests {
 			server_ip: "0.0.0.0".to_string(),
 			session_id: "0".to_string(),
 			session_name: "unit".to_string(),
-			video: Some(bairelay_rtsp::sdp::VideoParams {
-				codec: bairelay_rtsp::codec::VideoCodec::H265,
+			video: Some(crate::rtsp::sdp::VideoParams {
+				codec: crate::rtsp::codec::VideoCodec::H265,
 				payload_type: 97,
 				sps: vec![],
 				pps: vec![],
@@ -4403,8 +4205,8 @@ mod tests {
 	fn handle_pframe_returns_none_before_first_iframe() {
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
+		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![0x00, 0x00, 0x01, 0x41, 0xAA],
 		};
@@ -4417,8 +4219,8 @@ mod tests {
 	fn handle_pframe_returns_none_on_empty_nal_split() {
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
+		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![],
 		};
@@ -4441,8 +4243,8 @@ mod tests {
 			video: None,
 			audio: None,
 		}));
-		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
+		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![],
 			time: None,
@@ -4466,8 +4268,8 @@ mod tests {
 			audio: None,
 		}));
 		// 0x80: forbidden_zero_bit set → detect_codec returns None.
-		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
+		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![0x00, 0x00, 0x01, 0x80, 0x00],
 			time: None,
@@ -4494,8 +4296,8 @@ mod tests {
 			video: None,
 			audio: None,
 		}));
-		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H265,
+		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H265,
 			microseconds: 0,
 			data: vec![
 				// VPS (type 32, byte 0x40, byte 1 0x01)
@@ -4552,8 +4354,8 @@ mod tests {
 	fn handle_pframe_drops_h265_unspec62_nals() {
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H265,
+		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H265,
 			microseconds: 0,
 			data: vec![
 				// UNSPEC62 (Reolink proprietary) — must be dropped.
@@ -4592,8 +4394,8 @@ mod tests {
 		// dropped (no broadcast, no `last_live_frame_at` update upstream).
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = bairelay_neolink_core::bcmedia::model::BcMediaPframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H265,
+		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H265,
 			microseconds: 0,
 			data: vec![0x00, 0x00, 0x01, 0x7C, 0x01, 0xAB, 0xCD],
 		};
@@ -4620,8 +4422,8 @@ mod tests {
 		}));
 		// SPS NAL (type 7) 2 bytes + PPS NAL (type 8) 2 bytes + IDR slice.
 		// 0x67 = SPS; only 2 bytes (short). 0x68 = PPS; 0x65 = IDR.
-		let iframe = bairelay_neolink_core::bcmedia::model::BcMediaIframe {
-			video_type: bairelay_neolink_core::bcmedia::model::VideoType::H264,
+		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
 			microseconds: 0,
 			data: vec![
 				0x00, 0x00, 0x01, 0x67, 0x42, // SPS only 2 bytes
@@ -4672,7 +4474,7 @@ mod tests {
 		// parse_adts to hand back >7 — structurally impossible today.
 		// So skip the line-1539 attempt; see the test-as-doc below.
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4702,7 +4504,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		// ch=7 is accepted; SDP audio gets populated.
 		// (If ASC-None branch existed for this config, audio would stay None.)
@@ -4717,7 +4519,7 @@ mod tests {
 		// index 12-14 are reserved/invalid → build_audio_specific_config_hex
 		// should return None. Let's use sr_idx=13 (reserved).
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4751,7 +4553,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		// Regardless of ASC outcome: the body that comes after is still
 		// processed — the function logs a warning but continues.
@@ -4760,7 +4562,7 @@ mod tests {
 	#[test]
 	fn handle_aac_drops_when_frame_length_below_adts_header() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAac;
+		use crate::baichuan::bcmedia::model::BcMediaAac;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4790,7 +4592,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		// No audio frame emitted because frame_length < ADTS header.
 		assert!(rx.try_recv().is_err());
@@ -4801,7 +4603,7 @@ mod tests {
 		// Build a minimal iframe packet and feed it through the helper.
 		// After the call, gap_state should be Live and last_emitted_pts
 		// should match the packet's 90kHz ts.
-		use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
+		use crate::baichuan::bcmedia::model::{BcMediaIframe, VideoType};
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4813,10 +4615,9 @@ mod tests {
 		}));
 		let presence = Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown));
 		let translator_state = Arc::new(Mutex::new(StreamTranslatorState::default()));
-		let gap_state = Arc::new(Mutex::new(GapState::Bridging)); // flip expected
-		let last_live_frame_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
-		let last_emitted_pts: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-		let last_emit_wall: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::new(Mutex::new(None));
+		// Starts Bridging so the test can prove a live frame flips it back.
+		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
+		lock_recover(&bridging).set_state_for_test(GapState::Bridging);
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
@@ -4833,8 +4634,8 @@ mod tests {
 			],
 		});
 		let result: Result<
-			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-			bairelay_neolink_core::Error,
+			std::result::Result<BcMedia, crate::baichuan::Error>,
+			crate::baichuan::Error,
 		> = Ok(Ok(packet));
 		let keep_going = process_stream_result(
 			result,
@@ -4847,10 +4648,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&translator_state,
-			&gap_state,
-			&last_live_frame_at,
-			&last_emitted_pts,
-			&last_emit_wall,
+			&bridging,
 			None,
 			&mut dumper,
 			&mut dumper_init_failed,
@@ -4858,15 +4656,18 @@ mod tests {
 		);
 		assert!(keep_going);
 		assert!(rx.try_recv().is_ok());
-		assert_eq!(*gap_state.lock().unwrap(), GapState::Live);
+		assert_eq!(lock_recover(&bridging).state(), GapState::Live);
 		// Expected pts = 1_000_000 * 9 / 100 = 90_000.
-		assert_eq!(*last_emitted_pts.lock().unwrap(), Some(90_000));
+		assert_eq!(
+			lock_recover(&bridging).last_emitted_pts_90khz(),
+			Some(90_000)
+		);
 	}
 
 	#[test]
 	fn process_stream_result_ok_audio_does_not_update_live_markers() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
+		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4878,19 +4679,22 @@ mod tests {
 		}));
 		let presence = Arc::new(RwLock::new(AudioPresence::Unknown));
 		let translator_state = Arc::new(Mutex::new(StreamTranslatorState::default()));
-		let gap_state = Arc::new(Mutex::new(GapState::Bridging));
-		let last_live_frame_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
-		let last_emitted_pts: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(Some(12345)));
-		let last_emit_wall: Arc<Mutex<Option<tokio::time::Instant>>> =
-			Arc::new(Mutex::new(Some(tokio::time::Instant::now())));
+		// Seeded mid-gap with a prior emission so the test proves an
+		// audio packet touches neither the state nor the recorded PTS.
+		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
+		{
+			let mut policy = lock_recover(&bridging);
+			policy.on_broadcast(12_345, now_std());
+			policy.set_state_for_test(GapState::Bridging);
+		}
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
-		// Empty ADPCM (handle_adpcm returns None) — gap_state stays Bridging.
+		// Empty ADPCM (handle_adpcm returns None) — state stays Bridging.
 		let packet = BcMedia::Adpcm(BcMediaAdpcm { data: vec![] });
 		let result: Result<
-			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-			bairelay_neolink_core::Error,
+			std::result::Result<BcMedia, crate::baichuan::Error>,
+			crate::baichuan::Error,
 		> = Ok(Ok(packet));
 		let keep = process_stream_result(
 			result,
@@ -4903,10 +4707,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&translator_state,
-			&gap_state,
-			&last_live_frame_at,
-			&last_emitted_pts,
-			&last_emit_wall,
+			&bridging,
 			None,
 			&mut dumper,
 			&mut dumper_init_failed,
@@ -4914,13 +4715,16 @@ mod tests {
 		);
 		assert!(keep);
 		// Bridging preserved because no video frame broadcast.
-		assert_eq!(*gap_state.lock().unwrap(), GapState::Bridging);
-		assert_eq!(*last_emitted_pts.lock().unwrap(), Some(12345));
+		assert_eq!(lock_recover(&bridging).state(), GapState::Bridging);
+		assert_eq!(
+			lock_recover(&bridging).last_emitted_pts_90khz(),
+			Some(12_345)
+		);
 	}
 
 	#[test]
 	fn process_stream_result_decode_error_continues() {
-		use bairelay_neolink_core::Error;
+		use crate::baichuan::Error;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4932,17 +4736,14 @@ mod tests {
 		}));
 		let presence = Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown));
 		let translator_state = Arc::new(Mutex::new(StreamTranslatorState::default()));
-		let gap_state = Arc::new(Mutex::new(GapState::Live));
-		let last_live_frame_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
-		let last_emitted_pts: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-		let last_emit_wall: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::new(Mutex::new(None));
+		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
 		// Inner Err — decode error.
 		let result: Result<
-			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-			bairelay_neolink_core::Error,
+			std::result::Result<BcMedia, crate::baichuan::Error>,
+			crate::baichuan::Error,
 		> = Ok(Err(Error::Other("decode fail")));
 		let keep = process_stream_result(
 			result,
@@ -4955,10 +4756,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&translator_state,
-			&gap_state,
-			&last_live_frame_at,
-			&last_emitted_pts,
-			&last_emit_wall,
+			&bridging,
 			None,
 			&mut dumper,
 			&mut dumper_init_failed,
@@ -4969,7 +4767,7 @@ mod tests {
 
 	#[test]
 	fn process_stream_result_outer_error_breaks_loop() {
-		use bairelay_neolink_core::Error;
+		use crate::baichuan::Error;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -4981,17 +4779,14 @@ mod tests {
 		}));
 		let presence = Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown));
 		let translator_state = Arc::new(Mutex::new(StreamTranslatorState::default()));
-		let gap_state = Arc::new(Mutex::new(GapState::Live));
-		let last_live_frame_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
-		let last_emitted_pts: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-		let last_emit_wall: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::new(Mutex::new(None));
+		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
 		// Outer Err — stream finished unexpectedly.
 		let result: Result<
-			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-			bairelay_neolink_core::Error,
+			std::result::Result<BcMedia, crate::baichuan::Error>,
+			crate::baichuan::Error,
 		> = Err(Error::StreamFinished);
 		let keep = process_stream_result(
 			result,
@@ -5004,10 +4799,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&translator_state,
-			&gap_state,
-			&last_live_frame_at,
-			&last_emitted_pts,
-			&last_emit_wall,
+			&bridging,
 			None,
 			&mut dumper,
 			&mut dumper_init_failed,
@@ -5020,7 +4812,7 @@ mod tests {
 	fn process_stream_result_outer_error_on_cancel_is_quiet() {
 		// Same as above but with cancel.is_cancelled() = true, hitting the
 		// debug-level log path instead of warn.
-		use bairelay_neolink_core::Error;
+		use crate::baichuan::Error;
 		let (tx, _rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -5032,17 +4824,14 @@ mod tests {
 		}));
 		let presence = Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown));
 		let translator_state = Arc::new(Mutex::new(StreamTranslatorState::default()));
-		let gap_state = Arc::new(Mutex::new(GapState::Live));
-		let last_live_frame_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
-		let last_emitted_pts: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-		let last_emit_wall: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::new(Mutex::new(None));
+		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
 		cancel.cancel();
 		let result: Result<
-			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-			bairelay_neolink_core::Error,
+			std::result::Result<BcMedia, crate::baichuan::Error>,
+			crate::baichuan::Error,
 		> = Err(Error::StreamFinished);
 		let keep = process_stream_result(
 			result,
@@ -5055,10 +4844,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&translator_state,
-			&gap_state,
-			&last_live_frame_at,
-			&last_emitted_pts,
-			&last_emit_wall,
+			&bridging,
 			None,
 			&mut dumper,
 			&mut dumper_init_failed,
@@ -5070,7 +4856,7 @@ mod tests {
 	#[test]
 	fn handle_adpcm_drops_on_short_block_after_decimation() {
 		use crate::audio_presence::AudioPresence;
-		use bairelay_neolink_core::bcmedia::model::BcMediaAdpcm;
+		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {
@@ -5105,7 +4891,7 @@ mod tests {
 			&sdp_params,
 			&presence,
 			&mut state,
-			&live_gap_state(),
+			false,
 		);
 		// Either the decoder rejected it OR it produced <2 samples and
 		// decimation yielded zero — either way, no audio frame.
@@ -5117,10 +4903,7 @@ mod tests {
 	/// Scripted [`PacketSource`] backed by a `VecDeque` of results.
 	struct ScriptedSource {
 		queue: std::collections::VecDeque<
-			Result<
-				std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-				bairelay_neolink_core::Error,
-			>,
+			Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error>,
 		>,
 	}
 
@@ -5128,10 +4911,8 @@ mod tests {
 	impl PacketSource for ScriptedSource {
 		async fn get_data(
 			&mut self,
-		) -> Result<
-			std::result::Result<BcMedia, bairelay_neolink_core::Error>,
-			bairelay_neolink_core::Error,
-		> {
+		) -> Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error>
+		{
 			match self.queue.pop_front() {
 				Some(r) => r,
 				// Pending forever once script exhausted — the test drives
@@ -5166,11 +4947,7 @@ mod tests {
 			bcmedia_dump: None,
 			audio_presence: Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown)),
 			translator_state: Arc::new(Mutex::new(StreamTranslatorState::default())),
-			gap_threshold,
-			gap_state: Arc::new(Mutex::new(GapState::Live)),
-			last_live_frame_at: Arc::new(Mutex::new(tokio::time::Instant::now())),
-			last_emitted_pts_90khz: Arc::new(Mutex::new(None)),
-			last_emit_wallclock_at: Arc::new(Mutex::new(None)),
+			bridging: Arc::new(Mutex::new(BridgingPolicy::new(gap_threshold, now_std()))),
 		}
 	}
 
@@ -5208,7 +4985,7 @@ mod tests {
 			cancel,
 		);
 		let mut queue = std::collections::VecDeque::new();
-		queue.push_back(Err(bairelay_neolink_core::Error::StreamFinished));
+		queue.push_back(Err(crate::baichuan::Error::StreamFinished));
 		let mut source = ScriptedSource { queue };
 		tokio::time::timeout(
 			Duration::from_millis(500),
@@ -5231,7 +5008,7 @@ mod tests {
 			cancel.clone(),
 		);
 		let mut queue = std::collections::VecDeque::new();
-		queue.push_back(Ok(Err(bairelay_neolink_core::Error::Other("decode"))));
+		queue.push_back(Ok(Err(crate::baichuan::Error::Other("decode"))));
 		let mut source = ScriptedSource { queue };
 		let cancel_cp = cancel.clone();
 		tokio::spawn(async move {
@@ -5252,7 +5029,7 @@ mod tests {
 		// translator loop plumbing with a scripted PacketSource. This
 		// covers the Self-construction code path in production's
 		// `start` without needing a real BcCamera.
-		use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
+		use crate::baichuan::bcmedia::model::{BcMediaIframe, VideoType};
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let packet = BcMedia::Iframe(BcMediaIframe {
 			video_type: VideoType::H264,
@@ -5286,7 +5063,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn drive_translator_loop_forwards_video_frame_and_updates_markers() {
-		use bairelay_neolink_core::bcmedia::model::{BcMediaIframe, VideoType};
+		use crate::baichuan::bcmedia::model::{BcMediaIframe, VideoType};
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
 		let cancel = CancellationToken::new();
 		let args = translator_args(
@@ -5295,10 +5072,9 @@ mod tests {
 			Duration::from_secs(5),
 			cancel.clone(),
 		);
-		let gap_state = Arc::clone(&args.gap_state);
-		let last_emitted_pts = Arc::clone(&args.last_emitted_pts_90khz);
-		// Flip gap_state to Bridging so we can verify it flips back.
-		*gap_state.lock().unwrap() = GapState::Bridging;
+		let bridging = Arc::clone(&args.bridging);
+		// Start Bridging so we can verify a live frame flips it back.
+		lock_recover(&bridging).set_state_for_test(GapState::Bridging);
 
 		let packet = BcMedia::Iframe(BcMediaIframe {
 			video_type: VideoType::H264,
@@ -5327,10 +5103,13 @@ mod tests {
 
 		// A Frame::Video was broadcast.
 		assert!(matches!(rx.try_recv(), Ok(Frame::Video { .. })));
-		// gap_state flipped back to Live.
-		assert_eq!(*gap_state.lock().unwrap(), GapState::Live);
-		// last_emitted_pts reflects the broadcast frame.
-		assert_eq!(*last_emitted_pts.lock().unwrap(), Some(90_000));
+		// State flipped back to Live.
+		assert_eq!(lock_recover(&bridging).state(), GapState::Live);
+		// The recorded PTS reflects the broadcast frame.
+		assert_eq!(
+			lock_recover(&bridging).last_emitted_pts_90khz(),
+			Some(90_000)
+		);
 	}
 
 	// dispatch_paced_video / dispatch_paced_audio: pacer back-pressure
@@ -5340,7 +5119,7 @@ mod tests {
 
 	fn dummy_video_frame() -> Frame {
 		Frame::Video {
-			codec: bairelay_rtsp::codec::VideoCodec::H264,
+			codec: crate::rtsp::codec::VideoCodec::H264,
 			nals: vec![],
 			pts_90khz: 0,
 			keyframe: false,
@@ -5350,7 +5129,7 @@ mod tests {
 
 	fn dummy_audio_frame() -> Frame {
 		Frame::Audio {
-			payload: bairelay_rtsp::provider::AudioPayload::G711Ulaw {
+			payload: crate::rtsp::provider::AudioPayload::G711Ulaw {
 				samples: bytes::Bytes::new(),
 			},
 			pts: 0,

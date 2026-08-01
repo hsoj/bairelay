@@ -6,7 +6,7 @@
 #      opens $EDITOR (falling back to $VISUAL, then `vi`) for review.
 #   3. Mirrors the new section into hassio/bairelay/CHANGELOG.md so the
 #      HA App's Documentation tab carries the same notes.
-#   4. Bumps `[workspace.package].version` in Cargo.toml; refreshes Cargo.lock.
+#   4. Bumps `[package].version` in Cargo.toml; refreshes Cargo.lock.
 #      Cascades the version into hassio/bairelay/config.yaml.
 #   5. Shows the full diff; on confirmation commits + tags vX.Y.Z.
 #   6. On a second confirmation pushes main + the tag to origin.
@@ -45,8 +45,8 @@ confirm() {
 
 read_workspace_version() {
 	awk '
-		/^\[workspace\.package\]/ { in_section = 1; next }
-		/^\[/                     { in_section = 0 }
+		/^\[package\]/ { in_section = 1; next }
+		/^\[/           { in_section = 0 }
 		in_section && /^version[[:space:]]*=/ {
 			match($0, /"[^"]*"/)
 			print substr($0, RSTART + 1, RLENGTH - 2)
@@ -57,20 +57,14 @@ read_workspace_version() {
 
 update_workspace_version() {
 	local new_v="$1"
+	# One package, one version line. (Before the crates were merged this
+	# also had to bump each `[workspace.dependencies]` entry in lockstep;
+	# there are no internal path deps left to keep in step.)
 	awk -v new_v="$new_v" '
-		/^\[workspace\.package\]/      { in_pkg = 1; in_deps = 0; print; next }
-		/^\[workspace\.dependencies\]/ { in_deps = 1; in_pkg = 0; print; next }
-		/^\[/                          { in_pkg = 0; in_deps = 0 }
+		/^\[package\]/ { in_pkg = 1; print; next }
+		/^\[/           { in_pkg = 0 }
 		in_pkg && /^version[[:space:]]*=/ {
 			print "version = \"" new_v "\""
-			next
-		}
-		# Bairelay-internal path deps in [workspace.dependencies] carry
-		# an explicit version that crates.io consults on publish. Bump
-		# them in lockstep with [workspace.package].version above.
-		in_deps && /^bairelay-[a-z-]+[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=/ {
-			sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" new_v "\"")
-			print
 			next
 		}
 		{ print }
@@ -188,7 +182,7 @@ main() {
 
 	local current
 	current="$(read_workspace_version)"
-	[[ -n "$current" ]] || die "could not read [workspace.package].version from Cargo.toml"
+	[[ -n "$current" ]] || die "could not read [package].version from Cargo.toml"
 	[[ "$current" != "$new_version" ]] \
 		|| die "Cargo.toml is already at $new_version"
 
@@ -236,7 +230,7 @@ main() {
 
 	echo
 	echo "Refreshing Cargo.lock..."
-	cargo check --workspace --quiet
+	cargo check --quiet
 
 	echo
 	echo "=== full diff (Cargo.toml + Cargo.lock + CHANGELOG.md + hassio/bairelay/{config.yaml,CHANGELOG.md}) ==="
@@ -268,9 +262,8 @@ main() {
 		echo "version bump + tag on the internal repo. From the internal clone:"
 		echo "    git checkout main && git pull"
 		echo "    sed -i.bak -E 's/^version = \"$current\"\$/version = \"$new_version\"/' Cargo.toml && rm -f Cargo.toml.bak"
-		echo "    sed -i.bak -E 's/(bairelay-[a-z-]+ = \\{ path = \"[^\"]+\", version = )\"$current\"/\\1\"$new_version\"/g' Cargo.toml && rm -f Cargo.toml.bak"
 		echo "    sed -i.bak -E 's/^version: \"$current\"\$/version: \"$new_version\"/' hassio/bairelay/config.yaml && rm -f hassio/bairelay/config.yaml.bak"
-		echo "    cargo check --workspace --quiet"
+		echo "    cargo check --quiet"
 		echo "    cp <public>/CHANGELOG.md CHANGELOG.md"
 		echo "    cp <public>/hassio/bairelay/CHANGELOG.md hassio/bairelay/CHANGELOG.md"
 		echo "    git commit -am 'release: $tag'"

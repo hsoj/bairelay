@@ -14,13 +14,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::{Cli, Command};
+use crate::cli::Cli;
 use crate::config::{parse_config, validate_config, Config};
 use crate::oneshot::classify;
 use crate::oneshot::dispatch::{dispatch_oneshot, find_camera_config, snapshot_json_preflight};
 use crate::oneshot::errors::ConfigError;
 use crate::oneshot::output::{format_failure, format_success, Mode, Outcome};
-use crate::oneshot::{runner, snapshot};
+use crate::oneshot::runner;
 
 /// Pick the one-shot output mode from the CLI flag. Extracted so the
 /// `cli.json → Mode` mapping is pinned in one place.
@@ -334,41 +334,14 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 		let cancel = CancellationToken::new();
 		spawn_ctrl_c_cancel(cancel.clone());
 
-		// `--use-stream-raw` needs the concrete `BcCamera`. Everything
-		// else routes through the `CameraDriver` trait seam so the
-		// dispatch match arms stay testable via FakeCamera.
-		if let Command::Snapshot {
-			output: out,
-			use_stream,
-			use_stream_raw: true,
-			..
-		} = &cli.command
-		{
-			if *use_stream {
-				tracing::info!(
-					"--use-stream is a neolink-compat no-op on bairelay (battery cams all support `snap`); \
-					delegating to get_snapshot. Use --use-stream-raw if you want NAL bytes."
-				);
-			}
-			let out = out.clone();
-			let json = cli.json;
-			return runner::run(&cam_cfg, cancel, move |cam| {
-				async move { snapshot::run(cam, out.as_deref(), json, true).await }.boxed()
-			})
-			.await;
-		}
+		// Every command — the raw-stream snapshot included — routes
+		// through the `Camera` trait so the dispatch match arms
+		// stay testable via FakeCamera.
 		let cmd = crate::cli_convert::clone_command(&cli.command);
 		let json = cli.json;
 		runner::run(&cam_cfg, cancel, move |cam| {
-			async move {
-				dispatch_oneshot(
-					cam as &dyn bairelay_neolink_core::bc_protocol::CameraDriver,
-					&cmd,
-					json,
-				)
-				.await
-			}
-			.boxed()
+			async move { dispatch_oneshot(cam as &dyn crate::camera::Camera, &cmd, json).await }
+				.boxed()
 		})
 		.await
 	}
@@ -717,10 +690,9 @@ discovery = "local"
 		assert_ne!(code, classify::EXIT_OK);
 	}
 
-	/// `run_oneshot` `--use-stream-raw` branch picks the stream path
-	/// (the `if let Command::Snapshot ... use_stream_raw: true` arm),
-	/// then `runner::run` fails to connect — exit nonzero. Covers
-	/// the snapshot --use-stream-raw branch (lines 161-180).
+	/// `run_oneshot` with `--use-stream-raw` routes through the same
+	/// dispatch path as every other command; `runner::run` fails to
+	/// connect — exit nonzero.
 	#[tokio::test]
 	async fn run_oneshot_use_stream_raw_path_returns_nonzero_on_tcp_failure() {
 		let f = tempfile::NamedTempFile::new().unwrap();

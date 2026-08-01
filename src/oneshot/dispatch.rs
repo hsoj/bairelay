@@ -10,13 +10,13 @@
 
 use std::path::Path;
 
+use crate::camera::Camera;
 use anyhow::Result;
-use bairelay_neolink_core::bc_protocol::CameraDriver;
 
 use crate::cli::{Command, FloodlightState, OnOff, PtzCommand};
 use crate::cli_convert::{
 	clone_ptz_cmd, clone_service_action, clone_user_action, ptz_direction_to_core,
-	service_name_to_core,
+	service_name_to_kind,
 };
 use crate::oneshot::{
 	abilities, battery, errors::UsageError, floodlight, output::Outcome, pir, presets, ptz, reboot,
@@ -77,11 +77,7 @@ pub fn find_camera_config(
 /// Returns the command's [`Outcome`] on success, or any error the
 /// underlying subcommand body produced. Errors flow up to
 /// `main::run_oneshot` for exit-code classification.
-pub async fn dispatch_oneshot(
-	cam: &dyn CameraDriver,
-	cmd: &Command,
-	json: bool,
-) -> Result<Outcome> {
+pub async fn dispatch_oneshot(cam: &dyn Camera, cmd: &Command, json: bool) -> Result<Outcome> {
 	match cmd {
 		Command::Reboot(_) => reboot::run(cam).await,
 		Command::Battery(_) => battery::run(cam).await,
@@ -107,7 +103,7 @@ pub async fn dispatch_oneshot(
 				);
 			}
 			let path: Option<&Path> = output.as_deref();
-			snapshot::run_via_driver(cam, path, json, *use_stream_raw).await
+			snapshot::run(cam, path, json, *use_stream_raw).await
 		}
 		Command::Floodlight { state, .. } => {
 			let set = state.as_ref().map(|s| matches!(s, FloodlightState::On));
@@ -143,7 +139,7 @@ pub async fn dispatch_oneshot(
 			match service {
 				None => services::run_all(cam).await,
 				Some(svc) => {
-					let svc = service_name_to_core(*svc);
+					let svc = service_name_to_kind(*svc);
 					let action = clone_service_action(action);
 					services::run(cam, svc, action).await
 				}
@@ -205,14 +201,11 @@ mod tests {
 	//! on the returned `Outcome` + `FakeCalls` log.
 
 	use super::*;
+	use crate::baichuan::bc::xml::{LedState, RfAlarmCfg, UserList, VersionInfo};
 	use crate::cli::{
 		OneShotArgs, PtzCommand, PtzDirection, ServiceAction, ServiceName, UserAction,
 	};
-	use bairelay_neolink_core::bc::xml::{
-		BatteryInfo, HttpPort, HttpsPort, LedState, OnvifPort, PtzPreset, RfAlarmCfg, RtmpPort,
-		RtspPort, ServerPort, UserList, VersionInfo,
-	};
-	use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
+	use crate::fake_camera::FakeCameraBuilder;
 
 	fn args() -> OneShotArgs {
 		OneShotArgs {
@@ -233,13 +226,12 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_battery_runs_battery_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| {
-				Ok(BatteryInfo {
-					battery_percent: 50,
-					voltage: 3800,
+			.with_battery_status(|| {
+				Ok(crate::battery::BatteryStatus {
+					percent: 50,
+					voltage: crate::battery::Millivolts(3800),
 					charge_status: "none".into(),
-					low_power: 0,
-					..Default::default()
+					low_power: false,
 				})
 			})
 			.build();
@@ -276,7 +268,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_presets_runs_presets_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| Ok(PtzPreset::default()))
+			.with_ptz_presets(|| Ok(Vec::new()))
 			.build();
 		let out = dispatch_oneshot(&*fake, &Command::Presets(args()), false)
 			.await
@@ -335,21 +327,26 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn dispatch_snapshot_use_stream_raw_rejected_via_driver() {
-		let fake = FakeCameraBuilder::new().build();
+	async fn dispatch_snapshot_use_stream_raw_runs_stream_path() {
+		// The raw-stream path routes through the port like every other
+		// command; a scripted start_video failure surfaces as the
+		// stream-path error, proving the arm was taken.
+		let fake = FakeCameraBuilder::new()
+			.with_video_stream_error(|| crate::baichuan::bc_protocol::Error::Other("no stream"))
+			.build();
 		let cmd = Command::Snapshot {
 			common: args(),
 			output: None,
 			use_stream: false,
-			use_stream_raw: true, // driver-only harness rejects this
+			use_stream_raw: true,
 		};
 		let err = dispatch_oneshot(&*fake, &cmd, false).await.unwrap_err();
-		assert!(format!("{err:#}").contains("use-stream-raw requires a concrete BcCamera"));
+		assert!(format!("{err:#}").contains("start_video failed"));
 	}
 
 	#[tokio::test]
 	async fn dispatch_floodlight_read_runs_read_branch() {
-		use bairelay_neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
+		use crate::baichuan::bc::xml::{FloodlightStatus, FloodlightStatusList};
 		let (tx, rx) = tokio::sync::mpsc::channel(1);
 		tx.send(FloodlightStatusList {
 			floodlight_status_list: vec![FloodlightStatus {
@@ -371,7 +368,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatch_floodlight_on_runs_set_branch() {
-		use bairelay_neolink_core::bc::xml::FloodlightStatusList;
+		use crate::baichuan::bc::xml::FloodlightStatusList;
 		let (tx, rx) = tokio::sync::mpsc::channel(1);
 		tx.send(FloodlightStatusList::default()).await.unwrap();
 		let fake = FakeCameraBuilder::new().with_floodlight_stream(rx).build();
@@ -386,7 +383,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_pir_read_runs_read_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| {
+			.with_pir_config(|| {
 				Ok(RfAlarmCfg {
 					enable: 1,
 					..Default::default()
@@ -406,7 +403,7 @@ mod tests {
 		// pir::run also reads back state after set, so the fake must
 		// supply pirstate too.
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| {
+			.with_pir_config(|| {
 				Ok(RfAlarmCfg {
 					enable: 1,
 					..Default::default()
@@ -424,7 +421,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_status_light_read_runs_read_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_ledstate(|| Ok(LedState::default()))
+			.with_led_state(|| Ok(LedState::default()))
 			.build();
 		let cmd = Command::StatusLight {
 			common: args(),
@@ -437,7 +434,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_status_light_set_runs_set_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_ledstate(|| Ok(LedState::default()))
+			.with_led_state(|| Ok(LedState::default()))
 			.build();
 		let cmd = Command::StatusLight {
 			common: args(),
@@ -450,7 +447,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_ptz_preset_runs_preset_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_ptz_preset(|| Ok(PtzPreset::default()))
+			.with_ptz_presets(|| Ok(Vec::new()))
 			.build();
 		let cmd = Command::Ptz {
 			common: args(),
@@ -502,12 +499,12 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_services_none_runs_run_all_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_serverport(|| Ok(ServerPort::default()))
-			.with_http(|| Ok(HttpPort::default()))
-			.with_https(|| Ok(HttpsPort::default()))
-			.with_rtsp(|| Ok(RtspPort::default()))
-			.with_rtmp(|| Ok(RtmpPort::default()))
-			.with_onvif(|| Ok(OnvifPort::default()))
+			.with_service(|_| {
+				Ok(crate::camera_services::ServicePortState {
+					port: 0,
+					enabled: None,
+				})
+			})
 			.build();
 		let cmd = Command::Services {
 			common: args(),
@@ -521,7 +518,12 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_services_some_runs_single_service_branch() {
 		let fake = FakeCameraBuilder::new()
-			.with_http(|| Ok(HttpPort::default()))
+			.with_service(|_| {
+				Ok(crate::camera_services::ServicePortState {
+					port: 0,
+					enabled: None,
+				})
+			})
 			.build();
 		let cmd = Command::Services {
 			common: args(),
@@ -535,7 +537,12 @@ mod tests {
 	#[tokio::test]
 	async fn dispatch_services_with_action_runs_set_path() {
 		let fake = FakeCameraBuilder::new()
-			.with_http(|| Ok(HttpPort::default()))
+			.with_service(|_| {
+				Ok(crate::camera_services::ServicePortState {
+					port: 0,
+					enabled: None,
+				})
+			})
 			.build();
 		let cmd = Command::Services {
 			common: args(),
@@ -543,14 +550,14 @@ mod tests {
 			action: Some(ServiceAction::On),
 		};
 		let _ = dispatch_oneshot(&*fake, &cmd, false).await.unwrap();
-		assert_eq!(fake.calls().set_http.lock().unwrap().len(), 1);
+		assert_eq!(fake.calls().set_service.lock().unwrap().len(), 1);
 	}
 
 	#[tokio::test]
 	async fn dispatch_abilities_runs_abilities_branch() {
-		use bairelay_neolink_core::bc::xml::{AbilityInfo, AbilityInfoSubModule, AbilityInfoToken};
+		use crate::baichuan::bc::xml::{AbilityInfo, AbilityInfoSubModule, AbilityInfoToken};
 		let fake = FakeCameraBuilder::new()
-			.with_abilityinfo(|| {
+			.with_ability_info(|| {
 				Ok(AbilityInfo {
 					username: "admin".into(),
 					system: Some(AbilityInfoToken {
@@ -596,7 +603,7 @@ mod tests {
 			.with_users(|| {
 				Ok(UserList {
 					version: "1.1".into(),
-					user_list: Some(vec![bairelay_neolink_core::bc::xml::User {
+					user_list: Some(vec![crate::baichuan::bc::xml::User {
 						user_name: "alice".into(),
 						user_level: 1,
 						..Default::default()

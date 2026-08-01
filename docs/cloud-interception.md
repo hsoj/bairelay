@@ -36,7 +36,7 @@ Target hardware: Argus-class battery cameras on firmware `v3.0.x`.
 
 # Part I — wake server
 
-XML schemas live in `crates/core/src/bcudp/xml.rs`; listener loops in `crates/wake-server/`. Round-trip tests in `crates/core/src/bcudp/model_tests.rs` pin the wire-format invariants. The `m2dqr_serialises_byte_for_byte_with_real_cloud` test pins the exact `M2D_Q_R` element shape Reolink's cloud emits.
+XML schemas live in `src/baichuan/bcudp/xml.rs`; listener loops in `src/wake_server/`. Round-trip tests in `src/baichuan/bcudp/model_tests.rs` pin the wire-format invariants. The `m2dqr_serialises_byte_for_byte_with_real_cloud` test pins the exact `M2D_Q_R` element shape Reolink's cloud emits.
 
 ## I.1 Why the protocol exists
 
@@ -63,7 +63,7 @@ offset  size  field
  20       N   encrypted XML body (length = payload_size)
 ```
 
-Implemented in `crates/core/src/bcudp/{ser,de}.rs`. The CRC is the same non-standard variant the rest of the Baichuan stack uses (`crates/core/src/bcudp/crc.rs`): `crc32fast::Hasher::new_with_initial(0xffffffff).finalize() ^ 0xffffffff`.
+Implemented in `src/baichuan/bcudp/{ser,de}.rs`. The CRC is the same non-standard variant the rest of the Baichuan stack uses (`src/baichuan/bcudp/crc.rs`): `crc32fast::Hasher::new_with_initial(0xffffffff).finalize() ^ 0xffffffff`.
 
 ### I.2.2 XOR keystream
 
@@ -171,7 +171,7 @@ The full sequence a battery camera goes through after power-on, before it can be
    rsp = -4 is informational, NOT fatal. Cameras accept this and proceed.
    The ac MUST match what was sent in step 3 or the camera silently
    re-queries D2M_Q. Per-UID anchor tracking lives in
-   crates/wake-server/src/registry.rs::SessionAnchors.
+   src/wake_server/registry.rs::SessionAnchors.
 
 6. Camera -> register:58200   (D2R_HB, ~125 B; every ~10 s)
        <P2P><D2R_HB>
@@ -281,7 +281,7 @@ When the session ends, the camera sends `D2R_DISC` with diagnostic counters; the
 
 ### I.6.1 Use the UDP source address, not `<dev>`
 
-`D2R_HB` and `D2R_C_R` both carry an inner `<dev><ip>...</ip><port>...</port></dev>` block that the camera populates with its own self-observed LAN address. Do not use this as the destination for replies. NAT'd cameras report a private LAN IP that is not routable from the server's perspective; non-NAT'd cameras have been observed to populate `<dev>` after a stale DHCP cycle. Always reply to the `recv_from` source address (what the kernel observed on the wire). `crates/wake-server/src/register.rs::handle_heartbeat` does this with an explicit comment.
+`D2R_HB` and `D2R_C_R` both carry an inner `<dev><ip>...</ip><port>...</port></dev>` block that the camera populates with its own self-observed LAN address. Do not use this as the destination for replies. NAT'd cameras report a private LAN IP that is not routable from the server's perspective; non-NAT'd cameras have been observed to populate `<dev>` after a stale DHCP cycle. Always reply to the `recv_from` source address (what the kernel observed on the wire). `src/wake_server/register.rs::handle_heartbeat` does this with an explicit comment.
 
 ### I.6.2 Long-form vs short-form UIDs
 
@@ -293,13 +293,13 @@ Reolink's actual cloud sends `<rsp>-4</rsp>` in `R2D_R_R`. Cameras proceed to `D
 
 ### I.6.4 Empty `<timer/>` and `<retry/>` markers
 
-`M2D_Q_R` includes self-closing `<timer/>` and `<retry/>` elements with no content in any observed capture. Argus firmware does not require non-empty bodies but does require the elements to be present. Modelled as a zero-field `EmptyTag` struct in `crates/core/src/bcudp/xml.rs`; quick-xml renders it as the self-closing form, byte-for-byte with the cloud's reply.
+`M2D_Q_R` includes self-closing `<timer/>` and `<retry/>` elements with no content in any observed capture. Argus firmware does not require non-empty bodies but does require the elements to be present. Modelled as a zero-field `EmptyTag` struct in `src/baichuan/bcudp/xml.rs`; quick-xml renders it as the self-closing form, byte-for-byte with the cloud's reply.
 
 ### I.6.5 Random `token` and `ac`; matching is per-session
 
 The cloud generates a fresh `token` (u64) and `ac` (u32) per `D2M_Q`. Subsequent `D2R_R` and `R2D_R_R` echo these. Cameras anchor to the **`ac`** value across the M2D_Q_R → D2R_R → R2D_R_R triangle: replying with a different `ac` in `R2D_R_R` makes the camera silently re-query `D2M_Q`. The `token` does not appear to be checked end-to-end (logged mismatches do not stop the camera from proceeding), but echoing it back faithfully matches the cloud.
 
-`crates/wake-server/src/registry.rs::SessionAnchors` keeps the `(token, ac)` pair under the camera's UID key. The middleman writes it on `D2M_Q`; the register reads it on `D2R_R`. Without that bookkeeping, every `R2D_R_R` would carry a fresh ac and the camera would loop on `D2M_Q` indefinitely.
+`src/wake_server/registry.rs::SessionAnchors` keeps the `(token, ac)` pair under the camera's UID key. The middleman writes it on `D2M_Q`; the register reads it on `D2R_R`. Without that bookkeeping, every `R2D_R_R` would carry a fresh ac and the camera would loop on `D2M_Q` indefinitely.
 
 ## I.7 Operator deployment
 
@@ -325,16 +325,16 @@ After changing the DNS redirect, cameras may take a long time (>5 minutes observ
 
 | Concern                                | Where                                                              |
 |----------------------------------------|--------------------------------------------------------------------|
-| Wire framing (header + CRC + XOR)      | `crates/core/src/bcudp/{de,ser,crc,xml_crypto}.rs`                 |
-| All `UdpXml` variants                  | `crates/core/src/bcudp/xml.rs`                                     |
-| Wire round-trip tests                  | `crates/core/src/bcudp/model_tests.rs`                             |
-| Listener loops                         | `crates/wake-server/src/{middleman,register}.rs`                   |
-| Camera registry + session anchors      | `crates/wake-server/src/registry.rs`                               |
-| `advertise_ip` (avoids `0.0.0.0` leak) | `crates/wake-server/src/route.rs`                                  |
-| `decode_discovery` / `encode_discovery`| `crates/wake-server/src/packet.rs`                                 |
-| Public entrypoints `run` / `run_with_sockets` | `crates/wake-server/src/lib.rs`                             |
-| In-process integration tests           | `crates/wake-server/tests/udp_loopback.rs`                         |
-| Operator-facing config schema          | `crates/wake-server/src/config.rs`, `sample_config.toml`           |
+| Wire framing (header + CRC + XOR)      | `src/baichuan/bcudp/{de,ser,crc,xml_crypto}.rs`                 |
+| All `UdpXml` variants                  | `src/baichuan/bcudp/xml.rs`                                     |
+| Wire round-trip tests                  | `src/baichuan/bcudp/model_tests.rs`                             |
+| Listener loops                         | `src/wake_server/{middleman,register}.rs`                   |
+| Camera registry + session anchors      | `src/wake_server/registry.rs`                               |
+| `advertise_ip` (avoids `0.0.0.0` leak) | `src/wake_server/route.rs`                                  |
+| `decode_discovery` / `encode_discovery`| `src/wake_server/packet.rs`                                 |
+| Public entrypoints `run` / `run_with_sockets` | `src/wake_server/lib.rs`                             |
+| In-process integration tests           | `src/wake_server/tests/udp_loopback.rs`                         |
+| Operator-facing config schema          | `src/wake_server/config.rs`, `sample_config.toml`           |
 | Orchestrator integration               | `src/main.rs` (the spawn block right before `orchestrator.run()`)  |
 | Live-verify recipe                     | `docs/testing.md` § "Local wake server live-verify"                                       |
 
@@ -348,7 +348,7 @@ Behaviour not yet observed or characterised:
 - The `<log>` server protocol on port 57850. Cameras emit this address in `M2D_Q_R` but no log connection has been observed during normal operation.
 - Cellular-camera variants; contributions welcome.
 
-If any of these become load-bearing, capture against a real cloud and extend the schemas in `crates/core/src/bcudp/xml.rs`.
+If any of these become load-bearing, capture against a real cloud and extend the schemas in `src/baichuan/bcudp/xml.rs`.
 
 ---
 
@@ -473,11 +473,11 @@ Same shape as Part I's recipe (`docs/testing.md` § "Local wake server live-veri
 | Concern                                       | Where                                                                |
 |-----------------------------------------------|----------------------------------------------------------------------|
 | TCP listener + accept loop                    | `src/push_listener.rs::run`                                          |
-| Peer-IP → registry UID                        | `crates/wake-server/src/registry.rs::CameraRegistry::lookup_by_ip`   |
+| Peer-IP → registry UID                        | `src/wake_server/registry.rs::CameraRegistry::lookup_by_ip`   |
 | Long-form UID → camera handle (prefix match)  | `src/push_listener.rs::match_camera_by_uid`                          |
 | Motion publish + wake-lock + fallback off     | `src/push_listener.rs::fire_motion`                                  |
 | Operator-facing config schema                 | `src/config.rs::PushListenerConfig`, `sample_config.toml`            |
-| Shared-registry construction                  | `crates/wake-server/src/lib.rs::make_registry`                       |
+| Shared-registry construction                  | `src/wake_server/lib.rs::make_registry`                       |
 | Orchestrator integration                      | `src/main.rs` (the spawn block alongside the wake server)            |
 | Self-signed cert MITM rig (validation gate)   | `tests/scripts/pushx-sink/run.sh`                                    |
 

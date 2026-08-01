@@ -95,7 +95,7 @@ pub fn build_base_config(opts: &HassioOptions, mqtt: &MqttServiceFlags) -> Confi
 			// remove the `[mqtt]` block entirely to run RTSP-only.
 			discovery: Some(crate::config::MqttDiscoveryConfig {
 				topic: "homeassistant".into(),
-				features: bairelay_mqtt::discovery::Feature::ALL
+				features: crate::mqtt::discovery::Feature::ALL
 					.iter()
 					.copied()
 					.collect(),

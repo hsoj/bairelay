@@ -11,7 +11,7 @@
 //!   emitting audio mid-run (mic enabled via control path).
 //! - `Present` never downgrades; transient audio drops are expected.
 
-use bairelay_rtsp::codec::AudioCodec;
+use crate::rtsp::codec::AudioCodec;
 
 /// Per-camera audio presence state. See module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

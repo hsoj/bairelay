@@ -10,31 +10,29 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use bairelay_neolink_core::bc_protocol::{CameraDriver, Error as CoreError, MotionStatus};
+use crate::baichuan::bc_protocol::{Error as CoreError, MotionStatus};
 
-use bairelay_mqtt::{SharedMqttClient, StatusPublisher};
-use bairelay_rtsp::buffer::LastFrameBuffer;
+use crate::camera::Camera;
+
+use crate::rtsp::buffer::LastFrameBuffer;
 
 use crate::camera::ReconnectBackoff;
+use crate::camera_status::CameraEvent;
+use crate::camera_status::StatusReporter;
 use crate::preview_overlay::OverlayCache;
 use crate::preview_state::PreviewState;
-use crate::status_cache::StatusCache;
 use crate::wake_lock::{WakeLockCounter, WakeLockGuard};
 
 // ── Motion Detection ─────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub async fn motion_listener(
 	camera_name: String,
-	bc_camera: Arc<dyn CameraDriver>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
+	bc_camera: Arc<dyn Camera>,
+	reporter: Arc<dyn StatusReporter>,
 	wake_lock: WakeLockCounter,
 	cancel: CancellationToken,
 	motion_wake_hold: Duration,
-	status_cache: Arc<StatusCache>,
 ) {
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	// Sustained network flap with N cameras × M retries/min produces a
 	// firehose of warns and pointless reconnect attempts. Use the same
 	// 1 → 60 s exponential ladder as the camera reconnect path; reset
@@ -95,13 +93,11 @@ pub async fn motion_listener(
 							if wake_guard.is_none() {
 								wake_guard = Some(wake_lock.acquire());
 							}
-							let _ = publisher.publish_motion(true).await;
-							status_cache.set_motion(true);
+							let _ = reporter.report(CameraEvent::Motion(true)).await;
 						}
 						Ok(MotionStatus::Stop(_)) => {
 							tracing::info!(camera = %camera_name, "Motion stopped");
-							let _ = publisher.publish_motion(false).await;
-							status_cache.set_motion(false);
+							let _ = reporter.report(CameraEvent::Motion(false)).await;
 							if wake_guard.is_some() {
 								release_at = Some(
 									tokio::time::Instant::now() + motion_wake_hold,
@@ -139,7 +135,7 @@ pub async fn motion_listener(
 /// any success or transport blip resetting the streak, is.
 pub(crate) const BATTERY_MAX_UNSUPPORTED: u32 = 3;
 
-/// Shorthand for one `timeout(..., battery_info()).await` outcome.
+/// Shorthand for one `timeout(..., battery_status()).await` outcome.
 pub(crate) type TickResult<T> =
 	std::result::Result<std::result::Result<T, CoreError>, tokio::time::error::Elapsed>;
 
@@ -158,7 +154,7 @@ pub(crate) enum BatteryTickOutcome {
 /// Fold a battery-poll outcome into a [`BatteryTickOutcome`].
 ///
 /// The load-bearing distinction is *refused* vs *failed*. A camera that
-/// replies with a non-200 (or a 200 without a `battery_info` payload) has
+/// replies with a non-200 (or a 200 without a battery payload) has
 /// said something about its hardware; a camera that timed out or dropped
 /// the connection has not. Only the former may ever disable polling — see
 /// [`advance_battery_counter`].
@@ -208,18 +204,14 @@ pub(crate) fn advance_battery_counter(
 /// there, so a later run of malformed replies — which
 /// [`classify_battery_tick`] cannot distinguish from a refusal — can
 /// never silence a real battery.
-#[allow(clippy::too_many_arguments)]
 pub async fn battery_poller(
 	camera_name: String,
-	bc_camera: Arc<dyn CameraDriver>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
+	bc_camera: Arc<dyn Camera>,
+	reporter: Arc<dyn StatusReporter>,
 	interval_ms: u64,
 	cancel: CancellationToken,
-	status_cache: Arc<StatusCache>,
 	battery_unsupported: Arc<AtomicBool>,
 ) {
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
 	// Delay, not the default Burst: a poll that stalls to the 10 s timeout
 	// leaves several deadlines overdue, and Burst would fire them
@@ -240,7 +232,7 @@ pub async fn battery_poller(
 			_ = ticker.tick() => {
 				let tick = tokio::time::timeout(
 					Duration::from_secs(10),
-					bc_camera.battery_info(),
+					bc_camera.battery_status(),
 				).await;
 
 				let outcome = classify_battery_tick(&tick);
@@ -252,12 +244,11 @@ pub async fn battery_poller(
 				consecutive_unsupported = next;
 
 				match &tick {
-					Ok(Ok(info)) => {
+					Ok(Ok(status)) => {
 						ever_succeeded = true;
-						let level = info.battery_percent.min(100) as u8;
+						let level = status.percent;
 						tracing::debug!(camera = %camera_name, battery = level, "Battery level");
-						let _ = publisher.publish_battery_level(level).await;
-						status_cache.set_battery_level(level);
+						let _ = reporter.report(CameraEvent::BatteryLevel(level)).await;
 					}
 					Ok(Err(e)) => {
 						tracing::debug!(camera = %camera_name, error = %e, "Battery poll failed");
@@ -308,8 +299,7 @@ pub async fn preview_poller(
 	camera_name: String,
 	camera: Arc<crate::camera::CameraHandle>,
 	last_frame: Arc<LastFrameBuffer>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
+	reporter: Arc<dyn StatusReporter>,
 	interval_ms: u64,
 	mut preview_state_rx: watch::Receiver<PreviewState>,
 	preview_overlay_enabled: bool,
@@ -317,7 +307,6 @@ pub async fn preview_poller(
 ) {
 	const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	let overlay_cache = OverlayCache::new();
 	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -338,7 +327,7 @@ pub async fn preview_poller(
 				// users can tell live from stale.
 				if camera.state().is_connected() {
 					if let Some(bc) = camera.bc_camera() {
-						match tokio::time::timeout(SNAPSHOT_TIMEOUT, bc.get_snapshot()).await {
+						match tokio::time::timeout(SNAPSHOT_TIMEOUT, bc.snapshot()).await {
 							Ok(Ok(bytes)) => {
 								last_frame.set_jpeg(bytes::Bytes::from(bytes));
 							}
@@ -375,13 +364,14 @@ pub async fn preview_poller(
 					Some(&overlay_cache),
 				);
 
-				if let Err(e) = publisher.publish_preview(&payload).await {
+				let payload_len = payload.len();
+				if let Err(e) = reporter.report(CameraEvent::Preview(payload)).await {
 					// If the broker advertises a lower MaxPacketSize the
 					// send is rejected here — log as warn so operators see
 					// they may need to raise broker message_size_limit.
 					tracing::warn!(
 						camera = %camera_name,
-						bytes = payload.len(),
+						bytes = payload_len,
 						error = %e,
 						"preview publish failed"
 					);
@@ -393,17 +383,13 @@ pub async fn preview_poller(
 
 // ── Floodlight Poller ────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub async fn floodlight_poller(
 	camera_name: String,
-	bc_camera: Arc<dyn CameraDriver>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
+	bc_camera: Arc<dyn Camera>,
+	reporter: Arc<dyn StatusReporter>,
 	interval_ms: u64,
 	cancel: CancellationToken,
-	status_cache: Arc<StatusCache>,
 ) {
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
 	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
 
 	loop {
@@ -413,8 +399,7 @@ pub async fn floodlight_poller(
 				match tokio::time::timeout(Duration::from_secs(10), bc_camera.is_floodlight_tasks_enabled()).await {
 					Ok(Ok(enabled)) => {
 						tracing::debug!(camera = %camera_name, enabled, "Floodlight tasks");
-						let _ = publisher.publish_floodlight_tasks_enabled(enabled).await;
-						status_cache.set_floodlight_tasks(enabled);
+						let _ = reporter.report(CameraEvent::FloodlightTasks(enabled)).await;
 					}
 					Ok(Err(e)) => {
 						tracing::debug!(camera = %camera_name, error = %e, "Floodlight poll failed");
@@ -432,14 +417,10 @@ pub async fn floodlight_poller(
 
 pub async fn floodlight_listener(
 	camera_name: String,
-	bc_camera: Arc<dyn CameraDriver>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
+	bc_camera: Arc<dyn Camera>,
+	reporter: Arc<dyn StatusReporter>,
 	cancel: CancellationToken,
-	status_cache: Arc<StatusCache>,
 ) {
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
-
 	let mut rx = match bc_camera.listen_on_floodlight().await {
 		Ok(rx) => rx,
 		Err(e) => {
@@ -457,8 +438,7 @@ pub async fn floodlight_listener(
 						for flight in status_list.floodlight_status_list.iter() {
 							let on = flight.status != 0;
 							tracing::debug!(camera = %camera_name, on, "Floodlight state changed");
-							let _ = publisher.publish_floodlight(on).await;
-							status_cache.set_floodlight(on);
+							let _ = reporter.report(CameraEvent::Floodlight(on)).await;
 						}
 					}
 					None => break, // Channel closed
@@ -474,18 +454,14 @@ pub async fn floodlight_listener(
 /// only changes via `control/pir` commands (handled in mqtt_dispatch).
 pub async fn publish_pir_state(
 	camera_name: String,
-	bc_camera: Arc<dyn CameraDriver>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
-	status_cache: Arc<StatusCache>,
+	bc_camera: Arc<dyn Camera>,
+	reporter: Arc<dyn StatusReporter>,
 ) {
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, &camera_name);
-	match tokio::time::timeout(Duration::from_secs(10), bc_camera.get_pirstate()).await {
+	match tokio::time::timeout(Duration::from_secs(10), bc_camera.pir_config()).await {
 		Ok(Ok(pir_state)) => {
 			let enabled = pir_state.enable == 1;
 			tracing::debug!(camera = %camera_name, enabled, "PIR state");
-			let _ = publisher.publish_pir(enabled).await;
-			status_cache.set_pir(enabled);
+			let _ = reporter.report(CameraEvent::Pir(enabled)).await;
 		}
 		Ok(Err(e)) => {
 			tracing::debug!(camera = %camera_name, error = %e, "PIR state query failed");
@@ -499,18 +475,37 @@ pub async fn publish_pir_state(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_mqtt::test_support::MockHandle;
-	use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
+	use crate::camera::Camera;
+	use crate::fake_camera::FakeCameraBuilder;
+	use crate::mqtt::test_support::MockHandle;
+	use crate::mqtt::SharedMqttClient;
 	use bytes::Bytes;
 	use std::sync::atomic::{AtomicBool, Ordering};
 
-	/// Helper: every status-publishing task takes an `Arc<StatusCache>`
-	/// as its final argument. Tests that don't assert on cache contents
-	/// pass a fresh default. Wrapped in a helper to keep the call sites
-	/// terse and not bind a dependency on the StatusCache constructor
-	/// shape into every test.
-	fn empty_cache() -> Arc<StatusCache> {
-		Arc::new(StatusCache::default())
+	use crate::mqtt_status::MqttStatusReporter;
+	use crate::status_cache::StatusCache;
+
+	/// Helper: every status-reporting task takes one `Arc<dyn
+	/// StatusReporter>`. Build the production MQTT sink over a mock client
+	/// so tests still assert on the exact retained topics that reach
+	/// the broker.
+	fn reporter_for(mqtt: SharedMqttClient) -> Arc<dyn StatusReporter> {
+		Arc::new(MqttStatusReporter::new(
+			mqtt,
+			"bairelay",
+			"cam1",
+			Arc::new(StatusCache::default()),
+		))
+	}
+
+	/// Same, for the tests that publish under a different camera name.
+	fn reporter_named(mqtt: SharedMqttClient, camera: &str) -> Arc<dyn StatusReporter> {
+		Arc::new(MqttStatusReporter::new(
+			mqtt,
+			"bairelay",
+			camera,
+			Arc::new(StatusCache::default()),
+		))
 	}
 
 	/// Poll the mock MQTT handle for up to `budget`, returning `true`
@@ -543,36 +538,34 @@ mod tests {
 		// Script a motion stream: tx stays with the test, rx goes into
 		// the fake so the listener pulls from our channel.
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake.clone();
+		let driver: Arc<dyn Camera> = fake.clone();
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(motion_listener(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
-			empty_cache(),
 		));
 
 		// Push a Start event and wait briefly for the publish to
 		// flow through.
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -598,29 +591,27 @@ mod tests {
 	/// on the retained topic + clamped numeric payload, then cancels.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_publishes_level_on_success() {
-		use bairelay_neolink_core::bc::xml::BatteryInfo;
-
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| {
-				Ok(BatteryInfo {
-					battery_percent: 77,
-					..Default::default()
+			.with_battery_status(|| {
+				Ok(crate::battery::BatteryStatus {
+					percent: 77,
+					voltage: crate::battery::Millivolts(0),
+					charge_status: String::new(),
+					low_power: false,
 				})
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(battery_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 			Arc::new(AtomicBool::new(false)),
 		));
 
@@ -644,40 +635,39 @@ mod tests {
 	/// The poller swallows `Err` at debug and keeps ticking.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_tolerates_transient_error_and_recovers() {
-		use bairelay_neolink_core::bc::xml::BatteryInfo;
 		use std::sync::atomic::{AtomicU32, Ordering};
 
 		let call = Arc::new(AtomicU32::new(0));
 		let call_c = Arc::clone(&call);
 
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(move || {
+			.with_battery_status(move || {
 				let n = call_c.fetch_add(1, Ordering::AcqRel);
 				if n == 0 {
-					Err(bairelay_neolink_core::bc_protocol::Error::Other(
+					Err(crate::baichuan::bc_protocol::Error::Other(
 						"transient test failure",
 					))
 				} else {
-					Ok(BatteryInfo {
-						battery_percent: 33,
-						..Default::default()
+					Ok(crate::battery::BatteryStatus {
+						percent: 33,
+						voltage: crate::battery::Millivolts(0),
+						charge_status: String::new(),
+						low_power: false,
 					})
 				}
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(battery_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 			Arc::new(AtomicBool::new(false)),
 		));
 
@@ -705,9 +695,9 @@ mod tests {
 	/// answers the battery-info request with anything other than a 200
 	/// carrying a `battery_info` payload — i.e. the camera refusing the
 	/// command outright. A mains-powered camera returns this on every poll.
-	fn battery_refused() -> bairelay_neolink_core::bc_protocol::Error {
-		use bairelay_neolink_core::bc::model::{Bc, BcMeta, MSG_ID_BATTERY_INFO};
-		bairelay_neolink_core::bc_protocol::Error::UnintelligibleReply {
+	fn battery_refused() -> crate::baichuan::bc_protocol::Error {
+		use crate::baichuan::bc::model::{Bc, BcMeta, MSG_ID_BATTERY_INFO};
+		crate::baichuan::bc_protocol::Error::UnintelligibleReply {
 			reply: Arc::new(Bc::new_from_meta(BcMeta {
 				msg_id: MSG_ID_BATTERY_INFO,
 				channel_id: 0,
@@ -722,13 +712,11 @@ mod tests {
 
 	#[test]
 	fn classify_battery_tick_maps_each_arm() {
-		use bairelay_neolink_core::bc::xml::BatteryInfo;
-
-		let ok: TickResult<BatteryInfo> = Ok(Ok(BatteryInfo::default()));
+		let ok: TickResult<()> = Ok(Ok(()));
 		assert_eq!(classify_battery_tick(&ok), BatteryTickOutcome::Ok);
 
 		// The camera answered and said no.
-		let refused: TickResult<BatteryInfo> = Ok(Err(battery_refused()));
+		let refused: TickResult<()> = Ok(Err(battery_refused()));
 		assert_eq!(
 			classify_battery_tick(&refused),
 			BatteryTickOutcome::Unsupported
@@ -736,22 +724,20 @@ mod tests {
 
 		// `MissingAbility` must NOT latch a disable: a missing ability
 		// key doesn't prove the camera lacks the hardware.
-		let missing: TickResult<BatteryInfo> = Ok(Err(
-			bairelay_neolink_core::bc_protocol::Error::MissingAbility {
+		let missing: TickResult<()> =
+			Ok(Err(crate::baichuan::bc_protocol::Error::MissingAbility {
 				name: "battery".into(),
 				requested: "read".into(),
 				actual: "none".into(),
-			},
-		));
+			}));
 		assert_eq!(
 			classify_battery_tick(&missing),
 			BatteryTickOutcome::Transient
 		);
 
 		// Anything else is a transport-level blip.
-		let other: TickResult<BatteryInfo> = Ok(Err(
-			bairelay_neolink_core::bc_protocol::Error::Other("transient"),
-		));
+		let other: TickResult<()> =
+			Ok(Err(crate::baichuan::bc_protocol::Error::Other("transient")));
 		assert_eq!(classify_battery_tick(&other), BatteryTickOutcome::Transient);
 	}
 
@@ -791,22 +777,20 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_gives_up_after_repeated_refusals() {
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(|| Err(battery_refused()))
+			.with_battery_status(|| Err(battery_refused()))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let unsupported = Arc::new(AtomicBool::new(false));
 
 		let task = tokio::spawn(battery_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 			Arc::clone(&unsupported),
 		));
 
@@ -836,38 +820,37 @@ mod tests {
 	/// resets and the poller keeps serving a real battery.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_survives_refusals_broken_by_a_transient_error() {
-		use bairelay_neolink_core::bc::xml::BatteryInfo;
 		use std::sync::atomic::AtomicU32;
 
 		let call = Arc::new(AtomicU32::new(0));
 		let call_c = Arc::clone(&call);
 
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(move || match call_c.fetch_add(1, Ordering::AcqRel) {
+			.with_battery_status(move || match call_c.fetch_add(1, Ordering::AcqRel) {
 				0 | 1 => Err(battery_refused()),
-				2 => Err(bairelay_neolink_core::bc_protocol::Error::Other(
+				2 => Err(crate::baichuan::bc_protocol::Error::Other(
 					"transient test failure",
 				)),
-				_ => Ok(BatteryInfo {
-					battery_percent: 42,
-					..Default::default()
+				_ => Ok(crate::battery::BatteryStatus {
+					percent: 42,
+					voltage: crate::battery::Millivolts(0),
+					charge_status: String::new(),
+					low_power: false,
 				}),
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let unsupported = Arc::new(AtomicBool::new(false));
 
 		let task = tokio::spawn(battery_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 			Arc::clone(&unsupported),
 		));
 
@@ -895,39 +878,38 @@ mod tests {
 	/// therefore never latch the permanent disable.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn battery_poller_never_disables_a_camera_that_once_answered() {
-		use bairelay_neolink_core::bc::xml::BatteryInfo;
 		use std::sync::atomic::AtomicU32;
 
 		let call = Arc::new(AtomicU32::new(0));
 		let call_c = Arc::clone(&call);
 
 		let fake = FakeCameraBuilder::new()
-			.with_battery_info(move || {
+			.with_battery_status(move || {
 				// One good reading, then refuse forever.
 				if call_c.fetch_add(1, Ordering::AcqRel) == 0 {
-					Ok(BatteryInfo {
-						battery_percent: 55,
-						..Default::default()
+					Ok(crate::battery::BatteryStatus {
+						percent: 55,
+						voltage: crate::battery::Millivolts(0),
+						charge_status: String::new(),
+						low_power: false,
 					})
 				} else {
 					Err(battery_refused())
 				}
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let unsupported = Arc::new(AtomicBool::new(false));
 
 		let task = tokio::spawn(battery_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 			Arc::clone(&unsupported),
 		));
 
@@ -958,22 +940,20 @@ mod tests {
 	/// status=1 and assert `status/floodlight = {"state":"on"}`.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn floodlight_listener_publishes_on_event() {
-		use bairelay_neolink_core::bc::xml::{FloodlightStatus, FloodlightStatusList};
+		use crate::baichuan::bc::xml::{FloodlightStatus, FloodlightStatusList};
 
 		let (tx, rx) = tokio::sync::mpsc::channel::<FloodlightStatusList>(4);
 		let fake = FakeCameraBuilder::new().with_floodlight_stream(rx).build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(floodlight_listener(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			cancel.clone(),
-			empty_cache(),
 		));
 
 		tx.send(FloodlightStatusList {
@@ -1008,19 +988,17 @@ mod tests {
 		let fake = FakeCameraBuilder::new()
 			.with_is_floodlight_tasks_enabled(|| Ok(true))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(floodlight_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 		));
 
 		let saw = await_publish_matching(&mock, Duration::from_secs(2), |(t, p, r)| {
@@ -1043,28 +1021,21 @@ mod tests {
 	/// is 1.
 	#[tokio::test]
 	async fn publish_pir_state_publishes_enabled() {
-		use bairelay_neolink_core::bc::xml::RfAlarmCfg;
+		use crate::baichuan::bc::xml::RfAlarmCfg;
 
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| {
+			.with_pir_config(|| {
 				Ok(RfAlarmCfg {
 					enable: 1,
 					..Default::default()
 				})
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
-		publish_pir_state(
-			"cam1".to_string(),
-			driver,
-			mqtt,
-			"bairelay".to_string(),
-			empty_cache(),
-		)
-		.await;
+		publish_pir_state("cam1".to_string(), driver, reporter_named(mqtt, "cam1")).await;
 
 		let pub_rows = mock.published();
 		assert!(
@@ -1137,7 +1108,7 @@ mod tests {
 			None,
 		));
 
-		let (mqtt, mqtt_handle) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mqtt_handle) = crate::mqtt::test_support::mock_client();
 		let rx = handle.preview_state_rx();
 
 		// Drive the poller: 10ms ticker fires near-immediately;
@@ -1152,8 +1123,7 @@ mod tests {
 			"cam-preview-test".to_string(),
 			Arc::clone(&handle),
 			Arc::clone(&last_frame),
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-preview-test"),
 			10, // 10 ms — fast tick for the test
 			rx,
 			true,
@@ -1205,8 +1175,7 @@ mod tests {
 			"cam-preview-noovl".to_string(),
 			Arc::clone(&handle),
 			Arc::clone(&last_frame),
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-preview-noovl"),
 			10,
 			rx,
 			false, // disable overlay
@@ -1222,40 +1191,38 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_publishes_motion_off_on_stop_event() {
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(motion_listener(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
-			empty_cache(),
 		));
 
 		// Start then Stop in quick succession.
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
 			.unwrap();
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Stop(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Stop(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1279,19 +1246,19 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_holds_wake_lock_through_hold_down() {
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		// 500 ms hold-down absorbs tarpaulin instrumentation slop on
 		// the timer; smaller windows have flaked under coverage.
 		let hold = Duration::from_millis(500);
@@ -1299,17 +1266,15 @@ mod tests {
 		let task = tokio::spawn(motion_listener(
 			"cam-hold".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-hold"),
 			wl.clone(),
 			cancel.clone(),
 			hold,
-			empty_cache(),
 		));
 
 		// Start → wake lock acquired.
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1319,7 +1284,7 @@ mod tests {
 
 		// Stop → lock still held during hold-down window.
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Stop(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Stop(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1350,50 +1315,48 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_start_during_hold_down_cancels_release() {
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 		// 500 ms hold-down absorbs tarpaulin instrumentation slop.
 		let hold = Duration::from_millis(500);
 
 		let task = tokio::spawn(motion_listener(
 			"cam-flap".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-flap"),
 			wl.clone(),
 			cancel.clone(),
 			hold,
-			empty_cache(),
 		));
 
 		// Start → Stop → Start, all within the hold-down window.
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(50)).await;
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Stop(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Stop(
 				std::time::Instant::now(),
 			)))
 			.await
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(50)).await;
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1418,41 +1381,37 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_ignores_nochange_and_continues() {
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(motion_listener(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
-			empty_cache(),
 		));
 
 		motion_tx
-			.send(Ok(
-				bairelay_neolink_core::bc_protocol::MotionStatus::NoChange(
-					std::time::Instant::now(),
-				),
-			))
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::NoChange(
+				std::time::Instant::now(),
+			)))
 			.await
 			.unwrap();
 		motion_tx
-			.send(Ok(bairelay_neolink_core::bc_protocol::MotionStatus::Start(
+			.send(Ok(crate::baichuan::bc_protocol::MotionStatus::Start(
 				std::time::Instant::now(),
 			)))
 			.await
@@ -1476,35 +1435,33 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn motion_listener_breaks_inner_loop_on_next_motion_error() {
 		type MotionItem = std::result::Result<
-			bairelay_neolink_core::bc_protocol::MotionStatus,
-			bairelay_neolink_core::bc_protocol::Error,
+			crate::baichuan::bc_protocol::MotionStatus,
+			crate::baichuan::bc_protocol::Error,
 		>;
 		let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<MotionItem>(8);
-		let motion_data = bairelay_neolink_core::bc_protocol::MotionData::test_new(motion_rx);
+		let motion_data = crate::baichuan::bc_protocol::MotionData::test_new(motion_rx);
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream(motion_data)
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(motion_listener(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
-			empty_cache(),
 		));
 
 		// Push one Err into the motion channel. The listener will log
 		// and break; we cancel before the 1s retry sleep finishes.
 		motion_tx
-			.send(Err(bairelay_neolink_core::bc_protocol::Error::Other(
+			.send(Err(crate::baichuan::bc_protocol::Error::Other(
 				"scripted next_motion failure",
 			)))
 			.await
@@ -1527,21 +1484,13 @@ mod tests {
 		// succeeds and `rx.recv()` returns None immediately — matches
 		// the "None → break" path on line 300.)
 		let (tx, rx) =
-			tokio::sync::mpsc::channel::<bairelay_neolink_core::bc::xml::FloodlightStatusList>(1);
+			tokio::sync::mpsc::channel::<crate::baichuan::bc::xml::FloodlightStatusList>(1);
 		drop(tx); // close the sender so rx.recv() returns None.
 		let fake = FakeCameraBuilder::new().with_floodlight_stream(rx).build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
-		floodlight_listener(
-			"cam1".to_string(),
-			driver,
-			mqtt,
-			"bairelay".to_string(),
-			cancel,
-			empty_cache(),
-		)
-		.await;
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
+		floodlight_listener("cam1".to_string(), driver, reporter_for(mqtt), cancel).await;
 		assert!(
 			mock.published().is_empty(),
 			"closed channel should publish nothing; got {:?}",
@@ -1554,22 +1503,11 @@ mod tests {
 	#[tokio::test]
 	async fn publish_pir_state_handles_driver_error() {
 		let fake = FakeCameraBuilder::new()
-			.with_pirstate(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"pir refused",
-				))
-			})
+			.with_pir_config(|| Err(crate::baichuan::bc_protocol::Error::Other("pir refused")))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
-		publish_pir_state(
-			"cam1".to_string(),
-			driver,
-			mqtt,
-			"bairelay".to_string(),
-			empty_cache(),
-		)
-		.await;
+		let driver: Arc<dyn Camera> = fake;
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
+		publish_pir_state("cam1".to_string(), driver, reporter_named(mqtt, "cam1")).await;
 		assert!(
 			!mock
 				.published()
@@ -1586,22 +1524,18 @@ mod tests {
 	async fn floodlight_poller_tolerates_err_without_publishing() {
 		let fake = FakeCameraBuilder::new()
 			.with_is_floodlight_tasks_enabled(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"tasks refused",
-				))
+				Err(crate::baichuan::bc_protocol::Error::Other("tasks refused"))
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let task = tokio::spawn(floodlight_poller(
 			"cam1".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam1"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 		));
 		// Let at least one tick fire + settle.
 		tokio::time::sleep(Duration::from_millis(80)).await;
@@ -1627,10 +1561,10 @@ mod tests {
 
 		let fresh_jpeg = fake_jpeg();
 		let fresh_clone = fresh_jpeg.clone();
-		let fake = bairelay_neolink_core::bc_protocol::FakeCameraBuilder::new()
+		let fake = crate::fake_camera::FakeCameraBuilder::new()
 			.with_snapshot(move || Ok(fresh_clone.to_vec()))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
@@ -1657,8 +1591,7 @@ mod tests {
 			"cam-conn".to_string(),
 			Arc::clone(&handle),
 			Arc::clone(&last_frame),
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-conn"),
 			10,
 			rx,
 			false,
@@ -1684,14 +1617,10 @@ mod tests {
 		use crate::camera::CameraHandle;
 		use crate::config::test_helpers::minimal_camera_config;
 
-		let fake = bairelay_neolink_core::bc_protocol::FakeCameraBuilder::new()
-			.with_snapshot(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
-					"snap denied",
-				))
-			})
+		let fake = crate::fake_camera::FakeCameraBuilder::new()
+			.with_snapshot(|| Err(crate::baichuan::bc_protocol::Error::Other("snap denied")))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
@@ -1715,8 +1644,7 @@ mod tests {
 			"cam-snap-err".to_string(),
 			Arc::clone(&handle),
 			Arc::clone(&last_frame),
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-snap-err"),
 			10,
 			rx,
 			false,
@@ -1755,8 +1683,7 @@ mod tests {
 			"cam-preview-empty".to_string(),
 			Arc::clone(&handle),
 			Arc::clone(&last_frame),
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-preview-empty"),
 			10,
 			rx,
 			true,
@@ -1775,24 +1702,22 @@ mod tests {
 	async fn motion_listener_retries_after_subscribe_error() {
 		let fake = FakeCameraBuilder::new()
 			.with_motion_stream_error(|| {
-				bairelay_neolink_core::bc_protocol::Error::Other("scripted subscribe failure")
+				crate::baichuan::bc_protocol::Error::Other("scripted subscribe failure")
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
 
 		let task = tokio::spawn(motion_listener(
 			"cam-retry".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-retry"),
 			wl,
 			cancel.clone(),
 			Duration::from_secs(30),
-			empty_cache(),
 		));
 
 		// Give the listener enough wall time to invoke
@@ -1812,12 +1737,12 @@ mod tests {
 	async fn floodlight_listener_returns_on_subscribe_error() {
 		let fake = FakeCameraBuilder::new()
 			.with_floodlight_stream_error(|| {
-				bairelay_neolink_core::bc_protocol::Error::Other("floodlight unsupported")
+				crate::baichuan::bc_protocol::Error::Other("floodlight unsupported")
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 
 		// No spawn: the listener must return before we touch cancel.
 		// If the early-return branch regresses, the test will hang on
@@ -1827,10 +1752,8 @@ mod tests {
 			floodlight_listener(
 				"cam-err".to_string(),
 				driver,
-				mqtt,
-				"bairelay".to_string(),
+				reporter_named(mqtt, "cam-err"),
 				cancel,
-				empty_cache(),
 			),
 		)
 		.await
@@ -1849,18 +1772,18 @@ mod tests {
 	/// before the next tick to avoid a publish race.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn battery_poller_timeout_branch_logs_and_continues() {
-		let fake = FakeCameraBuilder::new().with_battery_info_pending().build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let fake = FakeCameraBuilder::new()
+			.with_battery_status_pending()
+			.build();
+		let driver: Arc<dyn Camera> = fake;
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let task = tokio::spawn(battery_poller(
 			"cam-bt".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-bt"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 			Arc::new(AtomicBool::new(false)),
 		));
 		// Advance past the first tick (20 ms) plus the 10 s per-tick timeout.
@@ -1882,17 +1805,15 @@ mod tests {
 		let fake = FakeCameraBuilder::new()
 			.with_is_floodlight_tasks_enabled_pending()
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		let cancel = CancellationToken::new();
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let task = tokio::spawn(floodlight_poller(
 			"cam-ft".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
+			reporter_named(mqtt, "cam-ft"),
 			20,
 			cancel.clone(),
-			empty_cache(),
 		));
 		// Advance past the first tick (20 ms) plus the 10 s per-tick timeout.
 		tokio::time::advance(Duration::from_secs(11)).await;
@@ -1909,15 +1830,13 @@ mod tests {
 	/// `publish_pir_state` timeout branch — driver hangs past 10 s.
 	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn publish_pir_state_timeout_branch() {
-		let fake = FakeCameraBuilder::new().with_pirstate_pending().build();
-		let driver: Arc<dyn CameraDriver> = fake;
-		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let fake = FakeCameraBuilder::new().with_pir_config_pending().build();
+		let driver: Arc<dyn Camera> = fake;
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
 		let task = tokio::spawn(publish_pir_state(
 			"cam-pst".to_string(),
 			driver,
-			mqtt,
-			"bairelay".to_string(),
-			empty_cache(),
+			reporter_named(mqtt, "cam-pst"),
 		));
 		tokio::time::advance(Duration::from_secs(11)).await;
 		let _ = task.await;

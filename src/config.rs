@@ -1,4 +1,4 @@
-use bairelay_mqtt::discovery::Feature;
+use crate::mqtt::discovery::Feature;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -97,7 +97,7 @@ pub struct Config {
 	/// RTSP and MQTT. Operators must also redirect DNS for
 	/// `p2p*.reolink.com` to the bairelay box for cameras to register.
 	#[serde(default)]
-	pub wake_server: Option<bairelay_wake_server::WakeServerConfig>,
+	pub wake_server: Option<crate::wake_server::WakeServerConfig>,
 
 	/// Optional `[push_listener]` block. Disabled by default. When enabled,
 	/// bairelay binds a TCP listener on `bind_addr:bind_port` and treats
@@ -396,9 +396,9 @@ pub struct CameraConfig {
 
 	/// Wire-level protocol debugging. When `true`, the Baichuan codec
 	/// dumps each decrypted control payload (login replies included) at
-	/// trace level — set `RUST_LOG=info,bairelay_neolink_core::bc::de=trace`
+	/// trace level — set `RUST_LOG=info,crate::baichuan::bc::de=trace`
 	/// to see them. The leading `info,` is load-bearing: a bare
-	/// `bairelay_neolink_core::bc::de=trace` is a single-target allowlist
+	/// `crate::baichuan::bc::de=trace` is a single-target allowlist
 	/// that silences every other line (a silent console), so keep a
 	/// baseline level before the comma. The dumps contain credential
 	/// hashes and camera UIDs; don't share them publicly. `verbose` is
@@ -537,7 +537,7 @@ impl Default for MqttConfig {
 	}
 }
 
-impl From<&MqttConfig> for bairelay_mqtt::discovery::CameraEnableFlags {
+impl From<&MqttConfig> for crate::mqtt::discovery::CameraEnableFlags {
 	/// Map the per-camera `[cameras.mqtt]` toggles onto the
 	/// discovery-side `CameraEnableFlags`. Features without a
 	/// per-camera flag (`camera`, `ir`, `reboot`, `pt`, `siren`) pass
@@ -792,7 +792,7 @@ pub fn apply_cloud_auth(config: &mut Config, config_path: &std::path::Path) {
 		Ok(s) => s,
 		Err(_) => return,
 	};
-	let auth: bairelay_neolink_core::cloud::CloudAuth = match serde_json::from_str(&raw) {
+	let auth: crate::baichuan::cloud::CloudAuth = match serde_json::from_str(&raw) {
 		Ok(a) => a,
 		Err(e) => {
 			tracing::warn!("ignoring {}: {e}", auth_path.display());
@@ -996,7 +996,7 @@ pub fn warn_wire_debug_enabled(config: &Config) {
 		if cam.debug == Some(true) {
 			tracing::warn!(
 				camera = %cam.name,
-				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=info,bairelay_neolink_core::bc::de=trace to see them — the leading info, is required or the console goes silent); they include credential hashes — do not share these logs publicly"
+				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=info,crate::baichuan::bc::de=trace to see them — the leading info, is required or the console goes silent); they include credential hashes — do not share these logs publicly"
 			);
 		}
 	}

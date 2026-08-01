@@ -16,6 +16,7 @@ use bairelay::config::{
 	warn_users_without_tls, warn_wire_debug_enabled,
 };
 use bairelay::local_time::LocalTimer;
+use bairelay::mqtt::{parse_control_message, MqttEventLoop, SharedMqttClient};
 use bairelay::mqtt_dispatch::dispatch_control;
 use bairelay::mqtt_loop::{
 	build_broker_config, build_rtsp_users, classify_event, handle_connack, publish_shutdown_fanout,
@@ -24,7 +25,6 @@ use bairelay::mqtt_loop::{
 use bairelay::orchestrator::Orchestrator;
 use bairelay::run_support::{camera_names, load_validated_config};
 use bairelay::watchdog::Watchdog;
-use bairelay_mqtt::{parse_control_message, MqttEventLoop, SharedMqttClient};
 
 /// Concurrent-RTSP-connection cap. Picked an order of magnitude above
 /// realistic deployments (a handful of clients × a handful of cameras)
@@ -151,7 +151,7 @@ async fn async_main() -> Result<()> {
 		(Some(broker_config), true) => {
 			let client_id = format!("bairelay-{}", std::process::id());
 			let (client, event_loop) =
-				bairelay_mqtt::connect(&broker_config, &client_id, &topic_prefix)
+				bairelay::mqtt::connect(&broker_config, &client_id, &topic_prefix)
 					.context("Failed to create MQTT client")?;
 			info!(broker = %broker_config.broker_addr, port = broker_config.port, prefix = %topic_prefix, client_id = %client_id, "MQTT client created");
 			Some((client, event_loop))
@@ -177,7 +177,7 @@ async fn async_main() -> Result<()> {
 	// installed, which we ignore (idempotent across re-execs).
 	let tls_loaded: Option<bairelay::tls_load::LoadedTls> =
 		if let Some(ref cert_path) = config.certificate {
-			bairelay_rtsp::server::install_crypto_provider();
+			bairelay::rtsp::server::install_crypto_provider();
 			Some(
 				bairelay::tls_load::load_server_tls(
 					cert_path,
@@ -215,7 +215,7 @@ async fn async_main() -> Result<()> {
 				features = d.features.len(),
 				"HA MQTT discovery enabled"
 			);
-			bairelay_mqtt::DiscoveryPublisher::new(
+			bairelay::mqtt::DiscoveryPublisher::new(
 				client.clone(),
 				topic_prefix.clone(),
 				d.topic.clone(),
@@ -381,7 +381,7 @@ async fn async_main() -> Result<()> {
 	// "started" log line. Without pre-bind, the operator sees a
 	// successful-startup log even though the listener never bound.
 	if cli.wants_rtsp() {
-		let provider: Arc<dyn bairelay_rtsp::provider::StreamProvider> = Arc::new(
+		let provider: Arc<dyn bairelay::rtsp::provider::StreamProvider> = Arc::new(
 			bairelay::camera_provider::CameraProvider::new(orchestrator.cameras_arc()),
 		);
 
@@ -394,7 +394,7 @@ async fn async_main() -> Result<()> {
 			let listener = tokio::net::TcpListener::bind(bind).await.with_context(|| {
 				format!("RTSP bind failed on {}:{}", rtsp_bind_addr, rtsp_bind_port)
 			})?;
-			let server_config = bairelay_rtsp::server::ServerConfig {
+			let server_config = bairelay::rtsp::server::ServerConfig {
 				bind,
 				realm: "bairelay".to_string(),
 				users: rtsp_users.clone(),
@@ -403,7 +403,7 @@ async fn async_main() -> Result<()> {
 			};
 			let provider_plain = Arc::clone(&provider);
 			sup.spawn("rtsp", move |cancel| async move {
-				if let Err(e) = bairelay_rtsp::server::RtspServer::serve_with_listener(
+				if let Err(e) = bairelay::rtsp::server::RtspServer::serve_with_listener(
 					listener,
 					server_config,
 					provider_plain,
@@ -434,7 +434,7 @@ async fn async_main() -> Result<()> {
 				.with_context(|| {
 					format!("RTSPS bind failed on {}:{}", rtsp_bind_addr, tls_bind_port)
 				})?;
-			let server_config = bairelay_rtsp::server::ServerConfig {
+			let server_config = bairelay::rtsp::server::ServerConfig {
 				bind: tls_bind,
 				realm: "bairelay".to_string(),
 				users: rtsp_users,
@@ -443,7 +443,7 @@ async fn async_main() -> Result<()> {
 			};
 			let provider_tls = Arc::clone(&provider);
 			sup.spawn("rtsps", move |cancel| async move {
-				if let Err(e) = bairelay_rtsp::server::RtspServer::serve_with_listener(
+				if let Err(e) = bairelay::rtsp::server::RtspServer::serve_with_listener(
 					listener,
 					server_config,
 					provider_tls,
@@ -472,7 +472,7 @@ async fn async_main() -> Result<()> {
 	// Both subsystems pre-bind synchronously below, so a UDP / TCP port
 	// conflict halts startup before either subsystem logs "started".
 	{
-		let registry = bairelay_wake_server::make_registry();
+		let registry = bairelay::wake_server::make_registry();
 
 		if let Some(ws_block) = orchestrator
 			.wake_server_config()
@@ -483,7 +483,7 @@ async fn async_main() -> Result<()> {
 				.parse()
 				.with_context(|| format!("Invalid wake-server bind IP {}", rtsp_bind_addr))?;
 			let runtime =
-				bairelay_wake_server::config::RuntimeConfig::from_block(&ws_block, bind_ip)
+				bairelay::wake_server::config::RuntimeConfig::from_block(&ws_block, bind_ip)
 					.map_err(|e| anyhow::anyhow!("[wake_server] {e}"))?;
 			let middleman_addr = std::net::SocketAddr::new(runtime.bind, runtime.middleman_port);
 			let register_addr = std::net::SocketAddr::new(runtime.bind, runtime.register_port);
@@ -497,7 +497,7 @@ async fn async_main() -> Result<()> {
 			let register_port = runtime.register_port;
 			let registry_for_server = registry.clone();
 			sup.spawn("wake_server", move |cancel| async move {
-				if let Err(e) = bairelay_wake_server::run_with_sockets(
+				if let Err(e) = bairelay::wake_server::run_with_sockets(
 					runtime,
 					registry_for_server,
 					middleman_sock,
@@ -553,7 +553,6 @@ async fn async_main() -> Result<()> {
 			let registry_for_pl = registry.clone();
 			let cameras_for_pl = orchestrator.cameras_arc();
 			let mqtt_for_pl = orchestrator.mqtt_client().cloned();
-			let prefix_for_pl = orchestrator.topic_prefix().to_string();
 			let bind_port_log = pl_block.push_listener_port;
 			sup.spawn("push_listener", move |cancel| async move {
 				if let Err(e) = bairelay::push_listener::run_with_listener(
@@ -562,7 +561,6 @@ async fn async_main() -> Result<()> {
 					registry_for_pl,
 					cameras_for_pl,
 					mqtt_for_pl,
-					prefix_for_pl,
 					cancel,
 				)
 				.await

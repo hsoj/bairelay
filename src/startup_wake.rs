@@ -27,7 +27,7 @@ const PER_CAMERA_TIMEOUT: Duration = Duration::from_secs(30);
 /// been requested.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Maximum time allowed for the synchronous `get_snapshot` round trip.
+/// Maximum time allowed for the synchronous snapshot round trip.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Poll interval while waiting for the first I-frame.
@@ -112,7 +112,7 @@ async fn warm_one(
 	name: &str,
 	cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-	use bairelay_rtsp::url::StreamKind;
+	use crate::rtsp::url::StreamKind;
 
 	tracing::info!(camera = %name, "Warming last-frame buffer");
 
@@ -187,17 +187,17 @@ async fn warm_one(
 	Ok(())
 }
 
-/// Request a JPEG snapshot via [`CameraDriver::get_snapshot`] (bounded
+/// Request a JPEG snapshot via [`Camera::snapshot`] (bounded
 /// by [`SNAPSHOT_TIMEOUT`]) and push successful bytes into
 /// `last_frame`. Errors / timeouts log at warn and leave the buffer
 /// untouched. Lifted out of [`warm_one`] so behaviour tests can drive
 /// it against a `FakeCamera` without the stream / audio dependencies.
 pub(crate) async fn capture_snapshot_into_buffer(
-	camera: &std::sync::Arc<dyn bairelay_neolink_core::bc_protocol::CameraDriver>,
+	camera: &std::sync::Arc<dyn crate::camera::Camera>,
 	name: &str,
-	last_frame: &bairelay_rtsp::buffer::LastFrameBuffer,
+	last_frame: &crate::rtsp::buffer::LastFrameBuffer,
 ) {
-	match tokio::time::timeout(SNAPSHOT_TIMEOUT, camera.get_snapshot()).await {
+	match tokio::time::timeout(SNAPSHOT_TIMEOUT, camera.snapshot()).await {
 		Ok(Ok(bytes)) => {
 			last_frame.set_jpeg(bytes::Bytes::from(bytes));
 			tracing::info!(camera = %name, "Captured startup JPEG snapshot");
@@ -226,9 +226,9 @@ pub(crate) async fn capture_snapshot_into_buffer(
 /// streaming the reader task only upgrades on observation, never
 /// closes the window.
 pub(crate) async fn observe_audio_presence(
-	sdp: &std::sync::Arc<std::sync::RwLock<bairelay_rtsp::sdp::SdpParams>>,
+	sdp: &std::sync::Arc<std::sync::RwLock<crate::rtsp::sdp::SdpParams>>,
 	deadline: std::time::Duration,
-) -> Option<bairelay_rtsp::codec::AudioCodec> {
+) -> Option<crate::rtsp::codec::AudioCodec> {
 	let start = std::time::Instant::now();
 	loop {
 		if let Some(a) = sdp.read().expect("sdp lock poisoned").audio.as_ref() {
@@ -244,8 +244,8 @@ pub(crate) async fn observe_audio_presence(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bairelay_rtsp::codec::AudioCodec;
-	use bairelay_rtsp::sdp::{AudioParams, SdpParams};
+	use crate::rtsp::codec::AudioCodec;
+	use crate::rtsp::sdp::{AudioParams, SdpParams};
 	use std::sync::{Arc, RwLock};
 	use std::time::Duration;
 
@@ -289,15 +289,16 @@ mod tests {
 	/// those exact bytes into the shared `LastFrameBuffer`.
 	#[tokio::test]
 	async fn capture_snapshot_into_buffer_warms_last_frame() {
-		use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
-		use bairelay_rtsp::buffer::LastFrameBuffer;
+		use crate::camera::Camera;
+		use crate::fake_camera::FakeCameraBuilder;
+		use crate::rtsp::buffer::LastFrameBuffer;
 
 		let jpeg_bytes: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xAA, 0xBB];
 		let expected = jpeg_bytes.clone();
 		let fake = FakeCameraBuilder::new()
 			.with_snapshot(move || Ok(jpeg_bytes.clone()))
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let lfb = LastFrameBuffer::new();
 		capture_snapshot_into_buffer(&driver, "cam1", &lfb).await;
@@ -313,17 +314,18 @@ mod tests {
 	/// where an error path silently writes garbage into the buffer.
 	#[tokio::test]
 	async fn capture_snapshot_into_buffer_leaves_buffer_empty_on_error() {
-		use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
-		use bairelay_rtsp::buffer::LastFrameBuffer;
+		use crate::camera::Camera;
+		use crate::fake_camera::FakeCameraBuilder;
+		use crate::rtsp::buffer::LastFrameBuffer;
 
 		let fake = FakeCameraBuilder::new()
 			.with_snapshot(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"camera declined snapshot",
 				))
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 
 		let lfb = LastFrameBuffer::new();
 		capture_snapshot_into_buffer(&driver, "cam1", &lfb).await;
@@ -485,9 +487,9 @@ mod tests {
 	async fn warm_last_frame_buffers_completes_with_inert_source() {
 		use crate::camera::CameraHandle;
 		use crate::config::test_helpers::minimal_camera_config;
+		use crate::fake_camera::FakeCameraBuilder;
+		use crate::rtsp::url::StreamKind;
 		use crate::stream_source::StreamSource;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
-		use bairelay_rtsp::url::StreamKind;
 		use std::collections::HashMap;
 		use std::sync::Arc as StdArc;
 
@@ -498,7 +500,7 @@ mod tests {
 			.build();
 		// Prove the fake is dyn-compatible (same pattern the driver
 		// uses elsewhere).
-		let _: StdArc<dyn bairelay_neolink_core::bc_protocol::CameraDriver> = fake.clone();
+		let _: StdArc<dyn crate::camera::Camera> = fake.clone();
 
 		let cancel = CancellationToken::new();
 		let handle = Arc::new(CameraHandle::new(
@@ -528,11 +530,11 @@ mod tests {
 	async fn warm_last_frame_buffers_exercises_full_warm_one_happy_path() {
 		use crate::camera::CameraHandle;
 		use crate::config::test_helpers::minimal_camera_config;
+		use crate::fake_camera::FakeCameraBuilder;
+		use crate::rtsp::buffer::VideoBurst;
+		use crate::rtsp::codec::VideoCodec;
+		use crate::rtsp::url::StreamKind;
 		use crate::stream_source::StreamSource;
-		use bairelay_neolink_core::bc_protocol::FakeCameraBuilder;
-		use bairelay_rtsp::buffer::VideoBurst;
-		use bairelay_rtsp::codec::VideoCodec;
-		use bairelay_rtsp::url::StreamKind;
 		use std::collections::HashMap;
 		use std::time::Instant as StdInstant;
 
@@ -609,8 +611,9 @@ mod tests {
 	/// case above.
 	#[tokio::test]
 	async fn capture_snapshot_error_does_not_clobber_prior_frame() {
-		use bairelay_neolink_core::bc_protocol::{CameraDriver, FakeCameraBuilder};
-		use bairelay_rtsp::buffer::LastFrameBuffer;
+		use crate::camera::Camera;
+		use crate::fake_camera::FakeCameraBuilder;
+		use crate::rtsp::buffer::LastFrameBuffer;
 		use bytes::Bytes;
 
 		let good: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0xCA, 0xFE];
@@ -619,12 +622,12 @@ mod tests {
 
 		let fake = FakeCameraBuilder::new()
 			.with_snapshot(|| {
-				Err(bairelay_neolink_core::bc_protocol::Error::Other(
+				Err(crate::baichuan::bc_protocol::Error::Other(
 					"snapshot declined",
 				))
 			})
 			.build();
-		let driver: Arc<dyn CameraDriver> = fake;
+		let driver: Arc<dyn Camera> = fake;
 		capture_snapshot_into_buffer(&driver, "cam1", &lfb).await;
 
 		let after = lfb.jpeg().expect("prior frame must still be present");

@@ -8,15 +8,15 @@ Static reference for the project's structure, dependencies, and runtime patterns
 
 ```
 bairelay/
-├── Cargo.toml              # workspace root + binary crate
+├── Cargo.toml              # the one crate
 ├── tarpaulin.toml          # coverage tool defaults
-├── src/                    # binary: CLI, config, orchestration, lifecycle
-├── crates/
-│   ├── core/               # bairelay_neolink_core: Baichuan protocol (vendored)
-│   ├── rtsp/               # bairelay_rtsp: RTSP server + RTP packetisation
-│   ├── mqtt/               # bairelay_mqtt: MQTT bridge + HA discovery
-│   └── wake-server/        # bairelay_wake_server: local BcUdp wake server
-├── fuzz/                   # cargo-fuzz harness (excluded from workspace)
+├── src/                    # CLI, config, orchestration, lifecycle, camera domain
+│   ├── baichuan/           # Baichuan protocol (vendored from neolink_core)
+│   ├── rtsp/               # RTSP server + RTP packetisation
+│   ├── mqtt/               # MQTT bridge + HA discovery
+│   └── wake_server/        # local BcUdp wake server
+├── benches/                # criterion: RTP packetisers, LastFrameBuffer
+├── fuzz/                   # cargo-fuzz harness (separate out-of-tree project)
 ├── docs/                   # specification, architecture, build, etc.
 └── tests/                  # integration tests, fixtures, scripts
 ```
@@ -39,19 +39,18 @@ Owns the application lifecycle:
 - RTSP `max_connections` semaphore (default 256 in the binary) caps concurrent client handlers.
 - Graceful shutdown via `CancellationToken` + supervisor-orchestrated per-task join with 2 s budget.
 
-### `crates/core/` — `bairelay_neolink_core`
+### `src/baichuan/`
 
 Vendored Baichuan protocol implementation. Modernised to edition 2021 with updated dependencies. Public surface:
 
 - `BcCamera` — async API for every camera operation: login, streaming, PTZ, motion detection, battery, LED, reboot, etc.
-- `CameraDriver` — `dyn`-compatible trait mirroring the subset of `BcCamera` the binary's non-stream code paths call. Lets test code substitute a `FakeCamera` without a live camera session.
 - `BcConnection` — TCP/UDP connection management.
 - Discovery: `Discovery` struct with `CameraDiscoverer` trait (local broadcast, remote, map, relay, cellular).
 - Protocol encoding/decoding via `nom` parser + `cookie-factory` serialiser.
 - AES-CFB encryption, MD5 challenge-response authentication.
 - `VideoStream` trait over `StreamData` so video pull loops can be tested against `MockVideoStream`.
 
-### `crates/rtsp/` — `bairelay_rtsp`
+### `src/rtsp/`
 
 Pure-Rust RTSP server:
 
@@ -71,7 +70,7 @@ Pure-Rust RTSP server:
 - Multi-track SETUP with per-SSRC RTP counters; RTCP Sender Reports are intentionally suppressed (mpv/ffmpeg re-anchor on every SR receipt — see `docs/implementation.md` § RTCP).
 - Per-session coordinator (`session_task::run`) spawns parallel `video_dispatch_loop` + `audio_dispatch_loop`. Each holds its own `broadcast::Receiver`, so video FU bursts can't queue audio behind them; the TCP-interleaved write mutex holds at one `$-framed` packet at a time.
 
-### `crates/mqtt/` — `bairelay_mqtt`
+### `src/mqtt/`
 
 MQTT bridge:
 
@@ -80,11 +79,11 @@ MQTT bridge:
 - Home Assistant MQTT discovery payloads (light, camera, binary_sensor, switch, select, button, sensor).
 - `test_support::mock_client()` returning a `MockHandle` capture sink for unit tests.
 
-### `crates/wake-server/` — `bairelay_wake_server`
+### `src/wake_server/`
 
 Local replacement for Reolink's P2P cloud. Full wire-level reference: `docs/cloud-interception.md` § Part I.
 
-- BcUdp Discovery framing reused from `bairelay_neolink_core::bcudp` (header + CRC + XOR XML).
+- BcUdp Discovery framing reused from `bairelay::baichuan::bcudp` (header + CRC + XOR XML).
 - Two `tokio::net::UdpSocket` listeners (`middleman` port 9999, `register` port 58200) sharing one `Arc<CameraRegistry>` plus an `Arc<SessionAnchors>` map keyed by camera UID (issued at `M2D_Q_R`, echoed in `R2D_R_R` — cameras anchor to it).
 - Middleman: `C2M_Q` (clients) → `M2C_Q_R`; `D2M_Q` (cameras on boot) → `M2D_Q_R` issuing a fresh session token + ac.
 - Register: `D2R_R` (camera registration) → `R2D_R_R{rsp:-4, ac}`; `D2R_HB` upserts UID → source-addr at `Instant::now()`; `C2R_C` for a fresh entry spawns 10 × `R2D_C` at 100 ms then replies `R2C_C_R` + `R2C_T`; `D2R_DISC` acked with `R2D_DC_R`.
@@ -109,7 +108,7 @@ Local replacement for Reolink's P2P cloud. Full wire-level reference: `docs/clou
 | XML serialisation      | `quick-xml`            | 0.36.x  | Serialiser + deserialiser        |
 | Byte buffers           | `bytes`                | 1.x     | XML serialisation buffer         |
 
-### RTSP / RTP (`crates/rtsp/`)
+### RTSP / RTP (`src/rtsp/`)
 
 | Purpose                | Crate                  | Version | Notes                            |
 |------------------------|------------------------|---------|----------------------------------|
@@ -120,7 +119,7 @@ Local replacement for Reolink's P2P cloud. Full wire-level reference: `docs/clou
 
 H.264 NAL → RTP (RFC 6184) and H.265 NAL → RTP (RFC 7798) packetisation are implemented in-crate — no existing Rust crate covers this.
 
-### MQTT (`crates/mqtt/`)
+### MQTT (`src/mqtt/`)
 
 | Purpose                | Crate                  | Version |
 |------------------------|------------------------|---------|
@@ -128,7 +127,7 @@ H.264 NAL → RTP (RFC 6184) and H.265 NAL → RTP (RFC 7798) packetisation are 
 | JSON (HA discovery)    | `serde_json`           | 1.x     |
 | Base64 (preview)       | `base64`               | 0.22.x  |
 
-### Protocol core (`crates/core/`)
+### Protocol core (`src/baichuan/`)
 
 | Purpose                | Crate                  | Version | Notes                            |
 |------------------------|------------------------|---------|----------------------------------|
@@ -139,9 +138,9 @@ H.264 NAL → RTP (RFC 6184) and H.265 NAL → RTP (RFC 7798) packetisation are 
 | XML                    | `quick-xml`            | 0.36.x  | Camera XML messages              |
 | CRC                    | `crc32fast`            | 1.x     | Packet checksums                 |
 
-### Wake server (`crates/wake-server/`)
+### Wake server (`src/wake_server/`)
 
-Minimal additional dependencies — uses `tokio` UDP, `crc32fast`, `quick-xml`, `serde` / `toml` from the workspace.
+Minimal additional dependencies — uses `tokio` UDP, `crc32fast`, `quick-xml`, `serde` / `toml`, all already present for other modules.
 
 ## Architecture patterns
 
@@ -230,7 +229,9 @@ Cleared on service restart; repopulated by the startup-wake cycle. Never persist
 
 ### Placeholder streams during gaps
 
-Per-`StreamSource` `GapState { Live, Bridging }`. A 200 ms ticker compares `last_live_frame_at` against `gap_threshold_secs` (default 1.0). On exceedance, the source flips to `Bridging` and re-broadcasts cached `VideoBurst::iframe_nals` with synthesised PTS so RTSP clients see continuous RTP. Audio packets are dropped on the wire while bridging but per-codec PTS counters advance via the camera's audio cadence so A/V stays aligned on Live resume.
+The decision logic is a pure state machine — `gap_bridging::BridgingPolicy` — holding `GapState { Live, Bridging }`, the last upstream arrival, and the replay-PTS counters. `src/stream_source.rs` drives it: a 200 ms ticker calls `on_tick(now, replay_anchor)`, and the policy flips to `Bridging` once upstream has been silent longer than `gap_threshold_secs` (default 1.0), returning the synthesised PTS at which the driver should re-broadcast the cached `VideoBurst::iframe_nals`. RTSP clients therefore see continuous RTP. Audio packets are dropped on the wire while bridging but per-codec PTS counters advance via the camera's audio cadence so A/V stays aligned on Live resume.
+
+Because the policy takes time as a parameter and performs no I/O, its edge cases (threshold boundary, monotonicity across a long gap, `u32` PTS wrap, resume re-anchoring) are unit-tested as values in `src/gap_bridging.rs` rather than through task choreography.
 
 Per-camera `PreviewState { Live, Connecting, Sleeping }` published via `watch::Sender`. The MQTT preview publisher composites a caption (e.g. `SLEEPING`) on stale JPEGs so HA dashboards distinguish live from stale.
 
@@ -238,11 +239,12 @@ Per-camera `PreviewState { Live, Connecting, Sleeping }` published via `watch::S
 
 | Trait              | Location                                            | Purpose                                              |
 |--------------------|-----------------------------------------------------|------------------------------------------------------|
-| `CameraDriver`     | `bairelay_neolink_core::bc_protocol::camera_driver`          | Subset of `BcCamera` the binary calls                |
-| `CameraDiscoverer` | `bairelay_neolink_core::bc_protocol::connection::discovery`  | Discovery fallback chain (local/remote/map/relay)    |
-| `VideoStream`      | `bairelay_neolink_core::bc_protocol::stream`                 | `BcMedia` pull loop over `StreamData`                |
+| `Camera`           | `bairelay::camera` (binary)                         | What bairelay needs a camera to do; `BcCamera` implements it in `src/bc_camera.rs` |
+| `StatusReporter`   | `bairelay::camera_status` (binary)                  | Where camera status events go; `src/mqtt_status.rs` implements it |
+| `CameraDiscoverer` | `bairelay::baichuan::bc_protocol::connection::discovery`  | Discovery fallback chain (local/remote/map/relay)    |
+| `VideoStream`      | `bairelay::baichuan::bc_protocol::stream`                 | `BcMedia` pull loop over `StreamData`                |
 | `PacketSource`     | `bairelay::stream_source` (binary)                  | `BcMedia` injection for translator-loop tests        |
-| `StreamProvider`   | `bairelay_rtsp::provider`                           | RTSP server's view of a camera                       |
+| `StreamProvider`   | `bairelay::rtsp::provider`                           | RTSP server's view of a camera                       |
 
 Production impls forward to the concrete types (`BcCamera`, `Discovery`, `StreamData`, etc.); test impls (`FakeCamera`, `ScriptedDiscoverer`, `MockVideoStream`, `FakeStreamProvider`) live alongside and let unit tests exercise the same code paths a live camera would drive.
 
@@ -275,10 +277,10 @@ Scripts can branch on the exit code without parsing stdout.
 Bairelay release artefacts are bit-for-bit reproducible from `(commit, target triple, rustc version)`. The properties this rests on:
 
 - `Cargo.lock` is committed; every CI and release `cargo`/`cross` invocation passes `--locked`.
-- No `git = "..."` dependencies — everything resolves through `crates.io` or workspace `path =`.
-- `build.rs` is absent. The version comes from `env!("CARGO_PKG_VERSION")`, sourced from `[workspace.package].version`.
+- No `git = "..."` dependencies — everything resolves through `crates.io`.
+- `build.rs` is absent. The version comes from `env!("CARGO_PKG_VERSION")`, sourced from `[package].version`.
 - No build-time wall-clock timestamps, hostnames, usernames, or absolute build paths are embedded. Every `SystemTime::now()` / `OffsetDateTime::now_utc()` in the tree is runtime.
-- `[profile.release]` sets `strip = "symbols"`. The release workflow additionally exports `RUSTFLAGS=--remap-path-prefix=...` to rewrite the cargo registry + workspace paths that otherwise leak into panic strings. Cargo's unified `trim-paths` profile key remains unstable in Cargo 1.95 — swap in when it stabilises.
+- `[profile.release]` sets `strip = "symbols"`. The release workflow additionally exports `RUSTFLAGS=--remap-path-prefix=...` to rewrite the cargo registry + source paths that otherwise leak into panic strings. Cargo's unified `trim-paths` profile key remains unstable in Cargo 1.95 — swap in when it stabilises.
 - `SOURCE_DATE_EPOCH` is not consulted because no build date is embedded; the contract is the env-var-free baseline. Any future build-time date must go through `SOURCE_DATE_EPOCH` rather than `SystemTime::now()`.
 
-Out-of-tree caveat: `aws-lc-rs` (pulled via `rustls = "0.23"`) compiles C code whose `__DATE__`/`__TIME__` may leak into the static archive. If Debian packaging surfaces it, the documented fallback is the rustls `ring` feature flag — one call site in `crates/rtsp/src/server/tls.rs::install_*`.
+Out-of-tree caveat: `aws-lc-rs` (pulled via `rustls = "0.23"`) compiles C code whose `__DATE__`/`__TIME__` may leak into the static archive. If Debian packaging surfaces it, the documented fallback is the rustls `ring` feature flag — one call site in `src/rtsp/server/tls.rs::install_*`.
