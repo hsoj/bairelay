@@ -1,10 +1,10 @@
 # The Baichuan (BC) Protocol — Reverse-Engineered Specification
 
-Reolink's proprietary camera-control protocol, as reconstructed from the bairelay implementation (`src/baichuan/`), its captured wire fixtures, and the public reverse-engineering corpus (neolink, its Wireshark dissector, reolink_aio). **Reolink has published nothing about this protocol.** Every statement below is derived from observed traffic or from decompiled/inferred client behaviour.
+Reolink's proprietary camera-control protocol, reconstructed from packet captures against live hardware and cross-checked against the independent client implementations listed in §14. **Reolink has published nothing about this protocol.** Every statement below is derived from observed traffic or from decompiled/inferred client behaviour.
 
 Scope: what a client needs to speak BC to a Reolink camera. It covers the three independent framings — **BC** (control, TCP 9000), **BcUdp** (P2P transport + discovery), **BcMedia** (media substream) — plus the authentication suite and the cloud-side wake protocol.
 
-Companion documents: `docs/cloud-interception.md` (operational detail on the wake server and push listener), `docs/architecture.md` (how bairelay is put together).
+This document specifies the protocol, not any implementation of it. Where implementations are named it is as evidence for a claim or as a record of where they disagree, never as a normative reference.
 
 ---
 
@@ -14,7 +14,7 @@ Each claim carries one of:
 
 | Mark | Meaning |
 |------|---------|
-| **[V]** | Verified — round-tripped against real hardware, or pinned by a byte-exact fixture in this repo |
+| **[V]** | Verified — confirmed against live hardware, or pinned by a byte-exact packet capture |
 | **[O]** | Observed — seen on the wire, semantics inferred from context |
 | **[I]** | Inferred — reconstructed from client behaviour or decompilation, not directly confirmed |
 | **[?]** | Unknown — field exists, purpose undetermined |
@@ -110,7 +110,7 @@ offset  size  field            notes
 
 Total header length is therefore **20 bytes** for classes `0x6514` / `0x6614` and **24 bytes** for `0x6414` / `0x0000`. **[V]**
 
-> **Reconciliation with the neolink dissector.** The dissector models bytes 12–15 as a single 32-bit "XML encryption offset" decomposed as `channel_id | stream_id | reserved(00) | message_handle`. bairelay reads bytes 14–15 as a little-endian `msg_num`. These agree: the reserved byte is the low half of `msg_num` and is `00` whenever the handle fits in a byte. Cameras that issue handles ≥ 256 (B800 `subStream` = 256, `externStream` = 1024) make the `msg_num` reading the correct one. **[V]**
+> **Two readings of bytes 12–15.** The neolink Wireshark dissector models them as a single 32-bit "XML encryption offset" decomposed as `channel_id | stream_id | reserved(00) | message_handle`. Other implementations read bytes 14–15 as a little-endian `msg_num`. The two agree in the common case: the reserved byte is the low half of `msg_num` and is `00` whenever the handle fits in a byte. Cameras that issue handles ≥ 256 (B800 `subStream` = 256, `externStream` = 1024) make the `msg_num` reading the correct one, and it is the one specified here. **[V]**
 
 Byte 12 (`channel_id`) doubles as the **encryption offset** fed to the BCEncrypt keystream (§3.2) — a single field with two jobs. **[V]**
 
@@ -118,7 +118,7 @@ Byte 12 (`channel_id`) doubles as the **encryption offset** fed to the BCEncrypt
 
 `MAGIC_HEADER = 0x0abcdef0`, on the wire as `f0 de bc 0a`. **[V]**
 
-A byte-reversed magic `0x0fedcba0` (`a0 cb ed 0f`) appears on some replies — notably `snap` JPEG payloads — with every other header field still little-endian. It appears to be a hint about *binary payload* endianness rather than header endianness. Every known client ignores the distinction; bairelay accepts both magics identically and drops the hint. **[O]**
+A byte-reversed magic `0x0fedcba0` (`a0 cb ed 0f`) appears on some replies — notably `snap` JPEG payloads — with every other header field still little-endian. It appears to be a hint about *binary payload* endianness rather than header endianness. Every surveyed client ignores the distinction and accepts both magics identically. **[O]**
 
 ### 2.3 Message classes
 
@@ -198,7 +198,7 @@ A special legacy variant, `LoginUpgrade`, carries **no body at all** (header onl
 | `417` | Expectation failed — e.g. sigV3 login sent with the wrong `class` **[V]** |
 | `421` | Service unavailable for this identity — account cameras answer `AbilityInfo` (151) with this **[V]** |
 | `0xdcXX` | Client → camera: *highest encryption I will accept* (§3.1) **[V]** |
-| `0xddXX` | Camera → client: *encryption we will use* (§3.1) **[V]** |
+| `0xddXX` | Camera → client: *the encryption that will be used* (§3.1) **[V]** |
 
 The `0xdc` / `0xdd` values are a deliberate overload of the response-code field during login only, distinguished by the high byte.
 
@@ -225,7 +225,7 @@ The camera replies with the selection in the low byte of a `0xddXX` code: **[V]*
 | `0xdd00` | Unencrypted |
 | `0xdd01` | BCEncrypt |
 | `0xdd02` | AES (control only) |
-| `0xdd03` | Seen on Argus 2 firmware; **unhandled by bairelay** — see §13 |
+| `0xdd03` | Seen on Argus 2 firmware; meaning undetermined — see §13 |
 | `0xdd12` | FullAes (control + media) |
 
 The camera never selects above the client's ceiling, but may select below it. **[V]**
@@ -415,7 +415,7 @@ V=1;C=…,P2=v3,P3=X25519,P4=<camera pubkey b64>,P5=<sign b64>,P6=<iterations>;
 
 ## 5. Message catalogue
 
-`msg_id` values. Entries marked ⚑ are cross-referenced against the neolink dissector's `messages.md`; the rest are bairelay's own.
+`msg_id` values. Entries marked ⚑ also appear in the neolink dissector's `messages.md`; the remainder are attested by client implementations and captures but absent from that table.
 
 ### 5.1 Session and system
 
@@ -491,9 +491,9 @@ V=1;C=…,P2=v3,P3=X25519,P4=<camera pubkey b64>,P5=<sign b64>,P6=<iterations>;
 | 217 | `<EmailTask>` read | C→D |
 | 124 | `<PushInfo>` | C→D |
 
-### 5.6 Documented elsewhere, not implemented here
+### 5.6 Attested but not exercised
 
-From the neolink dissector, present in firmware but outside bairelay's battery-camera scope: **[O]**
+From the neolink dissector. Present in firmware, but not exercised by any implementation surveyed for this document, so the payload shapes are unconfirmed: **[O]**
 
 `5–16` file operations · `25/26/78/132` `<VideoInput>` · `44/45` `<OsdChannelName>` · `52/53` `<Shelter>` · `54/55` `<RecordCfg>` · `56/57` `<Compression>` · `67` `<ConfigFileInfo>` (firmware upgrade) · `76/77` `<Ip>` · `79` `<Serial>` · `81/82` `<Record>` schedule · `102` `<HDDInfoList>` · `115` `<WifiSignal>` · `133/204` `<RfAlarm>` · `264` `<audioCfg>`
 
@@ -503,7 +503,7 @@ From the neolink dissector, present in firmware but outside bairelay's battery-c
 
 ### 6.1 Payload document
 
-The payload XML has a root element `<body>` containing exactly one (occasionally more) of the known child elements. Element names are `PascalCase` with a handful of `camelCase` exceptions (`rfAlarmCfg`). Most carry a `version` **attribute** — `1.1` on everything bairelay emits. **[V]**
+The payload XML has a root element `<body>` containing exactly one (occasionally more) of the known child elements. Element names are `PascalCase` with a handful of `camelCase` exceptions (`rfAlarmCfg`). Most carry a `version` **attribute** — `1.1` on everything observed. **[V]**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -559,7 +559,7 @@ Events and power — `AlarmEventList`, `AlarmEvent`, `RfAlarmCfg`, `TimeBlockLis
 
 System — `SystemGeneral`, `Norm`, `Dst`, `Email`, `EmailTask`, `ScheduleList`, `ServerPort`, `HttpPort`, `HttpsPort`, `RtspPort`, `RtmpPort`, `OnvifPort`, `PushInfo`, `LinkType`
 
-Field-level definitions live in `src/baichuan/bc/xml.rs`, which is the authoritative schema for this project.
+No implementation surveyed models the complete field set of any of these elements; each parses the subset it needs and tolerates the rest. Treat the list as an index of element names, not a schema.
 
 ### 6.5 The DST trap
 
@@ -651,7 +651,7 @@ offset  size  field
 
 Always 8 kHz. `duration_µs = (payload_size - 4) * 2 * 1e6 / 8000`. **[V]**
 
-> **Padding asymmetry.** Parsers pad on `payload_size % 8` — which *includes* the 4-byte sub-header — while at least one serialiser (bairelay's) pads on `data.len() % 8`, which excludes it. Round-tripping ADPCM through serialise-then-parse desyncs the stream. Real camera bytes parse correctly; synthetic ADPCM may not. **[V]**
+> **Padding asymmetry.** The wire format pads on `payload_size % 8`, which *includes* the 4-byte sub-header. At least one implementation's serialiser pads on the payload length *excluding* the sub-header, so ADPCM written by it does not round-trip through its own parser. Camera-produced bytes are unaffected; synthetic ADPCM may desync. Serialisers should pad on `payload_size`, matching the parser. **[V]**
 
 ### 7.6 Codec notes
 
@@ -716,7 +716,7 @@ offset  size  field
 
 The bitmap is a byte-per-packet truth table (`00 01 01 01 …`) covering packets *after* `packet_id`, marking which have arrived. Unacknowledged packets are retransmitted. **[O]**
 
-Observed official-client timings, which bairelay mirrors: **ack every 10 ms**, **retransmit every 500 ms**. **[V]**
+Observed official-client timings: **ack every 10 ms**, **retransmit every 500 ms**. **[V]**
 
 ### 8.4 Reliability model
 
@@ -902,12 +902,12 @@ XML
 
 Every length and count in this protocol is attacker-controlled — by a compromised camera, an on-path attacker (nothing here is authenticated), or a hostile peer on the public P2P ports. A conforming parser **must**:
 
-1. **Cap `body_len`.** A header declaring 4 GiB drives a framed reader's buffer toward 4 GiB before any payload validation runs. bairelay caps at 8 MiB; real messages are far below (a 4K snapshot is ~3 MiB, XML payloads are kilobytes, and large I-frames arrive through BcMedia framing, not BC). **[V]**
-2. **Validate `payload_offset <= body_len` before subtracting.** Otherwise the extension-length subtraction underflows — debug panic, or a release-build wrap to ~4 GiB that becomes the same OOM. **[V]**
+1. **Cap `body_len`.** A header declaring 4 GiB drives a framed reader's buffer toward 4 GiB before any payload validation runs. Observed messages sit far below 8 MiB — a 4K snapshot is ~3 MiB, XML payloads are kilobytes, and large I-frames arrive through BcMedia framing rather than BC — so a ceiling in that region rejects crafted headers without truncating legitimate traffic. **[V]**
+2. **Validate `payload_offset <= body_len` before subtracting.** Otherwise the extension-length subtraction underflows — a trap where arithmetic is checked, a wrap to ~4 GiB where it is not, which becomes the same memory exhaustion as (1). **[V]**
 3. **Cap BcUdp `payload_size` at 65535.** IPv4 bounds a datagram at 64 KiB, so any larger value is by construction crafted. **[V]**
-4. **Clamp `Extension.encryptLen` to the actual buffer length.** It is camera-supplied; an out-of-range value drives a slice out-of-bounds panic. **[V]**
-5. **Reject ADPCM `payload_size < 4`.** The sub-header subtraction underflows below that. **[V]**
-6. **Bound sigV3 `iterations`.** Camera-supplied and fed to PBKDF2; `0` breaks the KDF and a large value is a CPU-exhaustion vector. bairelay accepts `1..=1_000_000`; the observed real value is `1000`. **[V]**
+4. **Clamp `Extension.encryptLen` to the actual buffer length.** It is camera-supplied; an out-of-range value drives an out-of-bounds read. **[V]**
+5. **Reject ADPCM `payload_size < 4`.** The sub-header subtraction underflows below that, with the same consequences as (2). **[V]**
+6. **Bound sigV3 `iterations`.** Camera-supplied and fed to PBKDF2; `0` breaks the KDF and a large value is a CPU-exhaustion vector. The observed real value is `1000`, so a range such as `1..=1_000_000` bounds both failure modes with ample headroom. **[V]**
 7. **Use wrapping arithmetic in the UDP keystream.** Any `tid >= 0x60000000` overflows `u32`. **[V]**
 8. **Drop discovery packets that fail CRC** rather than erroring the listener task. Public UDP ports see junk continuously — unrelated traffic, scanners, other Reolink products, firmware variants. A CRC failure or an unknown XML verb is routine, not exceptional. **[V]**
 9. **Cap multi-chunk transfers.** The snapshot loop terminates only on a non-200 code or a dropped connection; without a ceiling a buggy camera can exhaust memory. **[V]**
@@ -930,7 +930,7 @@ Stated plainly, because the protocol's own design does not:
 
 Unresolved after this round of analysis. Each is a concrete, testable gap.
 
-1. **`0xdd03` encryption mode.** A captured Argus 2 login reply (`src/baichuan/bc/samples/battery_enc.bin`) carries `response_code = 0xdd03`. bairelay's parser accepts the packet — the deserialiser treats any non-`0x00` low byte as BCEncrypt — but the codec's negotiation table has no `0x03` arm and would return `UnknownEncryption`. Either `0x03` is a distinct mode, or it is a BCEncrypt variant. **Untested against live 0xdd03 hardware.**
+1. **`0xdd03` encryption mode.** A captured Argus 2 login reply carries `response_code = 0xdd03`, a low byte absent from the negotiation table in §3.1. Either `0x03` names a distinct mode, or it is a BCEncrypt variant. The ambiguity is easy to miss: implementations that treat *any* non-`0x00` low byte as BCEncrypt decode such a session correctly by accident, while those that match the table exactly reject it. No live `0xdd03` session has been analysed to settle which behaviour is right.
 2. **InfoV1 vs InfoV2.** Byte-identical layouts, different magics. No behavioural difference identified.
 3. **`fps` in Info frames.** On older cameras this is documented as an index into a lookup table rather than a frame rate. The table is unknown.
 4. **I-frame `unknown` fields.** Observed values `00 / 23 / 5A` at offset 20 and `00 / 06 / 29 / C3` in the additional-header remainder. Possibly NVR channel accounting.
@@ -947,35 +947,29 @@ Unresolved after this round of analysis. Each is a concrete, testable gap.
 
 ## 14. Provenance
 
-### Primary — this repository
+### Independent implementations
 
-The implementation and its fixtures are the authority for everything marked **[V]**:
+Listed alphabetically. Each was read as a separate witness to the wire format; agreement between two written in different languages is treated as stronger evidence than either alone.
 
-| Area | Path |
-|------|------|
-| BC framing | `src/baichuan/bc/{model,de,ser,codex}.rs` |
-| BC encryption | `src/baichuan/bc/crypto.rs` |
-| BC XML schema | `src/baichuan/bc/xml.rs` |
-| Wire fixtures | `src/baichuan/bc/samples/*.bin` |
-| Authentication | `src/baichuan/bc_protocol/{login,login_sigv3,login_authlogin,credentials}.rs` |
-| Message IDs | `src/baichuan/bc/model.rs` |
-| BcMedia | `src/baichuan/bcmedia/{model,de,ser}.rs` |
-| BcUdp | `src/baichuan/bcudp/{model,de,ser,xml,xml_crypto,crc}.rs` |
-| Discovery / P2P | `src/baichuan/bc_protocol/connection/discovery.rs` |
-| UDP transport | `src/baichuan/bc_protocol/connection/udpsource.rs` |
-| Wake server | `src/wake_server/`, `docs/cloud-interception.md` |
+- [borexola/neolink.net](https://github.com/borexola/neolink.net) — C#/.NET. Header codec and the BCEncrypt/AES/FullAes ladder.
+- [thirtythreeforty/neolink](https://github.com/thirtythreeforty/neolink) — Rust. The origin of most public BC knowledge, and the ancestor of several later implementations, so it is not fully independent of them.
+- [neolink `dissector/baichuan.lua`](https://github.com/thirtythreeforty/neolink/blob/master/dissector/baichuan.lua) — Wireshark dissector; deobfuscates XML in command messages. Its `protocol.md` and `messages.md` are the only prose specification predating this one, and are the source for the ⚑-marked message IDs in §5 and the alternate byte 12–15 reading in §2.1.
+- [starkillerOG/reolink_aio](https://github.com/starkillerOG/reolink_aio) — Python. Independently confirms `DEFAULT_BC_PORT = 9000`, `HEADER_MAGIC = "f0debc0a"`, the `XML_KEY` bytes, `AES_IV = "0123456789abcdef"`, and the UDP key words.
+- [verheesj/reolink-aio-ts](https://github.com/verheesj/reolink-aio-ts) — TypeScript.
 
-`src/baichuan/` derives from [neolink_core](https://github.com/thirtythreeforty/neolink); the cloud/account paths (sigV3, `authLogin`, the wake server, the `D2M_Q` / `M2D_Q_R` camera-side verbs) are bairelay's own additions from live Argus captures.
+Background: [Hacking Reolink cameras for fun and profit](https://www.thirtythreeforty.net/posts/hacking-reolink-cameras/) covers the protocol's discovery and the "port 9000" naming.
 
-### Secondary — public reverse-engineering corpus
+### What is documented here for the first time
 
-- [thirtythreeforty/neolink](https://github.com/thirtythreeforty/neolink) — the original Rust RTSP bridge and the origin of most public BC knowledge.
-- [neolink `dissector/baichuan.lua`](https://github.com/thirtythreeforty/neolink/blob/master/dissector/baichuan.lua) — Wireshark dissector; deobfuscates XML in command messages. Its `protocol.md` and `messages.md` are the only prose specification that predates this one, and are the source for the ⚑-marked message IDs and the byte 12–15 decomposition in §2.1.
-- [Hacking Reolink cameras for fun and profit](https://www.thirtythreeforty.net/posts/hacking-reolink-cameras/) — background on the protocol's discovery and the "port 9000" naming.
-- [starkillerOG/reolink_aio](https://github.com/starkillerOG/reolink_aio) — Python implementation; independently confirms `DEFAULT_BC_PORT = 9000`, `HEADER_MAGIC = "f0debc0a"`, the `XML_KEY` bytes, `AES_IV = "0123456789abcdef"`, and the four-word UDP key.
-- [verheesj/reolink-aio-ts](https://github.com/verheesj/reolink-aio-ts) — TypeScript port; useful as a third independent reading of the same wire format.
-- [borexola/neolink.net](https://github.com/borexola/neolink.net) — C#/.NET implementation covering the header codec and the BCEncrypt/AES/FullAes ladder.
+The following are not covered by any source above and rest on captures against live hardware plus reverse-engineering of the official Reolink client: the **sigV3 / ECDHE login** (§4.4–4.5, incl. the PBKDF2 derivation and the post-login FullAes switch), the camera-local **`authLogin` / `getAccesskey`** exchange (§4.3), the **camera-side P2P verbs** `D2M_Q` / `M2D_Q_R` / `D2R_R` / `R2D_R_R` / `D2R_HB` (§9), and the **battery-camera boot and wake sequences** (§9.6–9.7). These carry correspondingly more `[I]` marks.
 
-### Method
+### Method and limits
 
-Everything here comes from packet capture against real hardware, fixture-pinned round-trip tests, and — for the sigV3 and `authLogin` derivations — reverse-engineering of the official Reolink app (`BaichuanDevice::signatureLoginV3`, `BaichuanDevice.cpp` `authCodeLogin`). Target hardware for the battery-specific paths is Argus-class on firmware `v3.0.x`. No Reolink documentation, source, or specification was consulted, because none exists publicly.
+Packet capture against live hardware; byte-exact replay of captured frames through independent parsers; cross-reading of the implementations above. The sigV3 and `authLogin` derivations come from reverse-engineering the official Reolink application (`BaichuanDevice::signatureLoginV3`, `BaichuanDevice.cpp` `authCodeLogin`). No Reolink documentation, source, or specification was consulted, because none is published.
+
+Known limits on coverage, which bound how far the `[V]` marks generalise:
+
+- Hardware for the battery-specific paths was **Argus-class on firmware `v3.0.x`**. Model-dependent behaviour is called out where known (§6.3 stream handles differ on E1, Swann and B800), but the survey is not broad.
+- **NVRs and doorbells were not tested.** `channel_id` is specified as the NVR channel selector on the strength of field naming and single-channel captures only.
+- The message catalogue (§5) is skewed toward what battery-camera clients exercise. §5.6 lists IDs attested only by the dissector, and their payload shapes are unverified.
+- Nothing here was tested against firmware newer than the sigV3 rollout, which is the most actively changing part of the protocol.
