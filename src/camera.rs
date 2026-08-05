@@ -42,7 +42,7 @@ use crate::wake_lock::WakeLockCounter;
 // to implement it. Split into role traits (`TR-3`): each consumer
 // names only the capability it drives, so a PTZ handler cannot reboot
 // a camera and the compiler enforces it. `src/bc_camera.rs` implements
-// every role over Baichuan; `src/fake_camera.rs` scripts them for
+// every role over Baichuan; `src/fake_camera/` scripts them for
 // tests. All roles are dyn-compatible (plain `async fn` via
 // `async-trait`, no generics); wiring holds `Arc<dyn Camera>` and
 // upcasts to the role a consumer needs.

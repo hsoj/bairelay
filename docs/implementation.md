@@ -8,7 +8,7 @@ Static structure and dependency tables live in `docs/architecture.md`.
 
 ## `baichuan` API surface
 
-`BcCamera` is the production type, but nothing outside `src/bc_camera.rs` names it. Production code holds `Arc<dyn Camera>` — the trait declared in `src/camera.rs` — which covers the whole session including `end_session()` (logout) and `start_video()`, so there is no second concrete handle to keep in step.
+`BcCamera` is the production type, but nothing outside `src/bc_camera.rs` names it. The session owner (`src/camera.rs`) holds `Arc<dyn Camera>` — the composed trait declared in `src/camera.rs` over eight role traits (`Session`, `Video`, `Stills`, `Events`, `Power`, `Lighting`, `Ptz`, `DeviceAdmin`) — and hands each task an upcast clone of just the role it drives (`battery_poller` gets `Arc<dyn Power>`, `StreamSource::start` gets `Arc<dyn Video>`). Routing points that fan a command of unknown role out to narrow leaves (`mqtt_dispatch`, `oneshot/dispatch.rs`) keep the composed handle; everything else is bound to its role, so there is no second concrete handle to keep in step and no consumer can reach past its role.
 
 ### Methods we rely on in production
 
@@ -334,7 +334,7 @@ Test helpers in `baichuan` (`MockConnection`, `BcCamera::from_mock_connection`, 
 
 ### `FakeCameraBuilder` (`bairelay::fake_camera`)
 
-Closure-per-method `Camera` impl:
+`src/fake_camera/` mirrors production's composition: `roles.rs` holds one scripted fake per camera role trait (`FakeSession`, `FakeVideo`, `FakeStills`, `FakeEvents`, `FakePower`, `FakeLighting`, `FakePtz`, `FakeDeviceAdmin`), and `FakeCamera` composes all eight — the blanket impl supplies `Camera`, exactly as it does for `BcCamera`. A test for a narrow consumer builds only its role fake (`FakePtz::new().with_ptz_error(...).build()` satisfies `&dyn Ptz`); whole-session tests use the builder, closure-per-method:
 
 ```rust
 let fake = FakeCameraBuilder::new()
@@ -352,7 +352,7 @@ assert_eq!(*fake.calls().reboot.lock().unwrap(), 1);
 assert_eq!(fake.calls().pir_set.lock().unwrap().clone(), vec![true]);
 ```
 
-Unset reads panic with `FakeCamera: <method> not configured for this test` via a single `unset(method) -> !` helper. `*_pending()` builders return a never-resolving future for testing 30 s timeout error branches under `tokio::time::pause`.
+Unset reads panic with `FakeCamera: <method> not configured for this test` via a single `unset(method) -> !` helper. `*_pending()` builders return a never-resolving future for testing 30 s timeout error branches under `tokio::time::pause`. `with_*_error(...)` setters (`with_end_session_error`, `with_pir_set_error`, `with_siren_error`, `with_reboot_error`, `with_set_time_error`, `with_ptz_error`) make side-effect methods fail after recording the call, so command failure paths assert both the attempt and the error handling. All eight role fakes record into one shared flat `FakeCalls` ledger — field names are unique across roles, and assertions address fields directly.
 
 ### `MockConnection` (`bairelay::baichuan::bc_protocol::connection::mock`)
 

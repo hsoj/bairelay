@@ -58,7 +58,7 @@ Read `docs/architecture.md` before non-trivial work; `docs/implementation.md` is
 - **New code goes in `src/` as a module. There are no crates to add to.** Separation is by module and visibility, reviewed by humans — not by `Cargo.toml`. `src/baichuan/`, `src/rtsp/`, `src/mqtt/` and `src/wake_server/` were once member crates; merging them removed a publish pipeline, a version-lockstep obligation, and four manifests without changing a line of behaviour.
 - **Modules are named for their subject, not their architectural role.** `battery.rs`, `ptz.rs`, `camera_services.rs`, `camera_status.rs`, `gap_bridging.rs` — not `domain/`, `ports.rs`, or `*_adapter.rs`. If an operator wouldn't recognise the name, it's the wrong name (`NM-4`).
 - **Layering rule**: `src/rtsp/`, `src/mqtt/`, `src/wake_server/` and `src/baichuan/` know nothing about cameras or about each other, and the compiler no longer enforces that — review does. `rtsp` exposes a `StreamProvider` trait and connect/disconnect callbacks; the camera side implements them (`src/camera_provider.rs`) and hooks them to the wake lock. Keep camera concepts out of `src/rtsp/`.
-- **Abstractions are declared by their consumer** (`TR-2`), not by whatever happens to implement them: `camera::Camera` says what bairelay needs a camera to do, `camera_status::StatusReporter` says where status goes. `src/bc_camera.rs` and `src/mqtt_status.rs` implement them, and are the only files that name `BcCamera` or `StatusPublisher`.
+- **Abstractions are declared by their consumer** (`TR-2`), not by whatever happens to implement them: `src/camera.rs` declares eight role traits (`Session`, `Video`, `Stills`, `Events`, `Power`, `Lighting`, `Ptz`, `DeviceAdmin`) saying what bairelay needs a camera to do, composed into `camera::Camera` via a blanket impl; `camera_status::StatusReporter` says where status goes. Consumers take the narrowest role that covers them (`battery_poller` takes `Arc<dyn Power>`); only wiring/dispatch points hold `Arc<dyn Camera>`. `src/bc_camera.rs` and `src/mqtt_status.rs` implement them, and are the only files that name `BcCamera` or `StatusPublisher`.
 - **Per-camera task tree**: global `CancellationToken` → per-camera token → per-session token. Session tokens cancel pollers/listeners on disconnect. MQTT's event loop lives *outside* the `Supervisor` (`src/supervisor.rs`) with its own token, because per-camera teardown publishes a final `disconnected` status through it.
 - **Wake lock** (`src/wake_lock.rs`): `AtomicUsize` + two separate `Notify`s (`notify_acquire` for 0→1, `notify_release` for 1→0), both using `notify_one()` so a permit is stored for late waiters. RAII Drop guards. The grace-period countdown (`src/grace_period.rs`) listens on release and resets on any new acquire.
 - **Watchdog** (`src/watchdog.rs`) is a 30 s safety net, not the primary lifecycle mechanism.
@@ -72,7 +72,7 @@ Everything is tested through trait seams rather than live hardware:
 
 | Trait | Test impl |
 |-------|-----------|
-| `camera::Camera` | `FakeCameraBuilder` / `FakeCalls` (`src/fake_camera.rs`, `#[cfg(test)]`) |
+| `camera::Camera` + its role traits | `FakeCameraBuilder` / `FakeCalls`, plus one standalone fake per role (`FakePower`, `FakePtz`, …) for narrow consumers (`src/fake_camera/`, `#[cfg(test)]`) |
 | `camera_status::StatusReporter` | `MqttStatusReporter` over `mock_client()` |
 | `CameraDiscoverer` | `ScriptedDiscoverer` |
 | `VideoStream` | `MockVideoStream` |

@@ -239,14 +239,14 @@ Per-camera `PreviewState { Live, Connecting, Sleeping }` published via `watch::S
 
 | Trait              | Location                                            | Purpose                                              |
 |--------------------|-----------------------------------------------------|------------------------------------------------------|
-| `Camera`           | `bairelay::camera` (binary)                         | What bairelay needs a camera to do; `BcCamera` implements it in `src/bc_camera.rs` |
+| `Camera` role traits | `bairelay::camera` (binary)                       | What bairelay needs a camera to do, split by role: `Session`, `Video`, `Stills`, `Events`, `Power`, `Lighting`, `Ptz`, `DeviceAdmin`. `Camera` composes all eight (blanket impl); consumers bound on the role they drive; `BcCamera` implements each in `src/bc_camera.rs` |
 | `StatusReporter`   | `bairelay::camera_status` (binary)                  | Where camera status events go; `src/mqtt_status.rs` implements it |
 | `CameraDiscoverer` | `bairelay::baichuan::bc_protocol::connection::discovery`  | Discovery fallback chain (local/remote/map/relay)    |
 | `VideoStream`      | `bairelay::baichuan::bc_protocol::stream`                 | `BcMedia` pull loop over `StreamData`                |
 | `PacketSource`     | `bairelay::stream_source` (binary)                  | `BcMedia` injection for translator-loop tests        |
 | `StreamProvider`   | `bairelay::rtsp::provider`                           | RTSP server's view of a camera                       |
 
-Production impls forward to the concrete types (`BcCamera`, `Discovery`, `StreamData`, etc.); test impls (`FakeCamera`, `ScriptedDiscoverer`, `MockVideoStream`, `FakeStreamProvider`) live alongside and let unit tests exercise the same code paths a live camera would drive.
+Production impls forward to the concrete types (`BcCamera`, `Discovery`, `StreamData`, etc.); test impls (`FakeCamera` and its per-role fakes `FakePower`/`FakePtz`/…, `ScriptedDiscoverer`, `MockVideoStream`, `FakeStreamProvider`) live alongside and let unit tests exercise the same code paths a live camera would drive. A narrow consumer's test builds only its role fake, so a widened trait bound surfaces as a compile error in the test.
 
 ## Error handling strategy
 
