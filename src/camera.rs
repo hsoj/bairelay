@@ -35,14 +35,17 @@ use crate::status_cache::StatusCache;
 use crate::stream_source::{MutexPoisonRecover as _, RwLockPoisonRecover as _, StreamSource};
 use crate::wake_lock::WakeLockCounter;
 
-// ── Camera capability port ────────────────────────────────────────────
+// ── Camera capability ports ───────────────────────────────────────────
 //
 // What the rest of bairelay needs a camera to do, declared here by the
 // code that consumes it rather than by the protocol crate that happens
-// to implement it. `src/bc_camera.rs` implements it over Baichuan;
-// `src/fake_camera.rs` scripts it for tests. Dyn-compatible (plain
-// `async fn` via `async-trait`, no generics) so callers hold
-// `Arc<dyn Camera>`.
+// to implement it. Split into role traits (`TR-3`): each consumer
+// names only the capability it drives, so a PTZ handler cannot reboot
+// a camera and the compiler enforces it. `src/bc_camera.rs` implements
+// every role over Baichuan; `src/fake_camera.rs` scripts them for
+// tests. All roles are dyn-compatible (plain `async fn` via
+// `async-trait`, no generics); wiring holds `Arc<dyn Camera>` and
+// upcasts to the role a consumer needs.
 //
 // Some signatures still carry `baichuan` report types
 // (`RfAlarmCfg`, `LedState`, `VersionInfo`, `UserList`, `AbilityInfo`,
@@ -53,16 +56,9 @@ use crate::wake_lock::WakeLockCounter;
 /// Result of a camera operation.
 pub type CameraResult<T> = std::result::Result<T, crate::baichuan::bc_protocol::Error>;
 
-/// One connected camera session, as the orchestration layer sees it.
-///
-/// Implementations own the whole session: video streams, one-shot
-/// queries, control commands, liveness probing, and teardown
-/// ([`Camera::end_session`]) all go through this one handle, so no
-/// caller ever needs the concrete protocol type.
+/// Session lifecycle: liveness probing and polite teardown.
 #[async_trait]
-pub trait Camera: Send + Sync {
-	// ── Session lifecycle ─────────────────────────────────────────
-
+pub trait Session: Send + Sync {
 	/// Politely end the session on the camera side (BC `logout`).
 	/// Battery cameras park faster after an explicit logout than
 	/// after a bare TCP drop.
@@ -72,9 +68,11 @@ pub trait Camera: Send + Sync {
 	/// reachable but doesn't understand the probe body counts as
 	/// alive — only transport-level failures are errors.
 	async fn keepalive_probe(&self) -> CameraResult<()>;
+}
 
-	// ── Streaming ─────────────────────────────────────────────────
-
+/// Live video: start and stop the camera-side preview stream.
+#[async_trait]
+pub trait Video: Send + Sync {
 	/// Start the camera's video stream for `kind` and return a pull
 	/// handle. Dropping the handle (or calling its `shutdown`) sends
 	/// the camera-side stop signal.
@@ -84,65 +82,83 @@ pub trait Camera: Send + Sync {
 	/// braces over dropping the [`VideoStream`] handle: a battery
 	/// camera whose preview keeps running drains on the wire path.
 	async fn stop_video(&self, kind: StreamKind) -> CameraResult<()>;
+}
 
-	// ── Events ────────────────────────────────────────────────────
+/// Still images.
+#[async_trait]
+pub trait Stills: Send + Sync {
+	/// A JPEG snapshot.
+	async fn snapshot(&self) -> CameraResult<Vec<u8>>;
+}
 
+/// Camera-originated event subscriptions.
+#[async_trait]
+pub trait Events: Send + Sync {
 	/// Subscribe to motion events; returns a [`MotionData`] stream.
 	async fn listen_on_motion(&self) -> CameraResult<MotionData>;
 	/// Subscribe to floodlight status updates.
 	async fn listen_on_floodlight(&self) -> CameraResult<Receiver<FloodlightStatusList>>;
+}
 
-	// ── Status queries ────────────────────────────────────────────
-
+/// Battery and PIR sensor state.
+#[async_trait]
+pub trait Power: Send + Sync {
 	/// Current battery state.
 	async fn battery_status(&self) -> CameraResult<BatteryStatus>;
 	/// Current PIR sensor configuration.
 	async fn pir_config(&self) -> CameraResult<RfAlarmCfg>;
-	/// Whether the camera's floodlight tasks engine is enabled.
-	async fn is_floodlight_tasks_enabled(&self) -> CameraResult<bool>;
-	/// Camera capability report (PTZ support, etc.).
-	async fn capabilities(&self) -> CameraResult<CameraCapabilities>;
-	/// The camera's PTZ preset table, including unassigned slots.
-	async fn ptz_presets(&self) -> CameraResult<Vec<PresetSlot>>;
-	/// Camera model / firmware / hardware version block.
-	async fn version(&self) -> CameraResult<VersionInfo>;
-	/// LED + status-light state.
-	async fn led_state(&self) -> CameraResult<LedState>;
-	/// Per-user permission map, keyed by module. Ground truth for
-	/// `MissingAbility` gate decisions.
-	async fn ability_info(&self) -> CameraResult<AbilityInfo>;
-	/// A JPEG snapshot.
-	async fn snapshot(&self) -> CameraResult<Vec<u8>>;
-
-	// ── Control commands ──────────────────────────────────────────
-
 	/// Enable or disable the PIR sensor.
 	async fn pir_set(&self, state: bool) -> CameraResult<()>;
+}
+
+/// Lights, the floodlight tasks engine, and the siren.
+#[async_trait]
+pub trait Lighting: Send + Sync {
+	/// LED + status-light state.
+	async fn led_state(&self) -> CameraResult<LedState>;
+	/// Turn the visible-light LED ring on or off.
+	async fn led_light_set(&self, state: bool) -> CameraResult<()>;
+	/// Set the IR illuminator mode.
+	async fn irled_light_set(&self, state: LightState) -> CameraResult<()>;
+	/// Whether the camera's floodlight tasks engine is enabled.
+	async fn is_floodlight_tasks_enabled(&self) -> CameraResult<bool>;
 	/// Enable or disable the floodlight tasks engine.
 	async fn floodlight_tasks_enable(&self, state: bool) -> CameraResult<()>;
 	/// Manually trigger the floodlight for `duration` seconds.
 	async fn set_floodlight_manual(&self, state: bool, duration: u16) -> CameraResult<()>;
+	/// Trigger the built-in siren.
+	async fn siren(&self) -> CameraResult<()>;
+}
+
+/// Pan/tilt/zoom movement and the preset table.
+#[async_trait]
+pub trait Ptz: Send + Sync {
 	/// Send a PTZ movement command.
 	async fn send_ptz(&self, direction: Direction, amount: f32) -> CameraResult<()>;
+	/// The camera's PTZ preset table, including unassigned slots.
+	async fn ptz_presets(&self) -> CameraResult<Vec<PresetSlot>>;
 	/// Create or overwrite a named PTZ preset.
 	async fn set_ptz_preset(&self, preset_id: u8, name: String) -> CameraResult<()>;
 	/// Move the camera to a saved PTZ preset.
 	async fn moveto_ptz_preset(&self, preset_id: u8) -> CameraResult<()>;
 	/// Move the camera's zoom to an absolute position.
 	async fn zoom_to(&self, level: ZoomLevel) -> CameraResult<()>;
-	/// Turn the visible-light LED ring on or off.
-	async fn led_light_set(&self, state: bool) -> CameraResult<()>;
-	/// Set the IR illuminator mode.
-	async fn irled_light_set(&self, state: LightState) -> CameraResult<()>;
+}
+
+/// Device identity, clock, user accounts, and network services.
+#[async_trait]
+pub trait DeviceAdmin: Send + Sync {
+	/// Camera capability report (PTZ support, etc.).
+	async fn capabilities(&self) -> CameraResult<CameraCapabilities>;
+	/// Camera model / firmware / hardware version block.
+	async fn version(&self) -> CameraResult<VersionInfo>;
+	/// Per-user permission map, keyed by module. Ground truth for
+	/// `MissingAbility` gate decisions.
+	async fn ability_info(&self) -> CameraResult<AbilityInfo>;
 	/// Reboot the camera.
 	async fn reboot(&self) -> CameraResult<()>;
-	/// Trigger the built-in siren.
-	async fn siren(&self) -> CameraResult<()>;
 	/// Set the camera's onboard clock to `timestamp`.
 	async fn set_time(&self, timestamp: OffsetDateTime) -> CameraResult<()>;
-
-	// ── Account administration ────────────────────────────────────
-
 	/// List the camera's configured user accounts.
 	async fn users(&self) -> CameraResult<UserList>;
 	/// Add a new user account.
@@ -156,9 +172,6 @@ pub trait Camera: Send + Sync {
 	async fn modify_user(&self, user_name: String, password: String) -> CameraResult<()>;
 	/// Remove a user account.
 	async fn delete_user(&self, user_name: String) -> CameraResult<()>;
-
-	// ── Network services ──────────────────────────────────────────
-
 	/// Read one network service's port/enable state.
 	async fn service(&self, kind: ServiceKind) -> CameraResult<ServicePortState>;
 	/// Update one network service. `None` leaves that field untouched.
@@ -169,6 +182,16 @@ pub trait Camera: Send + Sync {
 		port: Option<u32>,
 	) -> CameraResult<()>;
 }
+
+/// One connected camera session, as the orchestration layer sees it:
+/// every role a camera can play, composed. Carries no methods of its
+/// own; implementing all eight roles supplies `Camera` through the
+/// blanket impl below. Wiring code holds `Arc<dyn Camera>` so no
+/// caller ever needs the concrete protocol type; consumers take only
+/// the role they drive.
+pub trait Camera: Session + Video + Stills + Events + Power + Lighting + Ptz + DeviceAdmin {}
+
+impl<T: Session + Video + Stills + Events + Power + Lighting + Ptz + DeviceAdmin> Camera for T {}
 
 // ── Camera State ──────────────────────────────────────────────────────
 

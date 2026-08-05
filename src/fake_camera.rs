@@ -23,7 +23,9 @@ use crate::baichuan::bc_protocol::{
 };
 
 use crate::battery::BatteryStatus;
-use crate::camera::{Camera, CameraResult};
+use crate::camera::{
+	Camera, CameraResult, DeviceAdmin, Events, Lighting, Power, Ptz, Session, Stills, Video,
+};
 use crate::camera_services::{ServiceKind, ServicePortState};
 use crate::capabilities::CameraCapabilities;
 use crate::ptz::{PresetSlot, ZoomLevel};
@@ -387,7 +389,7 @@ fn unset(method: &'static str) -> ! {
 }
 
 #[async_trait]
-impl Camera for FakeCamera {
+impl Session for FakeCamera {
 	async fn end_session(&self) -> CameraResult<()> {
 		*self.inner.calls.end_session.lock().unwrap() += 1;
 		Ok(())
@@ -399,7 +401,10 @@ impl Camera for FakeCamera {
 			None => unset("keepalive_probe"),
 		}
 	}
+}
 
+#[async_trait]
+impl Video for FakeCamera {
 	async fn start_video(&self, kind: StreamKind) -> CameraResult<Box<dyn VideoStream>> {
 		self.inner.calls.start_video.lock().unwrap().push(kind);
 		if let Some(f) = self.inner.video_stream_error.as_ref() {
@@ -415,7 +420,24 @@ impl Camera for FakeCamera {
 		self.inner.calls.stop_video.lock().unwrap().push(kind);
 		Ok(())
 	}
+}
 
+#[async_trait]
+impl Stills for FakeCamera {
+	async fn snapshot(&self) -> CameraResult<Vec<u8>> {
+		if self.inner.snapshot_pending {
+			std::future::pending::<()>().await;
+			unreachable!()
+		}
+		match self.inner.snapshot.as_ref() {
+			Some(f) => f(),
+			None => unset("snapshot"),
+		}
+	}
+}
+
+#[async_trait]
+impl Events for FakeCamera {
 	async fn listen_on_motion(&self) -> CameraResult<MotionData> {
 		if let Some(f) = self.inner.motion_stream_error.as_ref() {
 			return Err(f());
@@ -435,7 +457,10 @@ impl Camera for FakeCamera {
 			None => unset("listen_on_floodlight (stream not configured, or already consumed)"),
 		}
 	}
+}
 
+#[async_trait]
+impl Power for FakeCamera {
 	async fn battery_status(&self) -> CameraResult<BatteryStatus> {
 		if self.inner.battery_status_pending {
 			std::future::pending::<()>().await;
@@ -458,6 +483,31 @@ impl Camera for FakeCamera {
 		}
 	}
 
+	async fn pir_set(&self, state: bool) -> CameraResult<()> {
+		self.inner.calls.pir_set.lock().unwrap().push(state);
+		Ok(())
+	}
+}
+
+#[async_trait]
+impl Lighting for FakeCamera {
+	async fn led_state(&self) -> CameraResult<LedState> {
+		match self.inner.led_state.as_ref() {
+			Some(f) => f(),
+			None => unset("led_state"),
+		}
+	}
+
+	async fn led_light_set(&self, state: bool) -> CameraResult<()> {
+		self.inner.calls.led_light_set.lock().unwrap().push(state);
+		Ok(())
+	}
+
+	async fn irled_light_set(&self, state: LightState) -> CameraResult<()> {
+		self.inner.calls.irled_light_set.lock().unwrap().push(state);
+		Ok(())
+	}
+
 	async fn is_floodlight_tasks_enabled(&self) -> CameraResult<bool> {
 		if self.inner.is_floodlight_tasks_enabled_pending {
 			std::future::pending::<()>().await;
@@ -467,61 +517,6 @@ impl Camera for FakeCamera {
 			Some(f) => f(),
 			None => unset("is_floodlight_tasks_enabled"),
 		}
-	}
-
-	async fn capabilities(&self) -> CameraResult<CameraCapabilities> {
-		match self.inner.capabilities.as_ref() {
-			Some(f) => f(),
-			None => unset("capabilities"),
-		}
-	}
-
-	async fn ptz_presets(&self) -> CameraResult<Vec<PresetSlot>> {
-		if self.inner.ptz_presets_pending {
-			std::future::pending::<()>().await;
-			unreachable!()
-		}
-		match self.inner.ptz_presets.as_ref() {
-			Some(f) => f(),
-			None => unset("ptz_presets"),
-		}
-	}
-
-	async fn version(&self) -> CameraResult<VersionInfo> {
-		match self.inner.version.as_ref() {
-			Some(f) => f(),
-			None => unset("version"),
-		}
-	}
-
-	async fn led_state(&self) -> CameraResult<LedState> {
-		match self.inner.led_state.as_ref() {
-			Some(f) => f(),
-			None => unset("led_state"),
-		}
-	}
-
-	async fn ability_info(&self) -> CameraResult<AbilityInfo> {
-		match self.inner.ability_info.as_ref() {
-			Some(f) => f(),
-			None => unset("ability_info"),
-		}
-	}
-
-	async fn snapshot(&self) -> CameraResult<Vec<u8>> {
-		if self.inner.snapshot_pending {
-			std::future::pending::<()>().await;
-			unreachable!()
-		}
-		match self.inner.snapshot.as_ref() {
-			Some(f) => f(),
-			None => unset("snapshot"),
-		}
-	}
-
-	async fn pir_set(&self, state: bool) -> CameraResult<()> {
-		self.inner.calls.pir_set.lock().unwrap().push(state);
-		Ok(())
 	}
 
 	async fn floodlight_tasks_enable(&self, state: bool) -> CameraResult<()> {
@@ -544,6 +539,18 @@ impl Camera for FakeCamera {
 		Ok(())
 	}
 
+	async fn siren(&self) -> CameraResult<()> {
+		*self.inner.calls.siren.lock().unwrap() += 1;
+		if self.inner.siren_pending {
+			std::future::pending::<()>().await;
+			unreachable!()
+		}
+		Ok(())
+	}
+}
+
+#[async_trait]
+impl Ptz for FakeCamera {
 	async fn send_ptz(&self, direction: Direction, amount: f32) -> CameraResult<()> {
 		self.inner
 			.calls
@@ -556,6 +563,17 @@ impl Camera for FakeCamera {
 			unreachable!()
 		}
 		Ok(())
+	}
+
+	async fn ptz_presets(&self) -> CameraResult<Vec<PresetSlot>> {
+		if self.inner.ptz_presets_pending {
+			std::future::pending::<()>().await;
+			unreachable!()
+		}
+		match self.inner.ptz_presets.as_ref() {
+			Some(f) => f(),
+			None => unset("ptz_presets"),
+		}
 	}
 
 	async fn set_ptz_preset(&self, preset_id: u8, name: String) -> CameraResult<()> {
@@ -582,28 +600,33 @@ impl Camera for FakeCamera {
 		self.inner.calls.zoom_to.lock().unwrap().push(level);
 		Ok(())
 	}
+}
 
-	async fn led_light_set(&self, state: bool) -> CameraResult<()> {
-		self.inner.calls.led_light_set.lock().unwrap().push(state);
-		Ok(())
+#[async_trait]
+impl DeviceAdmin for FakeCamera {
+	async fn capabilities(&self) -> CameraResult<CameraCapabilities> {
+		match self.inner.capabilities.as_ref() {
+			Some(f) => f(),
+			None => unset("capabilities"),
+		}
 	}
 
-	async fn irled_light_set(&self, state: LightState) -> CameraResult<()> {
-		self.inner.calls.irled_light_set.lock().unwrap().push(state);
-		Ok(())
+	async fn version(&self) -> CameraResult<VersionInfo> {
+		match self.inner.version.as_ref() {
+			Some(f) => f(),
+			None => unset("version"),
+		}
+	}
+
+	async fn ability_info(&self) -> CameraResult<AbilityInfo> {
+		match self.inner.ability_info.as_ref() {
+			Some(f) => f(),
+			None => unset("ability_info"),
+		}
 	}
 
 	async fn reboot(&self) -> CameraResult<()> {
 		*self.inner.calls.reboot.lock().unwrap() += 1;
-		Ok(())
-	}
-
-	async fn siren(&self) -> CameraResult<()> {
-		*self.inner.calls.siren.lock().unwrap() += 1;
-		if self.inner.siren_pending {
-			std::future::pending::<()>().await;
-			unreachable!()
-		}
 		Ok(())
 	}
 

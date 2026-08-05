@@ -1,6 +1,7 @@
 //! Driving a real Reolink camera over Baichuan.
 //!
-//! Implements [`Camera`] for the protocol crate's [`BcCamera`], and is
+//! Implements every [`crate::camera`] role trait for the protocol
+//! crate's [`BcCamera`], and is
 //! the only place the BC wire vocabulary is translated into bairelay's:
 //! a raw `voltage: i32` becomes [`Millivolts`], the ×1000 zoom
 //! convention disappears behind [`ZoomLevel`], the six structurally
@@ -19,7 +20,9 @@ use crate::baichuan::bc_protocol::{
 };
 
 use crate::battery::{BatteryStatus, Millivolts};
-use crate::camera::{Camera, CameraResult};
+use crate::camera::{
+	CameraResult, DeviceAdmin, Events, Lighting, Power, Ptz, Session, Stills, Video,
+};
 use crate::camera_services::{ServiceKind, ServicePortState};
 use crate::capabilities::{ptz_mode_indicates_ptz, CameraCapabilities};
 use crate::ptz::{PresetSlot, ZoomLevel};
@@ -37,7 +40,7 @@ fn battery_status_from(info: crate::baichuan::bc::xml::BatteryInfo) -> BatterySt
 }
 
 #[async_trait]
-impl Camera for BcCamera {
+impl Session for BcCamera {
 	async fn end_session(&self) -> CameraResult<()> {
 		BcCamera::logout(self).await
 	}
@@ -55,7 +58,10 @@ impl Camera for BcCamera {
 			Err(e) => Err(e),
 		}
 	}
+}
 
+#[async_trait]
+impl Video for BcCamera {
 	async fn start_video(&self, kind: StreamKind) -> CameraResult<Box<dyn VideoStream>> {
 		let stream = BcCamera::start_video(self, kind, 0, false).await?;
 		Ok(Box::new(stream))
@@ -64,7 +70,17 @@ impl Camera for BcCamera {
 	async fn stop_video(&self, kind: StreamKind) -> CameraResult<()> {
 		BcCamera::stop_video(self, kind).await
 	}
+}
 
+#[async_trait]
+impl Stills for BcCamera {
+	async fn snapshot(&self) -> CameraResult<Vec<u8>> {
+		BcCamera::get_snapshot(self).await
+	}
+}
+
+#[async_trait]
+impl Events for BcCamera {
 	async fn listen_on_motion(&self) -> CameraResult<MotionData> {
 		BcCamera::listen_on_motion(self).await
 	}
@@ -72,7 +88,10 @@ impl Camera for BcCamera {
 	async fn listen_on_floodlight(&self) -> CameraResult<Receiver<FloodlightStatusList>> {
 		BcCamera::listen_on_floodlight(self).await
 	}
+}
 
+#[async_trait]
+impl Power for BcCamera {
 	async fn battery_status(&self) -> CameraResult<BatteryStatus> {
 		Ok(battery_status_from(BcCamera::battery_info(self).await?))
 	}
@@ -81,15 +100,46 @@ impl Camera for BcCamera {
 		BcCamera::get_pirstate(self).await
 	}
 
+	async fn pir_set(&self, state: bool) -> CameraResult<()> {
+		BcCamera::pir_set(self, state).await
+	}
+}
+
+#[async_trait]
+impl Lighting for BcCamera {
+	async fn led_state(&self) -> CameraResult<LedState> {
+		BcCamera::get_ledstate(self).await
+	}
+
+	async fn led_light_set(&self, state: bool) -> CameraResult<()> {
+		BcCamera::led_light_set(self, state).await
+	}
+
+	async fn irled_light_set(&self, state: LightState) -> CameraResult<()> {
+		BcCamera::irled_light_set(self, state).await
+	}
+
 	async fn is_floodlight_tasks_enabled(&self) -> CameraResult<bool> {
 		BcCamera::is_floodlight_tasks_enabled(self).await
 	}
 
-	async fn capabilities(&self) -> CameraResult<CameraCapabilities> {
-		let support = BcCamera::get_support(self).await?;
-		Ok(CameraCapabilities {
-			has_ptz: ptz_mode_indicates_ptz(support.ptz_mode.as_deref(), support.ptz_cfg),
-		})
+	async fn floodlight_tasks_enable(&self, state: bool) -> CameraResult<()> {
+		BcCamera::floodlight_tasks_enable(self, state).await
+	}
+
+	async fn set_floodlight_manual(&self, state: bool, duration: u16) -> CameraResult<()> {
+		BcCamera::set_floodlight_manual(self, state, duration).await
+	}
+
+	async fn siren(&self) -> CameraResult<()> {
+		BcCamera::siren(self).await
+	}
+}
+
+#[async_trait]
+impl Ptz for BcCamera {
+	async fn send_ptz(&self, direction: Direction, amount: f32) -> CameraResult<()> {
+		BcCamera::send_ptz(self, direction, amount).await
 	}
 
 	async fn ptz_presets(&self) -> CameraResult<Vec<PresetSlot>> {
@@ -105,38 +155,6 @@ impl Camera for BcCamera {
 			.collect())
 	}
 
-	async fn version(&self) -> CameraResult<VersionInfo> {
-		BcCamera::version(self).await
-	}
-
-	async fn led_state(&self) -> CameraResult<LedState> {
-		BcCamera::get_ledstate(self).await
-	}
-
-	async fn ability_info(&self) -> CameraResult<AbilityInfo> {
-		BcCamera::get_abilityinfo(self).await
-	}
-
-	async fn snapshot(&self) -> CameraResult<Vec<u8>> {
-		BcCamera::get_snapshot(self).await
-	}
-
-	async fn pir_set(&self, state: bool) -> CameraResult<()> {
-		BcCamera::pir_set(self, state).await
-	}
-
-	async fn floodlight_tasks_enable(&self, state: bool) -> CameraResult<()> {
-		BcCamera::floodlight_tasks_enable(self, state).await
-	}
-
-	async fn set_floodlight_manual(&self, state: bool, duration: u16) -> CameraResult<()> {
-		BcCamera::set_floodlight_manual(self, state, duration).await
-	}
-
-	async fn send_ptz(&self, direction: Direction, amount: f32) -> CameraResult<()> {
-		BcCamera::send_ptz(self, direction, amount).await
-	}
-
 	async fn set_ptz_preset(&self, preset_id: u8, name: String) -> CameraResult<()> {
 		BcCamera::set_ptz_preset(self, preset_id, name).await
 	}
@@ -148,21 +166,27 @@ impl Camera for BcCamera {
 	async fn zoom_to(&self, level: ZoomLevel) -> CameraResult<()> {
 		BcCamera::zoom_to(self, level.camera_units()).await
 	}
+}
 
-	async fn led_light_set(&self, state: bool) -> CameraResult<()> {
-		BcCamera::led_light_set(self, state).await
+#[async_trait]
+impl DeviceAdmin for BcCamera {
+	async fn capabilities(&self) -> CameraResult<CameraCapabilities> {
+		let support = BcCamera::get_support(self).await?;
+		Ok(CameraCapabilities {
+			has_ptz: ptz_mode_indicates_ptz(support.ptz_mode.as_deref(), support.ptz_cfg),
+		})
 	}
 
-	async fn irled_light_set(&self, state: LightState) -> CameraResult<()> {
-		BcCamera::irled_light_set(self, state).await
+	async fn version(&self) -> CameraResult<VersionInfo> {
+		BcCamera::version(self).await
+	}
+
+	async fn ability_info(&self) -> CameraResult<AbilityInfo> {
+		BcCamera::get_abilityinfo(self).await
 	}
 
 	async fn reboot(&self) -> CameraResult<()> {
 		BcCamera::reboot(self).await
-	}
-
-	async fn siren(&self) -> CameraResult<()> {
-		BcCamera::siren(self).await
 	}
 
 	async fn set_time(&self, timestamp: OffsetDateTime) -> CameraResult<()> {
@@ -252,6 +276,7 @@ mod tests {
 	//! command's happy path.
 	use super::*;
 	use crate::baichuan::bc_protocol::connection::mock::{reply_err_code, MockConnection};
+	use crate::camera::Camera;
 	use std::sync::Arc;
 	use std::time::Duration;
 
