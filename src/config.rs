@@ -825,6 +825,70 @@ pub fn apply_cloud_auth(config: &mut Config, config_path: &std::path::Path) {
 	}
 }
 
+// ── Loading ────────────────────────────────────────────────────────────
+
+/// Failure from the config-load pipeline ([`parse_config_file`] /
+/// [`load_config`]). `NotFound` is its own variant because it is the one
+/// case the CLI classifies differently: the operator pointed at a path
+/// that doesn't exist (usage), not a config that is present but wrong.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigLoadError {
+	#[error("config file not found: {path}")]
+	NotFound { path: std::path::PathBuf },
+	#[error("read {path}: {source}")]
+	Read {
+		path: std::path::PathBuf,
+		source: std::io::Error,
+	},
+	#[error("parse {path}: {message}")]
+	Parse {
+		path: std::path::PathBuf,
+		message: String,
+	},
+	#[error("validate {path}: {message}")]
+	Validate {
+		path: std::path::PathBuf,
+		message: String,
+	},
+}
+
+/// Read + parse a config file, with no hydration or validation. Only
+/// `cloud-authorise` stops here: it runs before the auth state that
+/// [`load_config`] would hydrate from exists, and must not demand a
+/// fully valid config in order to bootstrap one.
+pub fn parse_config_file(path: &std::path::Path) -> Result<Config, ConfigLoadError> {
+	let toml_str = std::fs::read_to_string(path).map_err(|source| {
+		if source.kind() == std::io::ErrorKind::NotFound {
+			ConfigLoadError::NotFound {
+				path: path.to_path_buf(),
+			}
+		} else {
+			ConfigLoadError::Read {
+				path: path.to_path_buf(),
+				source,
+			}
+		}
+	})?;
+	parse_config(&toml_str).map_err(|message| ConfigLoadError::Parse {
+		path: path.to_path_buf(),
+		message,
+	})
+}
+
+/// The full pipeline: [`parse_config_file`] → [`apply_cloud_auth`] →
+/// [`validate_config`]. The only way to obtain a runnable [`Config`],
+/// so every entry point (service mode, one-shot, `check-config`) sees
+/// the same effective config and hydration cannot be skipped.
+pub fn load_config(path: &std::path::Path) -> Result<Config, ConfigLoadError> {
+	let mut config = parse_config_file(path)?;
+	apply_cloud_auth(&mut config, path);
+	validate_config(&config).map_err(|message| ConfigLoadError::Validate {
+		path: path.to_path_buf(),
+		message,
+	})?;
+	Ok(config)
+}
+
 // ── Validation ─────────────────────────────────────────────────────────
 
 // ── Test helpers ──────────────────────────────────────────────────────

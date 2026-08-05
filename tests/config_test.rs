@@ -1,6 +1,7 @@
 use bairelay::config::{
-	parse_config, resolve_idle_disconnect_timeout, test_helpers, validate_config, CameraConfig,
-	Config, DiscoveryMethod, MaxEncryption, MqttConfig, PauseConfig, StreamConfig, TlsClientAuth,
+	load_config, parse_config, parse_config_file, resolve_idle_disconnect_timeout, test_helpers,
+	validate_config, CameraConfig, Config, ConfigLoadError, DiscoveryMethod, MaxEncryption,
+	MqttConfig, PauseConfig, StreamConfig, TlsClientAuth,
 };
 
 // ── Enum variant deserialization ──────────────────────────────────────
@@ -2026,4 +2027,117 @@ fn validate_accepts_disabled_push_listener_without_wake_server() {
 		motion_wake_hold_secs: 30.0,
 	});
 	validate_config(&cfg).expect("disabled push_listener must pass");
+}
+
+// ── load_config / parse_config_file pipeline ──────────────────────────
+
+#[test]
+fn load_config_missing_file_is_not_found() {
+	let err = load_config(std::path::Path::new("/nonexistent/bairelay-cfg-xxyy.toml"))
+		.expect_err("should fail");
+	assert!(matches!(err, ConfigLoadError::NotFound { .. }));
+	assert!(err.to_string().contains("not found"));
+}
+
+#[test]
+fn load_config_directory_is_read_error_not_not_found() {
+	// `read_to_string` on a directory errors with a non-NotFound kind on
+	// both Linux and macOS, exercising the `Read` variant.
+	let dir = tempfile::tempdir().unwrap();
+	let err = load_config(dir.path()).expect_err("should fail");
+	assert!(matches!(err, ConfigLoadError::Read { .. }));
+	assert!(err.to_string().starts_with("read "));
+}
+
+#[test]
+fn load_config_malformed_toml_is_parse_error() {
+	let f = tempfile::NamedTempFile::new().unwrap();
+	std::fs::write(f.path(), b"not { valid toml = [[[").unwrap();
+	let err = load_config(f.path()).expect_err("should fail");
+	assert!(matches!(err, ConfigLoadError::Parse { .. }));
+	assert!(err.to_string().starts_with("parse "));
+}
+
+#[test]
+fn load_config_invalid_config_is_validate_error() {
+	// bind_port = 0 trips validate_config's first rule, so the pipeline
+	// got past read + parse and failed in the validator stage.
+	let f = tempfile::NamedTempFile::new().unwrap();
+	std::fs::write(
+		f.path(),
+		"bind = \"127.0.0.1\"\nbind_port = 0\ncameras = []\n",
+	)
+	.unwrap();
+	let err = load_config(f.path()).expect_err("validator should reject");
+	assert!(matches!(err, ConfigLoadError::Validate { .. }));
+	assert!(err.to_string().starts_with("validate "));
+}
+
+#[test]
+fn load_config_happy_path() {
+	let f = tempfile::NamedTempFile::new().unwrap();
+	std::fs::write(
+		f.path(),
+		"bind = \"127.0.0.1\"\nbind_port = 8554\ncameras = []\n",
+	)
+	.unwrap();
+	let cfg = load_config(f.path()).expect("minimal valid config");
+	assert_eq!(cfg.bind_port, 8554);
+	assert!(cfg.cameras.is_empty());
+}
+
+/// Regression test: every entry point that connects to a camera goes
+/// through `load_config`, so a `discovery = "cloud"` camera must come
+/// back with the host's MFA trust token attached when the sibling
+/// `config-cloud-auth.json` holds a valid one. The one-shot path used to
+/// skip this hydration and re-trigger Reolink login verification.
+#[test]
+fn load_config_hydrates_cloud_auth_for_cloud_cameras() {
+	let dir = tempfile::tempdir().unwrap();
+	let cfg_path = dir.path().join("config.toml");
+	std::fs::write(
+		&cfg_path,
+		r#"
+bind = "127.0.0.1"
+bind_port = 8554
+cloud_account = "owner@example.com"
+cloud_password = "pw"
+
+[[cameras]]
+name = "cloudcam"
+username = "admin"
+discovery = "cloud"
+uid = "952700012345678"
+"#,
+	)
+	.unwrap();
+	let expiry = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.unwrap()
+		.as_secs()
+		+ 30 * 86_400;
+	std::fs::write(
+		dir.path().join(bairelay::config::CLOUD_AUTH_FILE),
+		format!(
+			r#"{{"account":"owner@example.com","mfa_trust_token":"TT","expiry_unix_s":{expiry}}}"#
+		),
+	)
+	.unwrap();
+	let cfg = load_config(&cfg_path).expect("valid cloud config");
+	assert_eq!(cfg.cameras[0].cloud_mfa_trust_token.as_deref(), Some("TT"));
+}
+
+#[test]
+fn parse_config_file_skips_validation() {
+	// `cloud-authorise` bootstraps auth state before the config is
+	// necessarily complete, so the parse-only entry point must accept a
+	// config the validator would reject.
+	let f = tempfile::NamedTempFile::new().unwrap();
+	std::fs::write(
+		f.path(),
+		"bind = \"127.0.0.1\"\nbind_port = 0\ncameras = []\n",
+	)
+	.unwrap();
+	let cfg = parse_config_file(f.path()).expect("parse-only must not validate");
+	assert_eq!(cfg.bind_port, 0);
 }

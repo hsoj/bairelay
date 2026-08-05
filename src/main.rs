@@ -12,8 +12,8 @@ use bairelay::camera::CameraHandle;
 use bairelay::cli::{Cli, Command};
 use bairelay::cli_convert::{should_emit_ansi, verbosity_env_filter};
 use bairelay::config::{
-	warn_deprecated_pause_fields, warn_idle_timeout_below_prune_floor, warn_neolink_compat_fields,
-	warn_users_without_tls, warn_wire_debug_enabled,
+	load_config, warn_deprecated_pause_fields, warn_idle_timeout_below_prune_floor,
+	warn_neolink_compat_fields, warn_users_without_tls, warn_wire_debug_enabled,
 };
 use bairelay::local_time::LocalTimer;
 use bairelay::mqtt::{parse_control_message, MqttEventLoop, SharedMqttClient};
@@ -23,7 +23,7 @@ use bairelay::mqtt_loop::{
 	resolve_topic_prefix, EventAction, MqttBackoff, SHUTDOWN_FANOUT_TIMEOUT,
 };
 use bairelay::orchestrator::Orchestrator;
-use bairelay::run_support::{camera_names, load_validated_config};
+use bairelay::run_support::camera_names;
 use bairelay::watchdog::Watchdog;
 
 /// Concurrent-RTSP-connection cap. Picked an order of magnitude above
@@ -106,7 +106,7 @@ async fn async_main() -> Result<()> {
 
 	// Load, parse, and validate the config file.
 	let config_path = cli.config_path();
-	let config = load_validated_config(config_path)?;
+	let config = load_config(config_path)?;
 
 	// Emit one-line migration warnings for deprecated neolink
 	// `[cameras.pause]` fields kept only for smooth upgrades.

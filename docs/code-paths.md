@@ -91,7 +91,7 @@ flowchart TD
 
     subgraph DAEMON ["daemon path"]
         direction TB
-        CFG["load_validated_config<br/>run_support.rs:38"]
+        CFG["config::load_config<br/>src/config.rs"]
         ORCH["Orchestrator::with_bcmedia_dump_and_discovery<br/>src/main.rs:231"]
         MQTTLOOP["spawn run_mqtt_event_loop<br/>:330 — OUTSIDE the Supervisor"]
         SUP["Supervisor::new(token)<br/>:350"]
