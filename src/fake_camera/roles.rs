@@ -40,6 +40,7 @@ use super::{unset, BoxFn, FakeCalls};
 /// runs its configured closure.
 pub struct FakeSession {
 	keepalive_probe: Option<BoxFn<()>>,
+	end_session_error: Option<Box<dyn Fn() -> Error + Send + Sync>>,
 	calls: Arc<FakeCalls>,
 }
 
@@ -51,6 +52,7 @@ impl FakeSession {
 	pub(super) fn with_ledger(calls: Arc<FakeCalls>) -> Self {
 		Self {
 			keepalive_probe: None,
+			end_session_error: None,
 			calls,
 		}
 	}
@@ -61,6 +63,17 @@ impl FakeSession {
 		F: Fn() -> CameraResult<()> + Send + Sync + 'static,
 	{
 		self.keepalive_probe = Some(Box::new(f));
+		self
+	}
+
+	/// Configure [`Session::end_session`] to return `Err(f())` on every
+	/// call. The call is still recorded first, so teardown tests can
+	/// assert the logout was attempted.
+	pub fn with_end_session_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.end_session_error = Some(Box::new(f));
 		self
 	}
 
@@ -83,7 +96,10 @@ impl Default for FakeSession {
 impl Session for FakeSession {
 	async fn end_session(&self) -> CameraResult<()> {
 		*self.calls.end_session.lock().unwrap() += 1;
-		Ok(())
+		match self.end_session_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 
 	async fn keepalive_probe(&self) -> CameraResult<()> {
@@ -336,6 +352,7 @@ pub struct FakePower {
 	battery_status_pending: bool,
 	pir_config: Option<BoxFn<RfAlarmCfg>>,
 	pir_config_pending: bool,
+	pir_set_error: Option<Box<dyn Fn() -> Error + Send + Sync>>,
 	calls: Arc<FakeCalls>,
 }
 
@@ -350,6 +367,7 @@ impl FakePower {
 			battery_status_pending: false,
 			pir_config: None,
 			pir_config_pending: false,
+			pir_set_error: None,
 			calls,
 		}
 	}
@@ -384,6 +402,16 @@ impl FakePower {
 	/// Make `pir_config` await `pending()` forever.
 	pub fn with_pir_config_pending(mut self) -> Self {
 		self.pir_config_pending = true;
+		self
+	}
+
+	/// Configure [`Power::pir_set`] to return `Err(f())` on every call.
+	/// The call is still recorded first.
+	pub fn with_pir_set_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.pir_set_error = Some(Box::new(f));
 		self
 	}
 
@@ -428,7 +456,10 @@ impl Power for FakePower {
 
 	async fn pir_set(&self, state: bool) -> CameraResult<()> {
 		self.calls.pir_set.lock().unwrap().push(state);
-		Ok(())
+		match self.pir_set_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 }
 
@@ -438,6 +469,7 @@ pub struct FakeLighting {
 	is_floodlight_tasks_enabled: Option<BoxFn<bool>>,
 	is_floodlight_tasks_enabled_pending: bool,
 	siren_pending: bool,
+	siren_error: Option<Box<dyn Fn() -> Error + Send + Sync>>,
 	calls: Arc<FakeCalls>,
 }
 
@@ -452,6 +484,7 @@ impl FakeLighting {
 			is_floodlight_tasks_enabled: None,
 			is_floodlight_tasks_enabled_pending: false,
 			siren_pending: false,
+			siren_error: None,
 			calls,
 		}
 	}
@@ -484,6 +517,16 @@ impl FakeLighting {
 	/// Make `siren()` await `pending()` forever.
 	pub fn with_siren_pending(mut self) -> Self {
 		self.siren_pending = true;
+		self
+	}
+
+	/// Configure [`Lighting::siren`] to return `Err(f())` on every
+	/// call. The call is still recorded first.
+	pub fn with_siren_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.siren_error = Some(Box::new(f));
 		self
 	}
 
@@ -552,6 +595,9 @@ impl Lighting for FakeLighting {
 
 	async fn siren(&self) -> CameraResult<()> {
 		*self.calls.siren.lock().unwrap() += 1;
+		if let Some(f) = self.siren_error.as_ref() {
+			return Err(f());
+		}
 		if self.siren_pending {
 			std::future::pending::<()>().await;
 			unreachable!()
@@ -565,6 +611,7 @@ pub struct FakePtz {
 	ptz_presets: Option<BoxFn<Vec<PresetSlot>>>,
 	ptz_presets_pending: bool,
 	send_ptz_pending: bool,
+	ptz_error: Option<Box<dyn Fn() -> Error + Send + Sync>>,
 	calls: Arc<FakeCalls>,
 }
 
@@ -578,6 +625,7 @@ impl FakePtz {
 			ptz_presets: None,
 			ptz_presets_pending: false,
 			send_ptz_pending: false,
+			ptz_error: None,
 			calls,
 		}
 	}
@@ -605,6 +653,18 @@ impl FakePtz {
 		self
 	}
 
+	/// Configure every movement/preset setter (`send_ptz`,
+	/// `set_ptz_preset`, `moveto_ptz_preset`, `zoom_to`) to return
+	/// `Err(f())`. Calls are still recorded first; `FakeCalls` shows
+	/// which one was attempted.
+	pub fn with_ptz_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.ptz_error = Some(Box::new(f));
+		self
+	}
+
 	pub fn calls(&self) -> &FakeCalls {
 		&self.calls
 	}
@@ -628,6 +688,9 @@ impl Ptz for FakePtz {
 			.lock()
 			.unwrap()
 			.push((direction, amount));
+		if let Some(f) = self.ptz_error.as_ref() {
+			return Err(f());
+		}
 		if self.send_ptz_pending {
 			std::future::pending::<()>().await;
 			unreachable!()
@@ -652,17 +715,26 @@ impl Ptz for FakePtz {
 			.lock()
 			.unwrap()
 			.push((preset_id, name));
-		Ok(())
+		match self.ptz_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 
 	async fn moveto_ptz_preset(&self, preset_id: u8) -> CameraResult<()> {
 		self.calls.moveto_ptz_preset.lock().unwrap().push(preset_id);
-		Ok(())
+		match self.ptz_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 
 	async fn zoom_to(&self, level: ZoomLevel) -> CameraResult<()> {
 		self.calls.zoom_to.lock().unwrap().push(level);
-		Ok(())
+		match self.ptz_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 }
 
@@ -673,6 +745,8 @@ pub struct FakeDeviceAdmin {
 	ability_info: Option<BoxFn<AbilityInfo>>,
 	users: Option<BoxFn<UserList>>,
 	service: Option<Box<dyn Fn(ServiceKind) -> CameraResult<ServicePortState> + Send + Sync>>,
+	reboot_error: Option<Box<dyn Fn() -> Error + Send + Sync>>,
+	set_time_error: Option<Box<dyn Fn() -> Error + Send + Sync>>,
 	calls: Arc<FakeCalls>,
 }
 
@@ -688,6 +762,8 @@ impl FakeDeviceAdmin {
 			ability_info: None,
 			users: None,
 			service: None,
+			reboot_error: None,
+			set_time_error: None,
 			calls,
 		}
 	}
@@ -738,6 +814,26 @@ impl FakeDeviceAdmin {
 		self
 	}
 
+	/// Configure [`DeviceAdmin::reboot`] to return `Err(f())` on every
+	/// call. The call is still recorded first.
+	pub fn with_reboot_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.reboot_error = Some(Box::new(f));
+		self
+	}
+
+	/// Configure [`DeviceAdmin::set_time`] to return `Err(f())` on
+	/// every call. The call is still recorded first.
+	pub fn with_set_time_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.set_time_error = Some(Box::new(f));
+		self
+	}
+
 	pub fn calls(&self) -> &FakeCalls {
 		&self.calls
 	}
@@ -778,12 +874,18 @@ impl DeviceAdmin for FakeDeviceAdmin {
 
 	async fn reboot(&self) -> CameraResult<()> {
 		*self.calls.reboot.lock().unwrap() += 1;
-		Ok(())
+		match self.reboot_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 
 	async fn set_time(&self, timestamp: OffsetDateTime) -> CameraResult<()> {
 		self.calls.set_time.lock().unwrap().push(timestamp);
-		Ok(())
+		match self.set_time_error.as_ref() {
+			Some(f) => Err(f()),
+			None => Ok(()),
+		}
 	}
 
 	async fn users(&self) -> CameraResult<UserList> {

@@ -3018,6 +3018,65 @@ mod tests {
 		);
 	}
 
+	/// A logout (`end_session`) failure at teardown must not abort the
+	/// teardown sequence: the state still reaches Disconnected, the
+	/// driver slot is cleared, and the final disconnected status still
+	/// publishes. Pins the `Ok(Err(e))` branch of the logout match in
+	/// `teardown_session_tasks` — a battery camera that refuses the
+	/// courtesy logout must not wedge the session slot.
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn run_connected_session_tolerates_end_session_error() {
+		use crate::config::test_helpers::minimal_camera_config;
+		use crate::fake_camera::FakeCameraBuilder;
+
+		let config = minimal_camera_config("cam-lofail");
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
+
+		let fake = FakeCameraBuilder::new()
+			.with_capabilities(|| Ok(CameraCapabilities::default()))
+			.with_keepalive_probe(|| {
+				// Always error → the session exits via keepalive
+				// MAX_FAILURES, driving teardown.
+				Err(crate::baichuan::bc_protocol::Error::Other(
+					"scripted link fail",
+				))
+			})
+			.with_end_session_error(|| crate::baichuan::bc_protocol::Error::Other("logout refused"))
+			.build();
+		let driver: Arc<dyn Camera> = fake.clone();
+
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::with_bcmedia_dump_and_prefix(
+			config,
+			cancel,
+			Some(mqtt),
+			"bairelay".to_string(),
+			None,
+		));
+
+		tokio::time::timeout(
+			Duration::from_secs(30),
+			handle.run_connected_session_for_test(driver),
+		)
+		.await
+		.expect("session must exit despite end_session failure");
+
+		assert_eq!(handle.state(), CameraState::Disconnected);
+		assert!(handle.bc_camera().is_none());
+		assert_eq!(
+			*fake.calls().end_session.lock().unwrap(),
+			1,
+			"logout must be attempted exactly once"
+		);
+		assert!(
+			mock.published()
+				.iter()
+				.any(|(t, p, _)| t == "bairelay/cam-lofail/status" && p == b"disconnected"),
+			"disconnected status must still publish after logout failure; topics: {:?}",
+			mock.published_topics()
+		);
+	}
+
 	/// Once `battery_poller` has latched the "no battery" verdict, a
 	/// later session must NOT respawn it — else every wake re-runs the
 	/// same futile probes for the life of the process. The fake here has

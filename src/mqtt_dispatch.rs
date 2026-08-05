@@ -624,6 +624,45 @@ mod tests {
 		);
 	}
 
+	/// A failed `pir_set` must reply `FAIL` and must NOT republish
+	/// `status/pir` — the republish is gated on success so HA never
+	/// reflects a state change the camera rejected.
+	#[tokio::test]
+	async fn dispatch_pir_set_failure_replies_fail_without_republish() {
+		let fake = FakeCameraBuilder::new()
+			.with_pir_set_error(|| crate::baichuan::bc_protocol::Error::Other("pir refused"))
+			.build();
+		let (cameras, fake) = test_cameras_with_fake("cam-pirf", fake);
+		let (mqtt, mock) = crate::mqtt::test_support::mock_client();
+
+		dispatch_control(
+			ControlCommand::Pir {
+				camera: "cam-pirf".to_string(),
+				state: true,
+			},
+			&cameras,
+			&mqtt,
+			"bairelay",
+		)
+		.await;
+
+		assert_eq!(*fake.calls().pir_set.lock().unwrap(), vec![true]);
+		let rows = mock.published();
+		assert!(
+			!rows
+				.iter()
+				.any(|(t, _, _)| t == "bairelay/cam-pirf/status/pir"),
+			"failed pir_set must not republish status/pir; observed: {:?}",
+			rows
+		);
+		assert!(
+			rows.iter()
+				.any(|(t, p, _)| t == "bairelay/cam-pirf/control/pir" && p == b"FAIL"),
+			"failed pir_set must reply FAIL on the control topic; observed: {:?}",
+			rows
+		);
+	}
+
 	/// `ControlCommand::PtzPresetByName` with a name that isn't in the
 	/// preset cache must publish `FAIL` on the reply topic, not `OK`.
 	/// Previously this returned `Ok(())` and operators saw a successful

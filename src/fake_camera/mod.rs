@@ -497,6 +497,26 @@ impl FakeCameraBuilder {
 		self
 	}
 
+	/// Configure [`Session::end_session`] to return `Err(f())` on every
+	/// call. The call is still recorded first.
+	pub fn with_end_session_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.session = self.session.with_end_session_error(f);
+		self
+	}
+
+	/// Configure [`Power::pir_set`] to return `Err(f())` on every call.
+	/// The call is still recorded first.
+	pub fn with_pir_set_error<F>(mut self, f: F) -> Self
+	where
+		F: Fn() -> Error + Send + Sync + 'static,
+	{
+		self.power = self.power.with_pir_set_error(f);
+		self
+	}
+
 	/// Install the closure invoked on [`DeviceAdmin::capabilities`].
 	pub fn with_capabilities<F>(mut self, f: F) -> Self
 	where

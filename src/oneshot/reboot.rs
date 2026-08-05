@@ -20,4 +20,16 @@ mod tests {
 		assert_eq!(outcome, Outcome::Reboot);
 		assert_eq!(*fake.calls().reboot.lock().unwrap(), 1);
 	}
+
+	#[tokio::test]
+	async fn reboot_error_propagates_with_context() {
+		use crate::baichuan::bc_protocol::Error;
+		use crate::fake_camera::FakeDeviceAdmin;
+		let fake = FakeDeviceAdmin::new()
+			.with_reboot_error(|| Error::Other("reboot refused"))
+			.build();
+		let err = run(&*fake).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("reboot command failed"));
+		assert_eq!(*fake.calls().reboot.lock().unwrap(), 1);
+	}
 }

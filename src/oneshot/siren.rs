@@ -20,4 +20,16 @@ mod tests {
 		assert_eq!(outcome, Outcome::Siren);
 		assert_eq!(*fake.calls().siren.lock().unwrap(), 1);
 	}
+
+	#[tokio::test]
+	async fn siren_error_propagates_with_context() {
+		use crate::baichuan::bc_protocol::Error;
+		use crate::fake_camera::FakeLighting;
+		let fake = FakeLighting::new()
+			.with_siren_error(|| Error::Other("siren refused"))
+			.build();
+		let err = run(&*fake).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("siren trigger failed"));
+		assert_eq!(*fake.calls().siren.lock().unwrap(), 1);
+	}
 }

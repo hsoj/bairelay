@@ -180,4 +180,45 @@ mod tests {
 			vec![ZoomLevel::from_factor(0.0)]
 		);
 	}
+
+	// Every command entry point wraps its driver error in a distinct
+	// context string; each test pins one entry point's chain and that
+	// the failing call was actually attempted.
+
+	fn erroring_ptz() -> std::sync::Arc<crate::fake_camera::FakePtz> {
+		use crate::baichuan::bc_protocol::Error;
+		crate::fake_camera::FakePtz::new()
+			.with_ptz_error(|| Error::Other("ptz refused"))
+			.build()
+	}
+
+	#[tokio::test]
+	async fn preset_move_error_propagates_with_context() {
+		let fake = erroring_ptz();
+		let err = preset(&*fake, Some(3)).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("moveto_ptz_preset failed"));
+		assert_eq!(*fake.calls().moveto_ptz_preset.lock().unwrap(), vec![3]);
+	}
+
+	#[tokio::test]
+	async fn assign_error_propagates_with_context() {
+		let fake = erroring_ptz();
+		let err = assign(&*fake, 7, "porch".into()).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("set_ptz_preset failed"));
+	}
+
+	#[tokio::test]
+	async fn control_error_propagates_with_context() {
+		let fake = erroring_ptz();
+		let err = control(&*fake, Direction::Up, 10, None).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("send_ptz failed"));
+		assert_eq!(fake.calls().send_ptz.lock().unwrap().len(), 1);
+	}
+
+	#[tokio::test]
+	async fn zoom_error_propagates_with_context() {
+		let fake = erroring_ptz();
+		let err = zoom(&*fake, 2.0).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("zoom_to failed"));
+	}
 }

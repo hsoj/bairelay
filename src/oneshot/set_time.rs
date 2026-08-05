@@ -37,4 +37,16 @@ mod tests {
 		let year = calls[0].year();
 		assert!(utc.starts_with(&year.to_string()));
 	}
+
+	#[tokio::test]
+	async fn set_time_error_propagates_with_context() {
+		use crate::baichuan::bc_protocol::Error;
+		use crate::fake_camera::FakeDeviceAdmin;
+		let fake = FakeDeviceAdmin::new()
+			.with_set_time_error(|| Error::Other("clock refused"))
+			.build();
+		let err = run(&*fake).await.unwrap_err();
+		assert!(format!("{:#}", err).contains("set_time failed"));
+		assert_eq!(fake.calls().set_time.lock().unwrap().len(), 1);
+	}
 }
