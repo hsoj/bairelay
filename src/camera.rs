@@ -994,7 +994,7 @@ impl CameraHandle {
 	/// [`Self::KEEPALIVE_MAX_FAILURES`] consecutive failures before
 	/// disconnecting. Cadence and per-probe timeout are both
 	/// [`Self::KEEPALIVE_INTERVAL`].
-	async fn keepalive_loop(&self, camera: &dyn Camera, session_cancel: &CancellationToken) {
+	async fn keepalive_loop(&self, camera: &dyn Session, session_cancel: &CancellationToken) {
 		let mut interval = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
 		let mut consecutive_failures: u32 = 0;
 
@@ -1191,7 +1191,7 @@ impl CameraHandle {
 		// Connection lost or shutdown -- cancel all session tasks
 		// and tear down everything that depends on the live driver.
 		session_cancel.cancel();
-		self.teardown_session_tasks(tasks, &driver).await;
+		self.teardown_session_tasks(tasks, &*driver).await;
 	}
 
 	/// Spawn the per-session tasks that hold their own clones of the
@@ -1219,9 +1219,10 @@ impl CameraHandle {
 		if let Some(ref mqtt) = self.mqtt_client {
 			let reporter = self.status_reporter(mqtt);
 			if self.config.mqtt.enable_motion {
+				let events: Arc<dyn Events> = driver.clone();
 				tasks.spawn(camera_tasks::motion_listener(
 					self.config.name.clone(),
-					Arc::clone(driver),
+					events,
 					Arc::clone(&reporter),
 					self.wake_lock.clone(),
 					session_cancel.clone(),
@@ -1233,9 +1234,10 @@ impl CameraHandle {
 			// that verdict permanent rather than per-session — see
 			// `camera_tasks::battery_poller`.
 			if self.config.mqtt.enable_battery && !self.battery_unsupported() {
+				let power: Arc<dyn Power> = driver.clone();
 				tasks.spawn(camera_tasks::battery_poller(
 					self.config.name.clone(),
-					Arc::clone(driver),
+					power,
 					Arc::clone(&reporter),
 					self.config.mqtt.battery_update,
 					session_cancel.clone(),
@@ -1243,24 +1245,27 @@ impl CameraHandle {
 				));
 			}
 			if self.config.mqtt.enable_floodlight {
+				let lighting: Arc<dyn Lighting> = driver.clone();
 				tasks.spawn(camera_tasks::floodlight_poller(
 					self.config.name.clone(),
-					Arc::clone(driver),
+					lighting,
 					Arc::clone(&reporter),
 					self.config.mqtt.floodlight_update,
 					session_cancel.clone(),
 				));
+				let events: Arc<dyn Events> = driver.clone();
 				tasks.spawn(camera_tasks::floodlight_listener(
 					self.config.name.clone(),
-					Arc::clone(driver),
+					events,
 					Arc::clone(&reporter),
 					session_cancel.clone(),
 				));
 			}
 			if self.config.mqtt.enable_pir {
+				let power: Arc<dyn Power> = driver.clone();
 				camera_tasks::publish_pir_state(
 					self.config.name.clone(),
-					Arc::clone(driver),
+					power,
 					Arc::clone(&reporter),
 				)
 				.await;
@@ -1297,7 +1302,7 @@ impl CameraHandle {
 	async fn teardown_session_tasks(
 		self: &Arc<Self>,
 		mut tasks: tokio::task::JoinSet<()>,
-		driver: &Arc<dyn Camera>,
+		driver: &dyn Session,
 	) {
 		// Give tasks a brief window to exit gracefully, then abort.
 		let drain_deadline = tokio::time::sleep(Duration::from_secs(2));

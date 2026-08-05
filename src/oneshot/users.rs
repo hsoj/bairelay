@@ -1,4 +1,4 @@
-use crate::camera::Camera;
+use crate::camera::DeviceAdmin;
 use anyhow::{Context, Result};
 
 use super::output::{Outcome, UserInfo};
@@ -35,7 +35,7 @@ pub enum Action {
 	},
 }
 
-pub async fn run(cam: &dyn Camera, action: Action) -> Result<Outcome> {
+pub async fn run(cam: &dyn DeviceAdmin, action: Action) -> Result<Outcome> {
 	match action {
 		Action::List => {
 			let list = cam.users().await.context("get_users failed")?;

@@ -1,9 +1,9 @@
-use crate::camera::Camera;
+use crate::camera::DeviceAdmin;
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn DeviceAdmin) -> Result<Outcome> {
 	let info = cam.version().await.context("camera version query failed")?;
 	Ok(Outcome::Version {
 		model: info.model.unwrap_or_else(|| "unknown".into()),

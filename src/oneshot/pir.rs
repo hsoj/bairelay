@@ -1,9 +1,9 @@
-use crate::camera::Camera;
+use crate::camera::Power;
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn Camera, set: Option<bool>) -> Result<Outcome> {
+pub async fn run(cam: &dyn Power, set: Option<bool>) -> Result<Outcome> {
 	if let Some(on) = set {
 		cam.pir_set(on).await.context("pir_set failed")?;
 	}

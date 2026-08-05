@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::baichuan::bc_protocol::{Error as CoreError, MotionStatus};
 
-use crate::camera::Camera;
+use crate::camera::{Events, Lighting, Power};
 
 use crate::rtsp::buffer::LastFrameBuffer;
 
@@ -27,7 +27,7 @@ use crate::wake_lock::{WakeLockCounter, WakeLockGuard};
 
 pub async fn motion_listener(
 	camera_name: String,
-	bc_camera: Arc<dyn Camera>,
+	bc_camera: Arc<dyn Events>,
 	reporter: Arc<dyn StatusReporter>,
 	wake_lock: WakeLockCounter,
 	cancel: CancellationToken,
@@ -206,7 +206,7 @@ pub(crate) fn advance_battery_counter(
 /// never silence a real battery.
 pub async fn battery_poller(
 	camera_name: String,
-	bc_camera: Arc<dyn Camera>,
+	bc_camera: Arc<dyn Power>,
 	reporter: Arc<dyn StatusReporter>,
 	interval_ms: u64,
 	cancel: CancellationToken,
@@ -385,7 +385,7 @@ pub async fn preview_poller(
 
 pub async fn floodlight_poller(
 	camera_name: String,
-	bc_camera: Arc<dyn Camera>,
+	bc_camera: Arc<dyn Lighting>,
 	reporter: Arc<dyn StatusReporter>,
 	interval_ms: u64,
 	cancel: CancellationToken,
@@ -417,7 +417,7 @@ pub async fn floodlight_poller(
 
 pub async fn floodlight_listener(
 	camera_name: String,
-	bc_camera: Arc<dyn Camera>,
+	bc_camera: Arc<dyn Events>,
 	reporter: Arc<dyn StatusReporter>,
 	cancel: CancellationToken,
 ) {
@@ -454,7 +454,7 @@ pub async fn floodlight_listener(
 /// only changes via `control/pir` commands (handled in mqtt_dispatch).
 pub async fn publish_pir_state(
 	camera_name: String,
-	bc_camera: Arc<dyn Camera>,
+	bc_camera: Arc<dyn Power>,
 	reporter: Arc<dyn StatusReporter>,
 ) {
 	match tokio::time::timeout(Duration::from_secs(10), bc_camera.pir_config()).await {

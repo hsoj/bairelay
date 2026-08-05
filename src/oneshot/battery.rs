@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
-use crate::camera::Camera;
+use crate::camera::Power;
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn Power) -> Result<Outcome> {
 	let status = cam.battery_status().await.context("battery query failed")?;
 	// The port already clamps percent to 0–100 and types voltage as
 	// millivolts; negative mV readings (seen from some firmwares

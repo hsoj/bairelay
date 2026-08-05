@@ -6,7 +6,7 @@ use crate::baichuan::bc_protocol::{StreamKind, VideoStream};
 use anyhow::{Context, Result};
 
 use crate::baichuan::bcmedia::model::{BcMedia, VideoType};
-use crate::camera::Camera;
+use crate::camera::{Stills, Video};
 
 use super::errors::UsageError;
 use super::output::Outcome;
@@ -15,8 +15,8 @@ use super::output::Outcome;
 // Matches neolink's `image --use-stream` default window.
 const FIRST_IFRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn run(
-	cam: &dyn Camera,
+pub async fn run<C: Stills + Video + ?Sized>(
+	cam: &C,
 	output_path: Option<&Path>,
 	mode_json: bool,
 	use_stream: bool,
@@ -43,8 +43,8 @@ pub(crate) fn check_json_output(mode_json: bool, output_path: Option<&Path>) -> 
 	Ok(())
 }
 
-pub(crate) async fn capture_via_snap(
-	cam: &dyn Camera,
+pub(crate) async fn capture_via_snap<C: Stills + ?Sized>(
+	cam: &C,
 	output_path: Option<&Path>,
 ) -> Result<Outcome> {
 	let jpeg = cam.snapshot().await.context("snapshot failed")?;
@@ -59,7 +59,10 @@ pub(crate) async fn capture_via_snap(
 /// Start a video stream, grab the first I-frame's raw Annex-B NAL
 /// bytes, stop the stream, and write the bitstream out. No decode —
 /// users who need a JPEG pipe through `ffmpeg -i <file> -vframes 1`.
-async fn capture_via_stream(cam: &dyn Camera, output_path: Option<&Path>) -> Result<Outcome> {
+async fn capture_via_stream<C: Video + ?Sized>(
+	cam: &C,
+	output_path: Option<&Path>,
+) -> Result<Outcome> {
 	let mut stream = cam
 		.start_video(StreamKind::Main)
 		.await

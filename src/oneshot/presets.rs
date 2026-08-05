@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 
 use super::output::{Outcome, Preset};
-use crate::camera::Camera;
+use crate::camera::Ptz;
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn Ptz) -> Result<Outcome> {
 	let slots = cam.ptz_presets().await.context("ptz_presets failed")?;
 	let presets = slots
 		.into_iter()

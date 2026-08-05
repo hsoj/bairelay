@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::camera::Camera;
+use crate::camera::{Events, Lighting};
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
@@ -23,7 +23,7 @@ const FLOODLIGHT_HOLD_SECS: u16 = 30;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Toggle when `set` is `Some`, otherwise read the current state.
-pub async fn run(cam: &dyn Camera, set: Option<bool>) -> Result<Outcome> {
+pub async fn run<C: Lighting + Events + ?Sized>(cam: &C, set: Option<bool>) -> Result<Outcome> {
 	if let Some(on) = set {
 		cam.set_floodlight_manual(on, FLOODLIGHT_HOLD_SECS)
 			.await
@@ -33,7 +33,7 @@ pub async fn run(cam: &dyn Camera, set: Option<bool>) -> Result<Outcome> {
 	Ok(Outcome::Floodlight { state })
 }
 
-async fn read_current_state(cam: &dyn Camera) -> Result<bool> {
+async fn read_current_state<C: Events + ?Sized>(cam: &C) -> Result<bool> {
 	let mut rx = cam
 		.listen_on_floodlight()
 		.await

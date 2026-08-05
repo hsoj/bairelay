@@ -47,7 +47,7 @@ use crate::rtsp::url::StreamKind as RtspStreamKind;
 use crate::baichuan::bc_protocol::StreamKind as CoreStreamKind;
 
 use crate::baichuan::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
-use crate::camera::Camera;
+use crate::camera::Video;
 use crate::gap_bridging::BridgingPolicy;
 pub use crate::gap_bridging::GapState;
 
@@ -256,7 +256,7 @@ impl StreamSourceParts {
 /// `reader_task` previously took 16 individual parameters. Bundling keeps
 /// the signature stable when fields are added.
 struct ReaderTaskArgs {
-	camera: Arc<dyn Camera>,
+	camera: Arc<dyn Video>,
 	camera_name: String,
 	rtsp_kind: RtspStreamKind,
 	core_kind: CoreStreamKind,
@@ -324,7 +324,7 @@ impl StreamSource {
 	/// `crate::baichuan::StreamKind` internally), and `last_frame` is the
 	/// camera-scoped buffer shared across all sources for this camera.
 	pub fn start(
-		camera: Arc<dyn Camera>,
+		camera: Arc<dyn Video>,
 		camera_name: String,
 		kind: RtspStreamKind,
 		last_frame: Arc<LastFrameBuffer>,

@@ -1,11 +1,11 @@
-use crate::camera::Camera;
+use crate::camera::DeviceAdmin;
 use anyhow::{Context, Result};
 
 use crate::local_time;
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn DeviceAdmin) -> Result<Outcome> {
 	// `now_local()` carries the captured UTC offset. The Baichuan
 	// `SystemGeneral` packet encodes both the wall-clock components
 	// and `time_zone = -offset.whole_seconds()`, so the camera's OSD

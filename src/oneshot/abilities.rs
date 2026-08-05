@@ -5,12 +5,12 @@
 //! `docs/implementation.md` § XML parsing brittleness).
 
 use crate::baichuan::bc::xml::{AbilityInfo, AbilityInfoToken};
-use crate::camera::Camera;
+use crate::camera::DeviceAdmin;
 use anyhow::{Context, Result};
 
 use super::output::{AbilityEntry, Outcome};
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn DeviceAdmin) -> Result<Outcome> {
 	let info = cam
 		.ability_info()
 		.await

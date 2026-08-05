@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use super::errors::UsageError;
 use super::output::{Outcome, ServiceEntry};
-use crate::camera::Camera;
+use crate::camera::DeviceAdmin;
 use crate::camera_services::ServiceKind;
 
 /// What to do with the service: read, enable, disable, set port, or both.
@@ -20,7 +20,7 @@ pub enum Action {
 	Set { port: u16, enabled: bool },
 }
 
-pub async fn run(cam: &dyn Camera, service: ServiceKind, action: Action) -> Result<Outcome> {
+pub async fn run(cam: &dyn DeviceAdmin, service: ServiceKind, action: Action) -> Result<Outcome> {
 	// Apply the mutation first (if any), then always read back so the
 	// returned Outcome reflects the camera's current state.
 	match &action {
@@ -59,7 +59,7 @@ const PER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 /// older firmwares don't expose all six on every channel, and any
 /// individual RPC that exceeds [`PER_RPC_TIMEOUT`] degrades to the
 /// same "unknown" entry instead of starving the remaining reads.
-pub async fn run_all(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run_all(cam: &dyn DeviceAdmin) -> Result<Outcome> {
 	let mut services = Vec::with_capacity(ServiceKind::ALL.len());
 	for svc in ServiceKind::ALL {
 		match tokio::time::timeout(PER_RPC_TIMEOUT, cam.service(svc)).await {
@@ -79,7 +79,7 @@ pub async fn run_all(cam: &dyn Camera) -> Result<Outcome> {
 }
 
 async fn apply_toggle(
-	cam: &dyn Camera,
+	cam: &dyn DeviceAdmin,
 	service: ServiceKind,
 	set_on: Option<bool>,
 	set_port: Option<u16>,

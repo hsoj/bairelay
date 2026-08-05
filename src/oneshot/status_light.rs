@@ -1,9 +1,9 @@
-use crate::camera::Camera;
+use crate::camera::Lighting;
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn Camera, set: Option<bool>) -> Result<Outcome> {
+pub async fn run(cam: &dyn Lighting, set: Option<bool>) -> Result<Outcome> {
 	if let Some(on) = set {
 		cam.led_light_set(on)
 			.await

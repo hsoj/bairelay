@@ -1,9 +1,9 @@
-use crate::camera::Camera;
+use crate::camera::DeviceAdmin;
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn DeviceAdmin) -> Result<Outcome> {
 	cam.reboot().await.context("reboot command failed")?;
 	Ok(Outcome::Reboot)
 }

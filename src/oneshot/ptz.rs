@@ -1,12 +1,12 @@
 use crate::baichuan::bc_protocol::Direction;
 use anyhow::{Context, Result};
 
-use crate::camera::Camera;
+use crate::camera::Ptz;
 
 use super::output::{Outcome, Preset};
 
 /// Move to a preset or, if `preset_id` is `None`, list the camera's presets.
-pub async fn preset(cam: &dyn Camera, preset_id: Option<u8>) -> Result<Outcome> {
+pub async fn preset(cam: &dyn Ptz, preset_id: Option<u8>) -> Result<Outcome> {
 	match preset_id {
 		Some(id) => {
 			cam.moveto_ptz_preset(id)
@@ -28,7 +28,7 @@ pub async fn preset(cam: &dyn Camera, preset_id: Option<u8>) -> Result<Outcome> 
 	}
 }
 
-pub async fn assign(cam: &dyn Camera, preset_id: u8, name: String) -> Result<Outcome> {
+pub async fn assign(cam: &dyn Ptz, preset_id: u8, name: String) -> Result<Outcome> {
 	cam.set_ptz_preset(preset_id, name.clone())
 		.await
 		.context("set_ptz_preset failed")?;
@@ -36,7 +36,7 @@ pub async fn assign(cam: &dyn Camera, preset_id: u8, name: String) -> Result<Out
 }
 
 pub async fn control(
-	cam: &dyn Camera,
+	cam: &dyn Ptz,
 	direction: Direction,
 	amount: u32,
 	speed: Option<u32>,
@@ -55,7 +55,7 @@ pub async fn control(
 	})
 }
 
-pub async fn zoom(cam: &dyn Camera, amount: f32) -> Result<Outcome> {
+pub async fn zoom(cam: &dyn Ptz, amount: f32) -> Result<Outcome> {
 	// The CLI accepts the user-facing zoom factor to match neolink's
 	// interface; `ZoomLevel`'s constructor owns the wire scaling.
 	cam.zoom_to(crate::ptz::ZoomLevel::from_factor(amount))

@@ -1,9 +1,9 @@
-use crate::camera::Camera;
+use crate::camera::Lighting;
 use anyhow::{Context, Result};
 
 use super::output::Outcome;
 
-pub async fn run(cam: &dyn Camera) -> Result<Outcome> {
+pub async fn run(cam: &dyn Lighting) -> Result<Outcome> {
 	cam.siren().await.context("siren trigger failed")?;
 	Ok(Outcome::Siren)
 }
