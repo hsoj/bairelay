@@ -117,23 +117,30 @@ impl BridgingPolicy {
 	/// Advance the gap-detection timer.
 	///
 	/// Flips to [`GapState::Bridging`] once upstream has been silent
-	/// longer than the threshold. `replay_anchor` is the cached key
+	/// longer than the threshold. `replay_anchor` yields the cached key
 	/// frame's captured PTS, or `None` when the caller has nothing
 	/// replayable (no burst captured yet, or every NAL filtered out).
+	/// It is consulted only once a gap is actually open: assembling a
+	/// replay payload costs the driver a full burst copy, and the
+	/// steady-state Live tick must stay a cheap threshold check.
 	///
 	/// Returns `Some(pts)` when the caller should re-broadcast the
 	/// cached key frame at that timestamp. Returns `None` — leaving all
-	/// counters untouched — when there is nothing to replay, so a source
-	/// that stalls before its first key frame doesn't silently consume
-	/// PTS space.
-	pub fn on_tick(&mut self, now: Instant, replay_anchor: Option<u32>) -> Option<u32> {
+	/// counters untouched — when there is no open gap or nothing to
+	/// replay, so a source that stalls before its first key frame
+	/// doesn't silently consume PTS space.
+	pub fn on_tick(
+		&mut self,
+		now: Instant,
+		replay_anchor: impl FnOnce() -> Option<u32>,
+	) -> Option<u32> {
 		if now.saturating_duration_since(self.last_upstream_at) > self.gap_threshold {
 			self.state = GapState::Bridging;
 		}
 		if self.state != GapState::Bridging {
 			return None;
 		}
-		let anchor = replay_anchor?;
+		let anchor = replay_anchor()?;
 		Some(self.advance_replay_pts(anchor, now))
 	}
 
@@ -188,7 +195,7 @@ mod tests {
 		let t0 = Instant::now();
 		let mut p = policy(t0);
 		assert_eq!(
-			p.on_tick(t0 + Duration::from_millis(1_999), Some(100)),
+			p.on_tick(t0 + Duration::from_millis(1_999), || Some(100)),
 			None
 		);
 		assert_eq!(p.state(), GapState::Live);
@@ -201,7 +208,7 @@ mod tests {
 		// are both operator-configurable and can coincide.
 		let t0 = Instant::now();
 		let mut p = policy(t0);
-		assert_eq!(p.on_tick(t0 + THRESHOLD, Some(100)), None);
+		assert_eq!(p.on_tick(t0 + THRESHOLD, || Some(100)), None);
 		assert_eq!(p.state(), GapState::Live);
 	}
 
@@ -210,7 +217,7 @@ mod tests {
 		let t0 = Instant::now();
 		let mut p = policy(t0);
 		let pts = p
-			.on_tick(t0 + Duration::from_secs(3), Some(7_000))
+			.on_tick(t0 + Duration::from_secs(3), || Some(7_000))
 			.expect("gap exceeded → replay");
 		assert_eq!(p.state(), GapState::Bridging);
 		// First replay of this source's life: no prior emission, so the
@@ -222,17 +229,19 @@ mod tests {
 	fn successive_replays_advance_by_wallclock_delta() {
 		let t0 = Instant::now();
 		let mut p = policy(t0);
-		let first = p.on_tick(t0 + Duration::from_secs(3), Some(7_000)).unwrap();
+		let first = p
+			.on_tick(t0 + Duration::from_secs(3), || Some(7_000))
+			.unwrap();
 		assert_eq!(first, 7_000);
 		// 200 ms later → 200 ms × 90 kHz = 18 000 ticks.
 		let second = p
-			.on_tick(t0 + Duration::from_millis(3_200), Some(7_000))
+			.on_tick(t0 + Duration::from_millis(3_200), || Some(7_000))
 			.unwrap();
 		assert_eq!(second, 7_000 + 18_000);
 		// Another 200 ms → another 18 000, measured from the previous
 		// emission, not from the anchor.
 		let third = p
-			.on_tick(t0 + Duration::from_millis(3_400), Some(7_000))
+			.on_tick(t0 + Duration::from_millis(3_400), || Some(7_000))
 			.unwrap();
 		assert_eq!(third, 7_000 + 36_000);
 	}
@@ -244,7 +253,7 @@ mod tests {
 		let mut last = 0u32;
 		for step in 0..50 {
 			let now = t0 + Duration::from_secs(3) + Duration::from_millis(200 * step);
-			let pts = p.on_tick(now, Some(1_000)).expect("bridging → replay");
+			let pts = p.on_tick(now, || Some(1_000)).expect("bridging → replay");
 			if step > 0 {
 				assert!(pts > last, "replay PTS must advance every tick");
 			}
@@ -256,7 +265,8 @@ mod tests {
 	fn broadcast_during_gap_resumes_live_and_reanchors() {
 		let t0 = Instant::now();
 		let mut p = policy(t0);
-		p.on_tick(t0 + Duration::from_secs(3), Some(7_000)).unwrap();
+		p.on_tick(t0 + Duration::from_secs(3), || Some(7_000))
+			.unwrap();
 		assert!(p.is_bridging());
 
 		// A real frame lands: back to Live, and the live PTS becomes the
@@ -268,7 +278,7 @@ mod tests {
 		// Upstream goes quiet again; the next replay continues from the
 		// live frame's PTS, not from the stale burst anchor.
 		let pts = p
-			.on_tick(t0 + Duration::from_millis(6_100), Some(7_000))
+			.on_tick(t0 + Duration::from_millis(6_100), || Some(7_000))
 			.unwrap();
 		assert_eq!(pts, 50_000 + (2_100 * 90));
 	}
@@ -280,7 +290,7 @@ mod tests {
 		// A packet at t+1.5s pushes the deadline out; the tick at t+3s
 		// is only 1.5s past it, so no gap.
 		p.on_upstream_packet(t0 + Duration::from_millis(1_500));
-		assert_eq!(p.on_tick(t0 + Duration::from_secs(3), Some(1)), None);
+		assert_eq!(p.on_tick(t0 + Duration::from_secs(3), || Some(1)), None);
 		assert_eq!(p.state(), GapState::Live);
 	}
 
@@ -293,7 +303,8 @@ mod tests {
 		// replay stream while the screen is still frozen.
 		let t0 = Instant::now();
 		let mut p = policy(t0);
-		p.on_tick(t0 + Duration::from_secs(3), Some(7_000)).unwrap();
+		p.on_tick(t0 + Duration::from_secs(3), || Some(7_000))
+			.unwrap();
 		assert!(p.is_bridging());
 
 		p.on_upstream_packet(t0 + Duration::from_secs(4));
@@ -307,7 +318,7 @@ mod tests {
 	fn no_replay_anchor_enters_bridging_but_emits_nothing() {
 		let t0 = Instant::now();
 		let mut p = policy(t0);
-		assert_eq!(p.on_tick(t0 + Duration::from_secs(3), None), None);
+		assert_eq!(p.on_tick(t0 + Duration::from_secs(3), || None), None);
 		assert_eq!(
 			p.state(),
 			GapState::Bridging,
@@ -316,7 +327,9 @@ mod tests {
 
 		// Counters were untouched, so the first real replay still
 		// anchors on the burst rather than on a phantom emission.
-		let pts = p.on_tick(t0 + Duration::from_secs(4), Some(2_500)).unwrap();
+		let pts = p
+			.on_tick(t0 + Duration::from_secs(4), || Some(2_500))
+			.unwrap();
 		assert_eq!(pts, 2_500);
 	}
 
@@ -326,7 +339,10 @@ mod tests {
 		// ticker can run without ever declaring a gap.
 		let t0 = Instant::now();
 		let mut p = BridgingPolicy::new(Duration::MAX, t0);
-		assert_eq!(p.on_tick(t0 + Duration::from_secs(86_400), Some(1)), None);
+		assert_eq!(
+			p.on_tick(t0 + Duration::from_secs(86_400), || Some(1)),
+			None
+		);
 		assert_eq!(p.state(), GapState::Live);
 	}
 
@@ -339,7 +355,7 @@ mod tests {
 		let mut p = policy(t0);
 		p.on_broadcast(u32::MAX - 10, t0);
 		let pts = p
-			.on_tick(t0 + Duration::from_secs(3), Some(0))
+			.on_tick(t0 + Duration::from_secs(3), || Some(0))
 			.expect("bridging → replay");
 		// 3 s × 90 kHz = 270 000 ticks past u32::MAX - 10.
 		assert_eq!(pts, (u32::MAX - 10).wrapping_add(270_000));
@@ -357,9 +373,24 @@ mod tests {
 		let pts = p
 			.on_tick(
 				t0 + Duration::from_secs(3) + Duration::from_micros(5),
-				Some(0),
+				|| Some(0),
 			)
 			.unwrap();
 		assert_eq!(pts, 1_000);
+	}
+
+	#[test]
+	fn live_tick_never_consults_the_replay_anchor() {
+		// The anchor closure is where the driver pays for a full burst
+		// copy; on the steady-state Live tick it must not run at all.
+		let t0 = Instant::now();
+		let mut p = policy(t0);
+		let consulted = std::cell::Cell::new(false);
+		let r = p.on_tick(t0 + Duration::from_millis(100), || {
+			consulted.set(true);
+			Some(42)
+		});
+		assert_eq!(r, None);
+		assert!(!consulted.get(), "Live tick must not assemble a payload");
 	}
 }

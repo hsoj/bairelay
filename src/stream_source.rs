@@ -1079,24 +1079,33 @@ fn tick_bridging(
 	last_frame: &Arc<LastFrameBuffer>,
 	bridging: &Mutex<BridgingPolicy>,
 ) {
-	// Prepare the replayable payload before locking the policy: an
-	// empty NAL list after filtering counts as "nothing to replay", so
-	// the policy must not advance its PTS counters for it.
-	let replayable = last_frame.video_snapshot().and_then(|burst| {
+	// The replay payload is assembled lazily, inside the policy's
+	// anchor closure: on the steady-state Live tick this function is a
+	// threshold check, not a burst copy thrown away 5×/s per source.
+	// An empty NAL list after filtering counts as "nothing to replay",
+	// so the closure yields `None` and the policy leaves its PTS
+	// counters untouched. Building the payload under the policy lock is
+	// contention-free: a gap only opens when upstream is silent, so the
+	// reader has nothing to feed the same lock.
+	let mut payload = None;
+	let synth_pts = lock_recover(bridging).on_tick(now_std(), || {
+		let burst = last_frame.video_snapshot()?;
 		let nals: Vec<Bytes> = burst
 			.iframe_nals
 			.iter()
 			.filter(|n| !is_parameter_set_nal(n, burst.codec) && is_decodable_nal(n, burst.codec))
 			.map(|n| Bytes::copy_from_slice(n))
 			.collect();
-		(!nals.is_empty()).then_some((burst.codec, nals, burst.captured_pts_90khz))
+		if nals.is_empty() {
+			return None;
+		}
+		payload = Some((burst.codec, nals));
+		Some(burst.captured_pts_90khz)
 	});
-
-	let anchor = replayable.as_ref().map(|(_, _, pts)| *pts);
-	let Some(synth_pts) = lock_recover(bridging).on_tick(now_std(), anchor) else {
+	let Some(synth_pts) = synth_pts else {
 		return;
 	};
-	let (codec, nals, _) = replayable.expect("policy only emits when an anchor was supplied");
+	let (codec, nals) = payload.expect("policy only emits when the closure supplied an anchor");
 
 	let _ = tx.send(Frame::Video {
 		codec,
