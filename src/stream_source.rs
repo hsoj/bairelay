@@ -397,9 +397,10 @@ impl StreamSource {
 	/// `BcCamera::stop_video`, so tests exercise the same translator
 	/// plumbing production uses without any real camera.
 	///
-	/// Gated on the `test-util` feature + `#[cfg(test)]` so release builds
-	/// do not carry it. Returns the `Arc<StreamSource>` only — the caller
+	/// Gated on `any(test, feature = "test-util")` so release builds do
+	/// not carry it. Returns the `Arc<StreamSource>` only — the caller
 	/// drops its own `CancellationToken` or the source to terminate.
+	#[cfg(any(test, feature = "test-util"))]
 	#[allow(dead_code, private_bounds)]
 	pub(crate) fn start_with_packet_source<S>(
 		camera_name: String,
@@ -584,6 +585,7 @@ impl Drop for StreamSource {
 // `pub(crate)` helpers below appear unused — their callers live in
 // `#[cfg(test)]` unit-test modules that aren't compiled in that mode.
 // The `allow(dead_code)` silences the resulting warning.
+#[cfg(any(test, feature = "test-util"))]
 #[allow(dead_code)]
 impl StreamSource {
 	/// Build a `StreamSource` that owns only its broadcast channel and
@@ -646,12 +648,12 @@ impl StreamSource {
 	/// caller-provided [`LastFrameBuffer`] so the replay-frame tests can
 	/// preload a burst before the ticker fires.
 	///
-	/// `pub` (not `pub(crate)`) so the Task 11 integration test
-	/// in `tests/fixture_replay.rs` can wire a real `StreamSource` behind
+	/// `pub` (not `pub(crate)`) so the integration test in
+	/// `tests/fixture_replay.rs` can wire a real `StreamSource` behind
 	/// a `StreamProvider` shim and exercise production's gap-detection
 	/// ticker + `tick_bridging` end-to-end. The
-	/// `#[cfg(test)]` gate on the enclosing `impl` block keeps this out
-	/// of release builds.
+	/// `#[cfg(any(test, feature = "test-util"))]` gate on the enclosing
+	/// `impl` block keeps this out of release builds.
 	pub fn start_inert_for_test_with_gap_and_last_frame_and_injector(
 		gap_threshold: Duration,
 		last_frame: Arc<LastFrameBuffer>,
@@ -723,11 +725,13 @@ impl StreamSource {
 /// `#[cfg(any(test, feature = "test-util"))]` gate on the struct + impl
 /// keeps this out of release builds; the `test-util` feature is only
 /// pulled in by `bairelay`'s own `[dev-dependencies]` self-reference.
+#[cfg(any(test, feature = "test-util"))]
 pub struct FakeFrameInjector {
 	bridging: Arc<Mutex<BridgingPolicy>>,
 	tx: broadcast::Sender<Frame>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl FakeFrameInjector {
 	/// Mark the source as having just received a real live video frame:
 	/// upstream liveness refreshed and the gap closed, mirroring what

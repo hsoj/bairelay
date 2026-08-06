@@ -80,7 +80,7 @@ impl BridgingPolicy {
 	/// Force the state without waiting for a tick. Test-only: lets
 	/// callers observe `Bridging`-dependent behaviour in sub-millisecond
 	/// time instead of driving the real 200 ms ticker.
-	#[doc(hidden)]
+	#[cfg(any(test, feature = "test-util"))]
 	pub fn set_state_for_test(&mut self, state: GapState) {
 		self.state = state;
 	}
