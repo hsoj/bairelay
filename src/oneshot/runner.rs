@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use crate::baichuan::bc_protocol::BcCamera;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use futures::future::BoxFuture;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::bc_opts::{build_bc_opts, max_encryption};
+use crate::bc_camera::connect_with_phase_timeouts;
+use crate::camera::Camera;
 use crate::config::CameraConfig;
 use crate::oneshot::errors::InterruptedError;
 
@@ -30,11 +30,8 @@ const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 /// session drops.
 pub async fn run<F, T>(cfg: &CameraConfig, cancel: CancellationToken, op: F) -> Result<T>
 where
-	F: for<'a> FnOnce(&'a BcCamera) -> BoxFuture<'a, Result<T>>,
+	F: for<'a> FnOnce(&'a dyn Camera) -> BoxFuture<'a, Result<T>>,
 {
-	let opts = build_bc_opts(cfg);
-	let max_enc = max_encryption(cfg);
-
 	tokio::select! {
 		// Ctrl+C wins the race — skip logout; dropping the TCP session
 		// is enough for the camera to park via its own idle timeout.
@@ -43,26 +40,19 @@ where
 		// roughly the same number of poll cycles.
 		_ = cancel.cancelled() => Err(InterruptedError::new().into()),
 		res = async move {
-			let camera = timeout(CONNECT_TIMEOUT, BcCamera::new(&opts))
-				.await
-				.context("connect timed out")?
-				.context("connect failed")?;
-			timeout(LOGIN_TIMEOUT, camera.login_with_maxenc(max_enc))
-				.await
-				.context("login timed out")?
-				.context("login failed")?;
+			let camera = connect_with_phase_timeouts(cfg, CONNECT_TIMEOUT, LOGIN_TIMEOUT).await?;
 			// Run the op + logout in sequence regardless of op outcome.
 			// Previously a `?` on the timeout-Elapsed case skipped the
 			// logout: a hung op would leave the camera holding our
 			// session-table slot until its own idle timer expired,
-			// instead of releasing immediately on `logout()`. Battery
-			// cams park on TCP-drop either way, but explicit logout is
-			// faster and matches the comment's intent.
-			let op_result: Result<T> = match timeout(OP_TIMEOUT, op(&camera)).await {
+			// instead of releasing immediately on `end_session()`.
+			// Battery cams park on TCP-drop either way, but explicit
+			// logout is faster and matches the comment's intent.
+			let op_result: Result<T> = match timeout(OP_TIMEOUT, op(camera.as_ref())).await {
 				Ok(inner) => inner,
 				Err(_) => Err(anyhow!("operation timed out")),
 			};
-			let _ = timeout(LOGOUT_TIMEOUT, camera.logout()).await;
+			let _ = timeout(LOGOUT_TIMEOUT, camera.end_session()).await;
 			op_result
 		} => res,
 	}
@@ -74,7 +64,7 @@ mod tests {
 	use crate::config::test_helpers::minimal_camera_config;
 
 	/// A pre-cancelled token resolves the `cancel.cancelled()` arm
-	/// before the body's `BcCamera::new` ever attempts a socket connect.
+	/// before the body ever attempts a socket connect.
 	/// Verifies the cancel branch surfaces `InterruptedError` and skips
 	/// the op/logout. This is the only run() path reachable without a
 	/// real socket — the rest of `runner::run` is covered by `manual-

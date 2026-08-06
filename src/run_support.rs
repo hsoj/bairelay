@@ -290,8 +290,7 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 		let cmd = crate::cli_convert::clone_command(&cli.command);
 		let json = cli.json;
 		runner::run(&cam_cfg, cancel, move |cam| {
-			async move { dispatch_oneshot(cam as &dyn crate::camera::Camera, &cmd, json).await }
-				.boxed()
+			async move { dispatch_oneshot(cam, &cmd, json).await }.boxed()
 		})
 		.await
 	}

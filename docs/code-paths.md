@@ -578,11 +578,10 @@ flowchart TD
 
     subgraph RUNNER ["runner::run(cfg, cancel, op) — every step timeout-wrapped"]
         direction TB
-        R1["BcCamera::new<br/>CONNECT_TIMEOUT 100 s"]
-        R2["login_with_maxenc<br/>LOGIN_TIMEOUT 30 s"]
-        R3["op(cam) — the injected closure"]
-        R4["logout — LOGOUT_TIMEOUT 5 s<br/>runs regardless of op outcome"]
-        R1 --> R2 --> R3 --> R4
+        R1["bc_camera::connect_with_phase_timeouts<br/>connect ≤ CONNECT_TIMEOUT 100 s<br/>login ≤ LOGIN_TIMEOUT 30 s"]
+        R3["op(&dyn Camera) — the injected closure"]
+        R4["end_session — LOGOUT_TIMEOUT 5 s<br/>runs regardless of op outcome"]
+        R1 --> R3 --> R4
     end
 
     RUN --> R1

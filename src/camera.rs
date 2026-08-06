@@ -12,9 +12,7 @@ use tokio::sync::mpsc::Receiver;
 use crate::baichuan::bc::xml::{
 	AbilityInfo, FloodlightStatusList, LedState, RfAlarmCfg, UserList, VersionInfo,
 };
-use crate::baichuan::bc_protocol::{
-	BcCamera, Direction, LightState, MotionData, StreamKind, VideoStream,
-};
+use crate::baichuan::bc_protocol::{Direction, LightState, MotionData, StreamKind, VideoStream};
 
 use crate::battery::BatteryStatus;
 use crate::camera_services::{ServiceKind, ServicePortState};
@@ -978,16 +976,6 @@ impl CameraHandle {
 		}
 	}
 
-	/// Attempt to connect and login to the camera.
-	async fn try_connect(&self) -> anyhow::Result<Arc<BcCamera>> {
-		let opts = crate::bc_opts::build_bc_opts(&self.config);
-		let max_enc = crate::bc_opts::max_encryption(&self.config);
-		let camera = BcCamera::new(&opts).await?;
-		camera.login_with_maxenc(max_enc).await?;
-
-		Ok(Arc::new(camera))
-	}
-
 	/// Send periodic keepalive probes to detect connection loss.
 	/// Uses [`Camera::keepalive_probe`] (a lenient wrapper over the
 	/// link-type query, matching neolink's choice) and tolerates up to
@@ -1421,29 +1409,33 @@ impl CameraHandle {
 			// so that Ctrl+C works even if baichuan is stuck
 			let connect_result = tokio::select! {
 				_ = self.cancel.cancelled() => break,
-				result = tokio::time::timeout(Self::CONNECT_TIMEOUT, self.try_connect()) => {
+				result = tokio::time::timeout(
+					Self::CONNECT_TIMEOUT,
+					crate::bc_camera::connect(&self.config),
+				) => {
 					match result {
 						Ok(r) => r,
 						Err(_) => {
 							tracing::warn!(camera = %self.config.name, "Connection timed out ({}s)", Self::CONNECT_TIMEOUT.as_secs());
-							Err(anyhow::anyhow!("Connection timed out"))
+							Err(crate::bc_camera::ConnectError::Timeout("connect"))
 						}
 					}
 				}
 			};
 			match connect_result {
-				Ok(camera) => {
-					let driver: Arc<dyn Camera> = camera;
+				Ok(driver) => {
 					backoff.reset();
 					self.run_connected_session(driver).await;
 				}
 				Err(e) => {
-					if is_login_failure(&e) {
+					let auth = matches!(e, crate::bc_camera::ConnectError::Auth(_));
+					let e = anyhow::Error::from(e);
+					if auth {
 						tracing::error!(camera = %self.config.name, error = %format!("{:#}", e), "Authentication failed — check credentials. Stopping retries.");
 						self.set_state(CameraState::Disconnected);
 						break;
 					}
-					tracing::warn!(camera = %self.config.name, error = %e, "Connection failed");
+					tracing::warn!(camera = %self.config.name, error = %format!("{:#}", e), "Connection failed");
 					self.set_state(CameraState::Disconnected);
 				}
 			}
@@ -1455,7 +1447,7 @@ impl CameraHandle {
 
 		// `run()` has returned ⇒ the camera is not connected. Most exit
 		// paths already land on Disconnected, but a cancel that fires
-		// while `try_connect()` is still in flight breaks out of the
+		// while a connect attempt is still in flight breaks out of the
 		// loop with the state left at `Connecting` — an observable lie
 		// for anything that reads `state()` after shutdown. Idempotent
 		// on the paths that already set it.
@@ -1518,32 +1510,6 @@ async fn aggregate_preview_state_loop(
 			}
 		}
 	}
-}
-
-/// Check whether an error indicates a login/credential failure that
-/// should not be retried.
-///
-/// Walks the anyhow source chain and matches typed
-/// `crate::baichuan::Error::AuthFailed | CameraLoginFail`. The Debug-
-/// substring fallback below catches synthesised `anyhow::anyhow!(...)`
-/// errors used by some test paths and any future intermediate wrapper
-/// that doesn't preserve a downcastable source — keeping it as a
-/// belt-and-braces guard so a future baichuan error-type rename
-/// doesn't silently regress to "retry auth failures forever" — the
-/// brute-force scenario flagged during the strict-code audit.
-fn is_login_failure(err: &anyhow::Error) -> bool {
-	use crate::baichuan::Error as CoreError;
-	for cause in err.chain() {
-		if let Some(core) = cause.downcast_ref::<CoreError>() {
-			if matches!(core, CoreError::AuthFailed | CoreError::CameraLoginFail) {
-				return true;
-			}
-		}
-	}
-	let msg = format!("{:?}", err);
-	msg.contains("AuthFailed")
-		|| msg.contains("CameraLoginFail")
-		|| msg.contains("Credential error")
 }
 
 // ── ReconnectBackoff ──────────────────────────────────────────────────
@@ -1681,7 +1647,7 @@ impl CameraHandle {
 	/// `FakeCamera`) + flip state to `Connected` so
 	/// `mqtt_dispatch::dispatch_control` finds a driver via
 	/// `bc_camera()` and proceeds past the disconnected short-circuit.
-	/// Bypasses `try_connect`.
+	/// Bypasses the connect path.
 	#[allow(dead_code)] // used by upcoming mqtt_dispatch tests in this phase
 	pub(crate) fn set_driver_for_test(&self, driver: Arc<dyn Camera>) {
 		*self.bc_camera.write_recover() = Some(driver);
@@ -2068,63 +2034,9 @@ mod tests {
 		assert!(!should_break);
 	}
 
-	// ── is_login_failure (typed match + Debug-substring fallback) ───
-
-	/// Pin the production contract: a real `crate::baichuan::Error::AuthFailed`
-	/// (the variant `try_connect()` actually returns) must drive the
-	/// permanent-bail. Pre-fix, this would have only worked accidentally
-	/// via the Debug-substring fallback; with typed downcast it's
-	/// guaranteed by the `From` impl in anyhow.
-	#[test]
-	fn is_login_failure_recognises_typed_auth_failed() {
-		let e: anyhow::Error = crate::baichuan::Error::AuthFailed.into();
-		assert!(is_login_failure(&e));
-	}
-
-	#[test]
-	fn is_login_failure_recognises_typed_camera_login_fail() {
-		let e: anyhow::Error = crate::baichuan::Error::CameraLoginFail.into();
-		assert!(is_login_failure(&e));
-	}
-
-	/// `try_connect()` may surface auth failures wrapped in `.context(..)`
-	/// from a future call-site; the chain walk must catch them.
-	#[test]
-	fn is_login_failure_recognises_typed_auth_failed_through_context() {
-		use anyhow::Context;
-		let e: anyhow::Result<()> = Err(crate::baichuan::Error::AuthFailed.into());
-		let wrapped = e.context("connect_with_retry").unwrap_err();
-		assert!(is_login_failure(&wrapped));
-	}
-
-	// Belt-and-braces: the Debug-substring fallback still fires for
-	// synthesised `anyhow::anyhow!(...)` errors (used by some test
-	// paths and any future intermediate wrapper that doesn't preserve
-	// a downcastable source).
-
-	#[test]
-	fn is_login_failure_recognises_auth_fail() {
-		let e: anyhow::Error = anyhow::anyhow!("remote reported AuthFailed for cam-alpha");
-		assert!(is_login_failure(&e));
-	}
-
-	#[test]
-	fn is_login_failure_recognises_camera_login_fail() {
-		let e: anyhow::Error = anyhow::anyhow!("CameraLoginFail on port 9000");
-		assert!(is_login_failure(&e));
-	}
-
-	#[test]
-	fn is_login_failure_recognises_credential_error() {
-		let e: anyhow::Error = anyhow::anyhow!("Credential error: invalid password hash");
-		assert!(is_login_failure(&e));
-	}
-
-	#[test]
-	fn is_login_failure_rejects_generic_io() {
-		let e: anyhow::Error = anyhow::anyhow!("connection reset by peer during initial handshake");
-		assert!(!is_login_failure(&e));
-	}
+	// Auth-vs-retryable classification lives with the adapter now:
+	// `bc_camera::classify_login_error` and its tests pin which login
+	// errors are terminal; the loop only matches `ConnectError::Auth`.
 
 	// ── ReconnectBackoff mechanics ──────────────────────────────────
 
@@ -2193,8 +2105,8 @@ mod tests {
 
 	/// `should_bail` returns true on the first error → the loop exits
 	/// with `Bailed(err)` without retrying. Pins the "auth failure
-	/// short-circuit" contract used by `is_login_failure` in the real
-	/// loop.
+	/// short-circuit" contract the real loop applies via
+	/// `ConnectError::Auth`.
 	#[tokio::test(start_paused = true)]
 	async fn drive_reconnect_bails_on_should_bail() {
 		use std::sync::atomic::{AtomicU32, Ordering};
@@ -2429,8 +2341,8 @@ mod tests {
 	}
 
 	/// `run()` against an unroutable address hits the
-	/// `connect_result = Err` → `is_login_failure` branch (returns
-	/// false on a connection reset/timeout), logs the connect failure,
+	/// `connect_result = Err` non-auth branch (a connection
+	/// reset/timeout is retryable), logs the connect failure,
 	/// and enters the backoff sleep. We cancel before the 2s sleep
 	/// finishes so the task exits via the `sleep_with_cancel → false`
 	/// branch (line 1046 break).
@@ -2474,7 +2386,7 @@ mod tests {
 		assert_eq!(handle.state(), CameraState::Disconnected);
 	}
 
-	/// Cancelling while `try_connect()` is still in flight breaks out of
+	/// Cancelling while a connect attempt is still in flight breaks out of
 	/// the connect `select!` rather than the backoff sleep. `run()` must
 	/// still leave the camera Disconnected: otherwise anything reading
 	/// `state()` after shutdown sees a camera that claims Connecting
@@ -2498,7 +2410,7 @@ mod tests {
 			tokio::spawn(async move { h.run().await })
 		};
 
-		// Long enough for run() to set Connecting and enter try_connect().
+		// Long enough for run() to set Connecting and enter the connect attempt.
 		tokio::time::sleep(Duration::from_millis(200)).await;
 		cancel.cancel();
 
@@ -2856,17 +2768,6 @@ mod tests {
 			.expect("preregistered source returned");
 		// Same Arc → same pointer.
 		assert!(Arc::ptr_eq(&got, &source));
-	}
-
-	/// `is_login_failure` rejects a plain `anyhow::Error` that doesn't
-	/// match any of the three auth substrings. Guards against an
-	/// over-eager match that would short-circuit retries on e.g. a
-	/// TCP reset.
-	#[test]
-	fn is_login_failure_rejects_timeout_style_error() {
-		let e: anyhow::Error =
-			anyhow::anyhow!("deadline elapsed while waiting for handshake reply");
-		assert!(!is_login_failure(&e));
 	}
 
 	// ── Aggregator fine-grained clearing ────────────────────────────

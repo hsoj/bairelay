@@ -8,6 +8,9 @@
 //! identical service-port RPC pairs collapse behind [`ServiceKind`],
 //! and the `Support` XML report is reduced to [`CameraCapabilities`].
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use tokio::sync::mpsc::Receiver;
@@ -21,11 +24,86 @@ use crate::baichuan::bc_protocol::{
 
 use crate::battery::{BatteryStatus, Millivolts};
 use crate::camera::{
-	CameraResult, DeviceAdmin, Events, Lighting, Power, Ptz, Session, Stills, Video,
+	Camera, CameraResult, DeviceAdmin, Events, Lighting, Power, Ptz, Session, Stills, Video,
 };
 use crate::camera_services::{ServiceKind, ServicePortState};
 use crate::capabilities::{ptz_mode_indicates_ptz, CameraCapabilities};
 use crate::ptz::{PresetSlot, ZoomLevel};
+
+/// Connect / login failure, classified here so the reconnect loop and
+/// the one-shot runner never inspect baichuan error internals. The
+/// baichuan cause stays on the `source` chain, which is what
+/// `oneshot::classify` walks for its exit-code table.
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectError {
+	/// The camera rejected the credentials. Terminal: retrying can
+	/// never succeed, and hammers (on battery cameras, drains) the
+	/// camera with doomed logins.
+	#[error("authentication failed")]
+	Auth(#[source] Error),
+	/// Discovery, transport, or protocol failure before or during
+	/// login. Retryable.
+	#[error("connect failed")]
+	Other(#[source] Error),
+	/// A caller-supplied phase budget elapsed.
+	#[error("{0} timed out")]
+	Timeout(&'static str),
+}
+
+/// Split a failed login into terminal-vs-retryable. Only these two
+/// variants mean "the camera answered and said no" — anything else
+/// could be a battery camera still waking.
+fn classify_login_error(e: Error) -> ConnectError {
+	match e {
+		Error::AuthFailed | Error::CameraLoginFail => ConnectError::Auth(e),
+		e => ConnectError::Other(e),
+	}
+}
+
+/// Connect and log in to `config`'s camera, returning it behind the
+/// [`Camera`] port. No internal deadline — callers own the budget (the
+/// reconnect loop wraps this in its `CONNECT_TIMEOUT` + cancel race;
+/// the one-shot CLI budgets the phases separately via
+/// [`connect_with_phase_timeouts`]).
+pub async fn connect(
+	config: &crate::config::CameraConfig,
+) -> Result<Arc<dyn Camera>, ConnectError> {
+	let camera = BcCamera::new(&crate::bc_opts::build_bc_opts(config))
+		.await
+		.map_err(ConnectError::Other)?;
+	login(camera, config).await
+}
+
+/// [`connect`] with separate connect / login budgets. The one-shot CLI
+/// gives discovery its ~80 s retry-loop budget but caps login far
+/// tighter; the constants in `oneshot::runner` carry the rationale.
+pub async fn connect_with_phase_timeouts(
+	config: &crate::config::CameraConfig,
+	connect_timeout: Duration,
+	login_timeout: Duration,
+) -> Result<Arc<dyn Camera>, ConnectError> {
+	let camera = tokio::time::timeout(
+		connect_timeout,
+		BcCamera::new(&crate::bc_opts::build_bc_opts(config)),
+	)
+	.await
+	.map_err(|_| ConnectError::Timeout("connect"))?
+	.map_err(ConnectError::Other)?;
+	tokio::time::timeout(login_timeout, login(camera, config))
+		.await
+		.map_err(|_| ConnectError::Timeout("login"))?
+}
+
+async fn login(
+	camera: BcCamera,
+	config: &crate::config::CameraConfig,
+) -> Result<Arc<dyn Camera>, ConnectError> {
+	camera
+		.login_with_maxenc(crate::bc_opts::max_encryption(config))
+		.await
+		.map_err(classify_login_error)?;
+	Ok(Arc::new(camera))
+}
 
 /// Translate the BC `BatteryInfo` XML into a [`BatteryStatus`].
 /// Clamps percent to 100 once — some Argus firmwares briefly report
@@ -261,6 +339,45 @@ impl DeviceAdmin for BcCamera {
 			ServiceKind::Rtsp => BcCamera::set_rtsp(self, enable, port).await,
 			ServiceKind::Onvif => BcCamera::set_onvif(self, enable, port).await,
 		}
+	}
+}
+
+#[cfg(test)]
+mod connect_tests {
+	use super::*;
+
+	/// Both typed login rejections — and only those — are terminal.
+	/// This is the contract the reconnect loop's permanent-bail rides
+	/// on (auth failures stop retries; anything else backs off).
+	#[test]
+	fn classify_login_error_auth_variants_are_terminal() {
+		assert!(matches!(
+			classify_login_error(Error::AuthFailed),
+			ConnectError::Auth(_)
+		));
+		assert!(matches!(
+			classify_login_error(Error::CameraLoginFail),
+			ConnectError::Auth(_)
+		));
+	}
+
+	#[test]
+	fn classify_login_error_transport_failure_is_retryable() {
+		assert!(matches!(
+			classify_login_error(Error::DroppedConnection),
+			ConnectError::Other(_)
+		));
+	}
+
+	/// `oneshot::classify` picks exit codes by downcasting the baichuan
+	/// error out of the anyhow chain — the wrapper must keep it
+	/// reachable as a `source`.
+	#[test]
+	fn connect_error_keeps_baichuan_cause_on_the_chain() {
+		let e = anyhow::Error::from(classify_login_error(Error::AuthFailed));
+		assert!(e
+			.chain()
+			.any(|c| matches!(c.downcast_ref::<Error>(), Some(Error::AuthFailed))));
 	}
 }
 
