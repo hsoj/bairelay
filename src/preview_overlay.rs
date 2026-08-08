@@ -20,10 +20,14 @@ use crate::preview_state::PreviewState;
 // sha256: 7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954
 const FONT_BYTES: &[u8] = include_bytes!("assets/DejaVuSans.ttf");
 
-static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
+static FONT: OnceLock<Option<FontRef<'static>>> = OnceLock::new();
 
-fn font() -> &'static FontRef<'static> {
-	FONT.get_or_init(|| FontRef::try_from_slice(FONT_BYTES).expect("embedded DejaVuSans TTF valid"))
+/// `None` if the embedded TTF fails to parse — impossible for a
+/// compile-time asset, but a caption-less preview beats a panic in the
+/// preview poller.
+fn font() -> Option<&'static FontRef<'static>> {
+	FONT.get_or_init(|| FontRef::try_from_slice(FONT_BYTES).ok())
+		.as_ref()
 }
 
 /// Render a caption for `state` onto `jpeg`. Returns `jpeg.clone()` for
@@ -66,9 +70,11 @@ const BOTTOM_PADDING_FRAC: f32 = 0.02;
 const LEFT_PADDING_FRAC: f32 = 0.02;
 
 fn draw_caption(img: DynamicImage, caption: &str) -> DynamicImage {
+	let Some(font) = font() else {
+		return img;
+	};
 	let (w, h) = img.dimensions();
 	let mut rgba = img.to_rgba8();
-	let font = font();
 	let h_f = h as f32;
 	let scale = PxScale::from(h_f * TEXT_HEIGHT_FRAC);
 	let scaled = font.as_scaled(scale);

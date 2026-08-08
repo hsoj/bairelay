@@ -888,30 +888,22 @@ async fn handle_setup(
 		ssrc: track_ssrc,
 		clock_rate: first_track_clock_rate,
 	};
-	state.sessions.insert(
-		session_id.clone(),
-		crate::rtsp::server::registry::SessionEntry::new(cancel, subscription, vec![first_track]),
-	);
-	let session_tracks_for_task = state
-		.sessions
-		.tracks_arc(&session_id)
-		.expect("tracks arc missing immediately after insert");
-	let tracks_changed_for_task = state
-		.sessions
-		.tracks_changed_arc(&session_id)
-		.expect("tracks_changed notify missing immediately after insert");
+	// Clone the session task's handles off the entry BEFORE it moves
+	// into the registry: taken from the entry itself they cannot be
+	// absent, where a post-insert lookup would race any future
+	// concurrent removal (idle sweep, TEARDOWN).
+	let entry =
+		crate::rtsp::server::registry::SessionEntry::new(cancel, subscription, vec![first_track]);
+	let session_tracks_for_task = Arc::clone(&entry.tracks);
+	let tracks_changed_for_task = Arc::clone(&entry.tracks_changed);
 	// Shared slot populated by the session task on its first video packet
 	// and read by the PLAY handler to emit `RTP-Info:` (RFC 2326 §12.33).
-	let first_video_rtp_for_task = state
-		.sessions
-		.first_video_rtp(&session_id)
-		.expect("session just inserted");
+	let first_video_rtp_for_task = entry.first_video_rtp.clone();
 	// PLAY gate — the session task parks on this until the client
 	// issues PLAY, so no RTP flows between SETUP and PLAY.
-	let (play_signal_for_task, play_fired_for_task) = state
-		.sessions
-		.play_gate_arc(&session_id)
-		.expect("session just inserted");
+	let play_signal_for_task = Arc::clone(&entry.play_signal);
+	let play_fired_for_task = Arc::clone(&entry.play_fired);
+	state.sessions.insert(session_id.clone(), entry);
 
 	tokio::spawn(async move {
 		crate::rtsp::server::session_task::run(

@@ -30,7 +30,8 @@ use crate::config::CameraConfig;
 use crate::grace_period::GracePeriod;
 use crate::preview_state::PreviewState;
 use crate::status_cache::StatusCache;
-use crate::stream_source::{MutexPoisonRecover as _, RwLockPoisonRecover as _, StreamSource};
+use crate::stream_source::StreamSource;
+use crate::sync::{MutexPoisonRecover as _, RwLockPoisonRecover as _};
 use crate::wake_lock::WakeLockCounter;
 
 // ── Camera capability ports ───────────────────────────────────────────

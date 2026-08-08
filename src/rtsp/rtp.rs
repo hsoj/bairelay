@@ -23,11 +23,23 @@ pub fn build_packet(
 		.ssrc(ssrc)
 		.marker_bit(marker)
 		.payload(payload);
-	let size = builder.calculate_size().expect("valid RTP packet size");
+	// Payload sizes are bounded well below the RTP maximum by the
+	// fragmenters (MTU) and the ADTS frame-length field (8191), so the
+	// builder cannot refuse them; if it ever does, emit nothing — the
+	// receiver treats the missing packet as ordinary RTP loss, which
+	// beats panicking inside the per-packet send path.
+	let size = match builder.calculate_size() {
+		Ok(s) => s,
+		Err(e) => {
+			tracing::error!(error = ?e, payload_len = payload.len(), "RTP packet build failed");
+			return Vec::new();
+		}
+	};
 	let mut buf = vec![0u8; size];
-	builder
-		.write_into(&mut buf)
-		.expect("buffer sized correctly");
+	if let Err(e) = builder.write_into(&mut buf) {
+		tracing::error!(error = ?e, payload_len = payload.len(), "RTP packet write failed");
+		return Vec::new();
+	}
 	buf
 }
 

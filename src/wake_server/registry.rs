@@ -11,6 +11,7 @@
 //! `ac` in the subsequent `R2D_R_R` (live-verify proved cameras
 //! anchor to that value).
 
+use crate::sync::MutexPoisonRecover as _;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Mutex;
@@ -59,7 +60,7 @@ impl SessionAnchors {
 	/// caller should log a warn and drop the request rather than
 	/// growing memory unbounded under a flood.
 	pub fn issue(&self, uid: &str, token: u64, ac: u32, now: Instant) -> bool {
-		let mut map = self.by_uid.lock().expect("SessionAnchors mutex poisoned");
+		let mut map = self.by_uid.lock_recover();
 		// Refreshing an existing UID is always allowed (no size growth).
 		// Only new inserts are bounded.
 		if map.len() >= MAX_MAP_ENTRIES && !map.contains_key(uid) {
@@ -81,7 +82,7 @@ impl SessionAnchors {
 	/// from a hot path (e.g. heartbeat handler) so the map size never
 	/// drifts past the rate of stale entries created.
 	pub fn purge_stale(&self, now: Instant, stale_after: Duration) -> Vec<String> {
-		let mut map = self.by_uid.lock().expect("SessionAnchors mutex poisoned");
+		let mut map = self.by_uid.lock_recover();
 		let stale: Vec<String> = map
 			.iter()
 			.filter(|(_, a)| now.saturating_duration_since(a.issued_at) > stale_after)
@@ -98,8 +99,7 @@ impl SessionAnchors {
 	/// supplied TTL (caller decides the policy).
 	pub fn lookup(&self, uid: &str, now: Instant, stale_after: Duration) -> Option<SessionAnchor> {
 		self.by_uid
-			.lock()
-			.expect("SessionAnchors mutex poisoned")
+			.lock_recover()
 			.get(uid)
 			.copied()
 			.filter(|a| now.saturating_duration_since(a.issued_at) <= stale_after)
@@ -107,10 +107,7 @@ impl SessionAnchors {
 
 	/// Total number of anchors currently held; observability helper.
 	pub fn len(&self) -> usize {
-		self.by_uid
-			.lock()
-			.expect("SessionAnchors mutex poisoned")
-			.len()
+		self.by_uid.lock_recover().len()
 	}
 
 	/// True when no anchors are held (clippy `len_without_is_empty`).
@@ -153,7 +150,7 @@ impl CameraRegistry {
 	/// stops a flood of D2R_HB-with-random-UIDs from growing memory
 	/// unbounded.
 	pub fn upsert(&self, uid: &str, addr: SocketAddr, token: u64, now: Instant) -> Option<bool> {
-		let mut map = self.cameras.lock().expect("CameraRegistry mutex poisoned");
+		let mut map = self.cameras.lock_recover();
 		// Refreshes never grow the map; only new inserts are bounded.
 		if map.len() >= MAX_MAP_ENTRIES && !map.contains_key(uid) {
 			return None;
@@ -175,7 +172,7 @@ impl CameraRegistry {
 	/// hot paths (heartbeat / connect handlers) whenever there's
 	/// something to log against.
 	pub fn purge_stale(&self, now: Instant, stale_after: Duration) -> Vec<String> {
-		let mut map = self.cameras.lock().expect("CameraRegistry mutex poisoned");
+		let mut map = self.cameras.lock_recover();
 		let stale: Vec<String> = map
 			.iter()
 			.filter(|(_, e)| now.saturating_duration_since(e.last_seen) > stale_after)
@@ -203,7 +200,7 @@ impl CameraRegistry {
 		now: Instant,
 		stale_after: Duration,
 	) -> Option<CameraEntry> {
-		let map = self.cameras.lock().expect("CameraRegistry mutex poisoned");
+		let map = self.cameras.lock_recover();
 		let fresh = |e: &CameraEntry| now.saturating_duration_since(e.last_seen) <= stale_after;
 		if let Some(e) = map.get(uid).filter(|e| fresh(e)) {
 			return Some(e.clone());
@@ -225,7 +222,7 @@ impl CameraRegistry {
 		now: Instant,
 		stale_after: Duration,
 	) -> Option<(String, CameraEntry)> {
-		let map = self.cameras.lock().expect("CameraRegistry mutex poisoned");
+		let map = self.cameras.lock_recover();
 		map.iter()
 			.find(|(_, e)| {
 				e.addr.ip() == ip && now.saturating_duration_since(e.last_seen) <= stale_after
@@ -235,10 +232,7 @@ impl CameraRegistry {
 
 	/// Total registered UID count; used by tests + observability.
 	pub fn len(&self) -> usize {
-		self.cameras
-			.lock()
-			.expect("CameraRegistry mutex poisoned")
-			.len()
+		self.cameras.lock_recover().len()
 	}
 
 	/// Convenience pair to `len()`; clippy expects it whenever `len()` exists.

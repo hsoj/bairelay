@@ -4,6 +4,7 @@
 //! (RTP + RTCP per RFC 3550 §11). The pool hands out pairs from a fixed
 //! range and reclaims them on `UdpPortLease` drop.
 
+use crate::sync::MutexPoisonRecover as _;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
@@ -51,7 +52,7 @@ impl UdpPortPool {
 
 	/// Acquire an even/odd pair. Returns a lease that frees the ports on drop.
 	pub fn acquire(self: &std::sync::Arc<Self>) -> Result<UdpPortLease, PortPoolError> {
-		let mut used = self.used.lock().expect("udp pool lock poisoned");
+		let mut used = self.used.lock_recover();
 		let mut port = POOL_START;
 		while port <= POOL_END {
 			if !used.contains(&port) {
@@ -69,7 +70,7 @@ impl UdpPortPool {
 
 	#[doc(hidden)]
 	pub(crate) fn release(&self, rtp_port: u16) {
-		let mut used = self.used.lock().expect("udp pool lock poisoned");
+		let mut used = self.used.lock_recover();
 		used.remove(&rtp_port);
 	}
 }

@@ -153,20 +153,36 @@ pub fn build_response(
 	extra_headers: &[(&str, String)],
 	body: Option<&[u8]>,
 ) -> Vec<u8> {
-	let cseq_name = HeaderName::try_from("CSeq").expect("CSeq is ASCII");
-	let server_name = HeaderName::try_from("Server").expect("Server is ASCII");
-
 	let mut resp = Response::builder(Version::V1_0, status)
-		.header(cseq_name, HeaderValue::from(cseq.to_string()))
-		.header(server_name, HeaderValue::from("bairelay/0.1.0"));
+		.header(
+			rtsp_types::headers::CSEQ,
+			HeaderValue::from(cseq.to_string()),
+		)
+		.header(
+			rtsp_types::headers::SERVER,
+			HeaderValue::from(concat!("bairelay/", env!("CARGO_PKG_VERSION"))),
+		);
 	for (k, v) in extra_headers {
-		let name = HeaderName::try_from(*k).expect("extra header name must be ASCII");
-		resp = resp.header(name, HeaderValue::from(v.clone()));
+		match HeaderName::try_from(*k) {
+			Ok(name) => resp = resp.header(name, HeaderValue::from(v.clone())),
+			// Header names are static strings at every call site; a
+			// non-ASCII one is a programming error. Drop the header
+			// rather than panic mid-connection — the response stays
+			// parseable without it.
+			Err(_) => tracing::error!(header = *k, "dropping invalid RTSP header name"),
+		}
 	}
 	let body_vec: Vec<u8> = body.map(|b| b.to_vec()).unwrap_or_default();
 	let built = resp.build(body_vec);
 	let mut out = Vec::new();
-	built.write(&mut out).expect("RTSP response serialize");
+	if let Err(e) = built.write(&mut out) {
+		// Writing into a Vec cannot fail at the io layer; an error here
+		// is rtsp-types refusing the message. An empty buffer makes the
+		// client time out on this one response instead of the process
+		// dying.
+		tracing::error!(error = %e, "RTSP response serialization failed");
+		out.clear();
+	}
 	out
 }
 

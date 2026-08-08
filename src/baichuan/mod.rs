@@ -265,16 +265,16 @@ pub mod pcap_decode_api {
 			// instant); align the cursor to whatever the first observed
 			// packet_id is so we don't stall waiting for "missing" earlier
 			// packets that simply weren't captured.
-			let next = *self.next_packet_id.get_or_insert(id);
+			let mut next = *self.next_packet_id.get_or_insert(id);
 			if id < next {
 				return; // late duplicate / retransmit, ignore
 			}
 			self.pending.insert(id, data.payload);
-			while let Some(payload) = self.pending.remove(&self.next_packet_id.unwrap()) {
+			while let Some(payload) = self.pending.remove(&next) {
 				self.bc_buf.extend_from_slice(&payload);
-				let cur = self.next_packet_id.unwrap();
-				self.next_packet_id = Some(cur.wrapping_add(1));
+				next = next.wrapping_add(1);
 			}
+			self.next_packet_id = Some(next);
 		}
 	}
 

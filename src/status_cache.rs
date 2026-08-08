@@ -24,7 +24,7 @@
 //!   know which preset the camera selected pre-restart, so the
 //!   discovery publisher intentionally clears it on every reconnect.
 
-use crate::stream_source::RwLockPoisonRecover as _;
+use crate::sync::RwLockPoisonRecover as _;
 use std::sync::RwLock;
 
 #[derive(Debug, Default)]

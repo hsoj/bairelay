@@ -345,10 +345,13 @@ fn config_topic(ctx: &DiscoveryContext, component: &str, unique_id: &str) -> Str
 
 fn to_json(value: &impl Serialize) -> Vec<u8> {
 	// Infallible for the types defined here (all `Serialize` derives
-	// over plain strings / enums). `expect` panics loudly if that
-	// ever regresses — better than returning an ambiguous `Result` up
-	// the call stack.
-	serde_json::to_vec(value).expect("discovery payload serialises to JSON")
+	// over plain strings / enums). If that ever regresses, publish an
+	// empty object and log loudly — one broken discovery entity beats
+	// panicking the discovery publisher task.
+	serde_json::to_vec(value).unwrap_or_else(|e| {
+		tracing::error!(error = %e, "discovery payload failed to serialise");
+		b"{}".to_vec()
+	})
 }
 
 // ── Builders (one per feature/entity) ────────────────────────────────

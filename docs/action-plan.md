@@ -27,6 +27,8 @@ Recorded so nobody re-litigates them. Deltas from the planned shape are noted; t
 | **Test scaffolding shipped in release builds** | `start_inert_for_test*`, `FakeFrameInjector`, `set_sdp_params_for_test`, `set_state_for_test`, `start_with_packet_source` now behind `#[cfg(any(test, feature = "test-util"))]`; the comments that falsely claimed a gate now describe the real one. | `8b4f2f6` |
 | **`BcCamera` named outside the adapter** + **speculative auth-substring fallback** | Connect/login and auth classification moved into `bc_camera::connect` / `ConnectError` (`Auth` terminal, `Other` retryable). `camera.rs` and `oneshot/runner.rs` hold only `Arc<dyn Camera>`; `is_login_failure` and its Debug-substring matching deleted. `oneshot::classify` still finds the baichuan cause on the source chain (pinned by test). | `cf9b9ca` |
 | **`tick_bridging` burst copy on the Live path** | `BridgingPolicy::on_tick` takes the replay anchor as a lazy `FnOnce` closure; the up-to-8 MiB payload is assembled only once a gap is open. Laziness pinned by `live_tick_never_consults_the_replay_anchor`. | `1ea4231` |
+| **S1-1 — `src/sync.rs` + poison sweep** (2026-08-08) | Helpers moved to `src/sync.rs` (trait form only; free fns deleted — F10 unified), with poison-recovery pinned by tests. All 37 `expect("… poisoned")` sites in `src/rtsp/` + `src/wake_server/` converted, plus the silent `if let Ok` SDP skip in `stream_source.rs` and the `camera_provider.rs`/`startup_wake.rs` stragglers. Only `fake_camera` and one test-serialization lock keep bare handling — both test-only, per plan. | — |
+| **No-panic policy for production code** (2026-08-08) | Every remaining production `expect`/`unwrap` eliminated: `cloud.rs` cache locks → `lock_recover`; SETUP handler takes session-task handles off the entry before insert (atomic, three dead registry accessors deleted); RTSP response/RTP builders degrade (drop header / empty packet = RTP loss) instead of panicking; `main.rs` zips the MQTT pair; UID regex replaced with a pure byte check (**`regex` dependency dropped**); embedded-font and serde invariants degrade gracefully. Enforced by `#![warn(clippy::unwrap_used, clippy::expect_used)]` in `lib.rs`/`main.rs` + `clippy.toml` test exemptions, so a new production panic fails CI. Also closed S1-4's `Server: bairelay/0.1.0` literal (now `env!("CARGO_PKG_VERSION")`). | — |
 | **`crates/` paths in the planning docs** (half of old S2-2) | `remediation-plan.md` and `code-paths.md` no longer reference `crates/core` / `crates/rtsp` paths. The `CameraDriver` staleness remains — see S2-2. | `ade6ea1` |
 
 **S4-2 deltas worth knowing:** `trait Camera` composes the eight roles as a supertrait bound with a marker blanket impl (`camera.rs:190-192`) — a composition marker, not the forbidden `CameraDriver`-style forwarding impl. Wiring points (`mqtt_dispatch`, `startup_wake`, `CameraHandle`) hold full `Arc<dyn Camera>`; vendored BC types stay in role signatures per the header comment at `camera.rs:48-52` ("keep, re-measure later"). Two loose ends became their own items: `preview_poller` still takes the concrete handle (S3-4) and the parameters/fields are still *named* `bc_camera` (S2-5).
@@ -65,17 +67,9 @@ Do S0-2 before Stage 1 so the poison sweep lands under a gate that can catch wha
 
 # Stage 1 — Stability defects
 
-## S1-1. `src/sync.rs` + poison sweep · M · **highest stability item**
+## S1-1. `src/sync.rs` + poison sweep — **RESOLVED 2026-08-08**
 
-**37 `expect("… poisoned")` sites remain in `src/rtsp/` and `src/wake_server/`** (recounted at `1ea4231`). One panic under `SessionRegistry` or `LastFrameBuffer` locks takes down the whole server rather than one client. `src/sync.rs` still does not exist; the recovery helpers still live in `stream_source.rs`.
-
-The sweep's scope grew — fold in three findings from the review:
-
-- `src/stream_source.rs:1637` — `if let Ok(mut guard) = sdp_params.write()` **silently no-ops on poison** while 8 sibling sites in the same file recover. After any poisoning, `SdpParams.video` can never populate: every DESCRIBE 503s forever with zero log output. This is the worst single site in the sweep; use `wlock_recover`.
-- `src/camera_provider.rs:95`, `src/startup_wake.rs:158,234` — `.expect("… poisoned")` on the same presence/SDP locks the stream path deliberately recovers. Pick one policy per lock.
-- **Two parallel recovery APIs coexist** (`stream_source.rs:92-105` free fns vs `:114-134` trait methods, both `pub(crate)`, both used). The `src/sync.rs` move is the moment to keep the trait form and delete the free functions.
-
-Leave `fake_camera` sites alone — test-only.
+See the resolved table. ID retained because the sequencing batches and review checklist reference it.
 
 ## S1-2. `#[must_use]` on the RAII guards · S · stability
 
@@ -85,10 +79,9 @@ Still exactly 2 `#[must_use]` in `src/`, and both are builder setters. `WakeLock
 
 `src/cli_convert.rs` still has 5 `set_var`/`remove_var` sites in parallel-threaded tests — the exact UB that made `set_var` `unsafe`. Fix by making `verbosity_env_filter` take the value as a parameter; the `unsafe` disappears and the function becomes value-testable (Stage 3's pattern).
 
-## S1-4. Version literal and large futures · S · stability
+## S1-4. Large futures · S · stability
 
-- `src/rtsp/protocol/message.rs:161` still hardcodes `Server: bairelay/0.1.0` against a crate at 1.1.2. Use `concat!("bairelay/", env!("CARGO_PKG_VERSION"))`.
-- No `clippy.toml`, no `large_futures` lint, no size-motivated `Box::pin` anywhere. Enable the lint, box what it names.
+The version literal half was fixed with the no-panic sweep (2026-08-08). Remaining: no `large_futures` lint, no size-motivated `Box::pin` anywhere. Enable the lint (`clippy.toml` now exists), box what it names.
 
 ## S1-5. Failures the operator cannot see · S · stability
 
@@ -194,7 +187,7 @@ pub fn translate(packet: &BcMedia, state: &mut StreamTranslatorState, bridging: 
 
 `Emit` is a closed set → `enum` + exhaustive `match` (TY-5). Codec detection and PTS edges become table tests; wraparound becomes a property test.
 
-**Live-verify:** on the RTSP path — lands alone, gated by `tests/scripts/manual-verify.sh`. If hardware is unavailable, say so in the PR rather than implying verification. Carry S1-1's `src/sync.rs` move in this PR if it has not already landed.
+**Live-verify:** on the RTSP path — lands alone, gated by `tests/scripts/manual-verify.sh`. If hardware is unavailable, say so in the PR rather than implying verification.
 
 ---
 
@@ -213,17 +206,45 @@ pub fn translate(packet: &BcMedia, state: &mut StreamTranslatorState, bridging: 
 
 ---
 
+# Risk ranking
+
+Assessed 2026-08-08. Risk = likelihood the harm actually occurs × impact when it does, judged for an unattended LAN daemon with months of uptime. This is a different axis than the build order: sequencing optimises for items that cheapen later work; this table says what hurts if left alone. Sub-items are ranked where they bite, not where they are filed.
+
+| # | Item | Likelihood | Impact | Failure scenario | Effort |
+|---|------|:---:|:---:|---|:---:|
+| 1 | ~~**S1-1** poison sweep~~ **resolved 2026-08-08** | — | — | Was rank 1: a panic under a shared lock cascade-panicked the whole RTSP server; the `if let Ok` SDP site 503'd every DESCRIBE forever with zero logs. All sites converted to `src/sync.rs` recover helpers. | — |
+| 2 | **S0-2** no advisory feed (`cargo-deny`) | **High** (over time) | High | 379 pinned crates incl. `rustls`; `--locked` everywhere guarantees a published CVE stays in the binary indefinitely, with no mechanism that would ever surface it. A *when*, not an *if*. | S |
+| 3 | **S1-5** MQTT replies `OK` on failure | **High** | Med | Battery cameras timing out is the routine failure mode, so this fires constantly: HA automations and operators act on false success — the scenario the code's own comment records as a field complaint. | S |
+| 4 | **S4-1** translation still effectful | Med | **High** | A/V desync — the product's visible failure — lives in 5,233 effectful lines where every change is under-tested and needs hardware to verify. Standing *change* risk: it fires whenever the stream path is next touched. | L |
+| 5 | **S1-2** no `#[must_use]` on guards | Low-Med | High | A future edit writes `wake_lock().acquire();` — compiles clean, looks right, and the camera sleeps through the session that wanted it awake. Regression trap on the core battery mechanism. | XS |
+| 6 | **S1-6** flaky coverage tests | **High** (flaked a tarpaulin run 2026-08-05) | Med | Rerun-until-green becomes normal, and the gate stops being trusted right when it catches something real. | S |
+| 7 | **S3-5** unpinned live-verify markers | Med | Med | Someone rewords "Disconnected" or "RTSP server listening"; `manual-verify.sh` stalls its poll window and misreports on the path where live-verify is load-bearing. | S |
+| 8 | **S1-3** `set_var` UB in tests | Med | Low-Med | Parallel test threads race on `RUST_LOG` — genuine UB, confined to the test process; shows up as unexplainable CI flakes. | S |
+| 9 | **S2-4** lying comments & stale user docs | High (eventually) | Low-Med | The phantom 32-KiB guard misdirects a broker-limit debugging session; a new contributor's first command (`cargo bench -p`) fails; the 60 s/15 s timeout claim misleads a reviewer. | S |
+| 10 | **S3-3** warnings assert nothing | Low-Med | Med | `warn_users_without_tls` — operator-facing *security* guidance — could silently stop firing and no test would notice. | S |
+| 11 | **S3-1/S3-2** unextracted policies | Low-Med | Med | The pacer's hard-won mpv/RTCP-drift tuning regresses on the next edit and only shows up as subtle A/V drift on real hardware. Realizes only when touched. | S |
+| 12 | **S0-1** crates.io publish surface | Low | Low-Med | No runtime harm (zero consumers) — a cost multiplier: every item above that touches `pub` code carries an undeserved semver argument. Low risk, still first in *sequence* for exactly that reason. | S |
+| 13 | **S1-4** `bairelay/0.1.0` header, large futures | Low | Low | Wrong version fingerprint confuses field debugging; future sizes are theoretical memory pressure. | S |
+| 14 | **S2-1** dead protocol modules (incl. `talk.rs` AS-5) | Low | Low | The blocking-in-async violation is unreachable from the binary; reachable only via the unconsumed published lib. Pure maintenance drag until then. | S |
+| 15 | **S2-2 / S2-3 / S2-5 / S3-4** stale planning docs, review dead code, naming/lint hygiene, `preview_poller` handle | Low | Low | Maintainer-confusion only: no path to a runtime failure, just friction and wrong mental models. | XS-S |
+
+**Fast burn-down:** S1-1 landed 2026-08-08; next in risk order: S1-2 (one attribute), S0-2, S1-5 — all hardware-free.
+
+---
+
 # Sequencing
 
 | Batch | Items | Gate | Hardware |
 |---|---|---|---|
 | **0** | S0-1, S0-2 | CI green | no |
-| **1** | S1-1 … S1-6 | `cargo test` + `clippy` (+ tarpaulin ×3 for S1-6 — the flake must be shown dead) | no |
+| **1** | S1-2 … S1-6 (S1-1 landed) | `cargo test` + `clippy` (+ tarpaulin ×3 for S1-6 — the flake must be shown dead) | no |
 | **2** | S2-1 … S2-5 | `cargo test` + tarpaulin non-decreasing + out-of-tree builds | no |
 | **3** | S3-1 … S3-5 | `cargo test` | no |
-| **4** | S4-1 (+ S1-1 if not landed) | `manual-verify.sh` | **yes** |
+| **4** | S4-1 | `manual-verify.sh` | **yes** |
 
 Batches 0–3 need no camera — everything verifiable without hardware lands before the one item that is not. Within a batch, items are independent and can land in any order or in parallel.
+
+Where risk and sequence disagree, sequence wins for full batches (S0-1 cheapens everything after it) — but the risk table's fast burn-down is the right order when picking individual items ahead of a full batch.
 
 ---
 

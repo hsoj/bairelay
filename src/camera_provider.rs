@@ -8,6 +8,7 @@
 //! [`SubscriptionHandle`] populated with the live broadcast receiver,
 //! current SDP parameters, and the shared last-frame buffer.
 
+use crate::sync::RwLockPoisonRecover as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,10 +90,7 @@ impl StreamProvider for CameraProvider {
 		// surface Unavailable → 503, which is the appropriate user-visible
 		// signal that the camera never produced usable bitstream. See
 		// `classify_presence` for the policy.
-		let presence = *handle
-			.audio_presence()
-			.read()
-			.expect("presence lock poisoned");
+		let presence = *handle.audio_presence().read_recover();
 		let (wait_audio, bonus_window) = classify_presence(presence);
 
 		let sdp_params = if wait_audio {

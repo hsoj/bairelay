@@ -62,15 +62,16 @@ impl BcCamera {
 									);
 								}
 								PrintFormat::Xml => {
-									let bat_ser = String::from_utf8({
-										let mut ser_buf = bytes::BytesMut::new();
-										let parsed =
-											quick_xml::se::to_writer(&mut ser_buf, &battery)
-												.map(|_| ser_buf);
-										parsed.expect("Could not serialise data").to_vec()
-									})
-									.expect("Should be UTF8");
-									println!("{}", bat_ser);
+									let mut ser_buf = bytes::BytesMut::new();
+									let ser = quick_xml::se::to_writer(&mut ser_buf, &battery)
+										.map(|_| ser_buf.to_vec())
+										.map(String::from_utf8);
+									match ser {
+										Ok(Ok(bat_ser)) => println!("{}", bat_ser),
+										// Skip the entry rather than kill the
+										// monitor stream over one bad record.
+										_ => eprintln!("could not serialise battery XML"),
+									}
 								}
 							}
 						}

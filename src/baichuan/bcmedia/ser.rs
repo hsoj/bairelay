@@ -157,16 +157,11 @@ fn bcmedia_iframe<W: Write>(payload: &BcMediaIframe) -> impl SerializeFn<W> {
 		VideoType::H265 => "H265",
 	};
 	let (extra_header, extra_header_size) = if let Some(payload_time) = payload.time {
-		// `gen` writes two u32 LE values into a `Vec<u8>`; `Vec<u8>`'s
-		// `Write` impl is infallible, so the only way this can fail is
-		// a cookie-factory internal-state error that does not occur for
-		// fixed-size primitive serializers. `expect` documents the
-		// reasoning rather than `unwrap`'s silent-trust.
-		let extra_header = slice(
-			gen(tuple((le_u32(payload_time), le_u32(0))), vec![])
-				.expect("infallible: gen of fixed le_u32 tuple into Vec<u8> cannot fail")
-				.0,
-		);
+		// Two u32 LE values; assembled directly so there is no fallible
+		// serializer step at all.
+		let mut bytes = payload_time.to_le_bytes().to_vec();
+		bytes.extend_from_slice(&0u32.to_le_bytes());
+		let extra_header = slice(bytes);
 		let extra_header_size = 8;
 		(extra_header, extra_header_size)
 	} else {

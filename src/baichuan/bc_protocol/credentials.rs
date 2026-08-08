@@ -9,8 +9,6 @@
 //! would silently authenticate against the camera with the documented
 //! Reolink default credentials. Construct via [`Credentials::new`].
 
-use std::convert::TryInto;
-
 use zeroize::{Zeroize, Zeroizing};
 
 /// Camera login pair. Username is non-secret; password is wiped on
@@ -64,7 +62,12 @@ impl Credentials {
 		// `{:X}` already emits uppercase hex; `.to_uppercase()` was a
 		// no-op carried over from a lowercase variant in upstream code.
 		let key_phrase_hash = format!("{:X}\0", md5::compute(&*key_phrase)).into_bytes();
-		key_phrase_hash[0..16].try_into().unwrap()
+		// 32 hex chars + NUL, always ≥16 bytes; the zero-key fallback is
+		// unreachable but beats a panic inside the login path.
+		key_phrase_hash
+			.first_chunk::<16>()
+			.copied()
+			.unwrap_or_default()
 	}
 }
 

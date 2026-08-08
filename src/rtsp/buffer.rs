@@ -1,5 +1,6 @@
 //! Last-frame buffer for RTSP placeholder and MQTT preview.
 
+use crate::sync::RwLockPoisonRecover as _;
 use bytes::Bytes;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -58,7 +59,7 @@ impl LastFrameBuffer {
 
 	/// Replace the current video burst with a new one (typically on keyframe).
 	pub fn replace_video(&self, burst: VideoBurst) {
-		*self.video.write().expect("video lock poisoned") = Some(burst);
+		*self.video.write_recover() = Some(burst);
 	}
 
 	/// Append a P-frame's NAL units to the current burst. No-op if the
@@ -71,7 +72,7 @@ impl LastFrameBuffer {
 	/// extreme-low-bitrate streams that never produce a keyframe and
 	/// would otherwise grow this Vec without bound until the next IDR.
 	pub fn append_pframe(&self, nals: Vec<Vec<u8>>) {
-		if let Some(burst) = self.video.write().expect("video lock poisoned").as_mut() {
+		if let Some(burst) = self.video.write_recover().as_mut() {
 			let new_bytes: usize = nals.iter().map(|n| n.len()).sum();
 			burst.pframe_nals.push(nals);
 			let mut total: usize = burst
@@ -103,22 +104,22 @@ impl LastFrameBuffer {
 
 	/// Return a clone of the current video burst, or `None` if none captured yet.
 	pub fn video_snapshot(&self) -> Option<VideoBurst> {
-		self.video.read().expect("video lock poisoned").clone()
+		self.video.read_recover().clone()
 	}
 
 	/// Return `true` if a video burst has been captured.
 	pub fn has_video(&self) -> bool {
-		self.video.read().expect("video lock poisoned").is_some()
+		self.video.read_recover().is_some()
 	}
 
 	/// Replace the stored JPEG preview with a new one.
 	pub fn set_jpeg(&self, bytes: Bytes) {
-		*self.jpeg.write().expect("jpeg lock poisoned") = Some(bytes);
+		*self.jpeg.write_recover() = Some(bytes);
 	}
 
 	/// Return a clone of the stored JPEG, or `None` if none captured yet.
 	pub fn jpeg(&self) -> Option<Bytes> {
-		self.jpeg.read().expect("jpeg lock poisoned").clone()
+		self.jpeg.read_recover().clone()
 	}
 }
 

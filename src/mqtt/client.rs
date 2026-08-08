@@ -182,7 +182,7 @@ impl SharedMqttClient {
 			// Recover from poison rather than re-panicking — a panic in
 			// one test holding this lock would otherwise cascade to
 			// every subsequent test in the same process. Mirrors the
-			// `lock_recover` discipline adopted in stream_source.rs
+			// `lock_recover` discipline in src/sync.rs
 			// (commit b394b95).
 			sink.lock().unwrap_or_else(|p| p.into_inner()).push((
 				topic.to_string(),

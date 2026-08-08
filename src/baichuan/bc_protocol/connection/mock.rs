@@ -1,5 +1,9 @@
 //! `MockConnection` — a scripted request→reply harness for driving
 //! `BcCamera` command methods without a real socket.
+// Test scaffolding behind the `test-util` feature — never in a release
+// build — so a panic here is a test failure, same as `#[cfg(test)]`
+// code, which clippy's in-tests exemption cannot see through a feature.
+#![allow(clippy::expect_used)]
 //!
 //! Construction pattern:
 //!

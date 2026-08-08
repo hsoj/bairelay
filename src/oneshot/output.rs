@@ -291,13 +291,23 @@ fn format_human(outcome: &Outcome) -> (String, String) {
 }
 
 fn format_json_success(outcome: &Outcome) -> String {
-	let mut v = serde_json::to_value(outcome).expect("result must serialize");
+	// `Outcome` is a plain derive over strings/numbers, so serialization
+	// cannot fail today; if it ever does, report the failure as a JSON
+	// error object instead of panicking the CLI after the command already
+	// succeeded on the camera.
+	let mut v = match serde_json::to_value(outcome) {
+		Ok(v) => v,
+		Err(e) => return format_failure(Mode::Json, &anyhow::anyhow!(e), "internal"),
+	};
 	if let serde_json::Value::Object(ref mut m) = v {
 		// #[serde(tag = "kind")] makes every variant serialize to an object; strip + insert are safe.
 		m.remove("kind");
 		m.insert("ok".into(), serde_json::Value::Bool(true));
 	}
-	serde_json::to_string_pretty(&v).expect("value must serialize") + "\n"
+	match serde_json::to_string_pretty(&v) {
+		Ok(s) => s + "\n",
+		Err(e) => format_failure(Mode::Json, &anyhow::anyhow!(e), "internal"),
+	}
 }
 
 pub fn format_failure(mode: Mode, err: &anyhow::Error, kind: &str) -> String {
@@ -309,7 +319,11 @@ pub fn format_failure(mode: Mode, err: &anyhow::Error, kind: &str) -> String {
 				"kind": kind,
 				"error": format!("{:#}", err),
 			});
-			serde_json::to_string_pretty(&obj).expect("JSON must serialize") + "\n"
+			// A json! literal of strings always serializes; the fallback
+			// keeps the `ok:false` contract machine-readable regardless.
+			serde_json::to_string_pretty(&obj)
+				.map(|s| s + "\n")
+				.unwrap_or_else(|_| "{\"ok\": false, \"kind\": \"internal\"}\n".to_string())
 		}
 	}
 }

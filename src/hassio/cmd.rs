@@ -91,7 +91,9 @@ fn strip_defaults(value: &mut toml::Value, default: &toml::Value) {
 		let Some(dv) = d.get(&k).cloned() else {
 			continue;
 		};
-		let v = t.get(&k).cloned().expect("key just enumerated");
+		let Some(v) = t.get(&k).cloned() else {
+			continue;
+		};
 		if v == dv {
 			t.remove(&k);
 			continue;

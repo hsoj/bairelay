@@ -11,6 +11,7 @@
 //! camera that cannot be reached at boot simply ends up with an empty
 //! buffer until the next real client request.
 
+use crate::sync::RwLockPoisonRecover as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -152,10 +153,7 @@ async fn warm_one(
 		Some(c) => crate::audio_presence::AudioPresence::Present { codec: c },
 		None => crate::audio_presence::AudioPresence::Absent,
 	};
-	*handle
-		.audio_presence()
-		.write()
-		.expect("presence lock poisoned") = new_presence;
+	*handle.audio_presence().write_recover() = new_presence;
 	tracing::info!(
 		camera = %name,
 		presence = ?new_presence,
@@ -231,7 +229,7 @@ pub(crate) async fn observe_audio_presence(
 ) -> Option<crate::rtsp::codec::AudioCodec> {
 	let start = std::time::Instant::now();
 	loop {
-		if let Some(a) = sdp.read().expect("sdp lock poisoned").audio.as_ref() {
+		if let Some(a) = sdp.read_recover().audio.as_ref() {
 			return Some(a.codec);
 		}
 		if start.elapsed() > deadline {

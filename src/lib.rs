@@ -1,3 +1,9 @@
+// A panic in this daemon is an unrecoverable failure: it kills a task
+// that other holders depend on (and before the poison sweep, cascaded
+// through shared locks). Production code returns errors or degrades;
+// `clippy.toml` exempts test code, where a panic IS the failure signal.
+#![warn(clippy::unwrap_used, clippy::expect_used)]
+
 // ── Vendored Baichuan protocol ────────────────────────────────────────
 // Derived from neolink_core by thirtythreeforty + QuantumEntangledAndy
 // (https://github.com/QuantumEntangledAndy/neolink), AGPL-3.0-or-later.
@@ -49,6 +55,7 @@ pub mod startup_wake;
 pub mod status_cache;
 pub mod stream_source;
 pub mod supervisor;
+pub mod sync;
 pub mod tls_load;
 pub mod wake_lock;
 pub mod watchdog;

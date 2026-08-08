@@ -276,7 +276,9 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 			}
 		})?;
 
-		let camera_name = cli.camera_name().expect("oneshot without camera name");
+		let camera_name = cli
+			.camera_name()
+			.ok_or_else(|| UsageError::new("this command requires a camera name"))?;
 		let cam_cfg = find_camera_config(&config, camera_name)?;
 
 		// Install Ctrl+C → CancellationToken. Process exits via

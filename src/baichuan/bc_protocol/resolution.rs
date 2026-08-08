@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::{
 	io::Error,
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs},
-	sync::OnceLock,
 };
 
 /// Reolink "short form" UID — exactly 16 chars, digits + uppercase ASCII
@@ -13,21 +12,21 @@ use std::{
 /// suffix; that variant never reaches `to_socket_addrs_or_uid`, which
 /// only sees operator-supplied (short-form) UIDs from `config.toml`.
 /// See `docs/cloud-interception.md` § I.6.2.
-fn uid_regex() -> &'static regex::Regex {
-	static RE: OnceLock<regex::Regex> = OnceLock::new();
-	RE.get_or_init(|| regex::Regex::new(r"^[0-9A-Z]{16}$").expect("compile-time-valid UID regex"))
+fn is_uid_shape(s: &str) -> bool {
+	s.len() == 16
+		&& s.bytes()
+			.all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
 }
 
 /// Convert an operator-typed string into a `SocketAddrOrUid::Uid` if it
 /// matches the documented short-form UID shape, else propagate the
-/// caller's `to_socket_addrs` error. Centralises the regex test that
-/// `&str` and `String` both ran inline before — DRY + caches the regex
-/// across calls.
+/// caller's `to_socket_addrs` error. Centralises the shape test that
+/// `&str` and `String` both ran inline before — DRY across both impls.
 fn classify_uid_or_propagate(
 	s: &str,
 	dns_err: Error,
 ) -> Result<std::vec::IntoIter<SocketAddrOrUid>, Error> {
-	if uid_regex().is_match(s) {
+	if is_uid_shape(s) {
 		Ok(vec![SocketAddrOrUid::Uid(
 			s.to_string(),
 			None,
@@ -426,15 +425,6 @@ mod to_socket_addrs_or_uid_tests {
 		let v = take_addrs(s.to_socket_addrs_or_uid().unwrap());
 		assert_eq!(v.len(), 1);
 		assert!(is_uid(&v[0]));
-	}
-
-	#[test]
-	fn uid_regex_is_cached_across_calls() {
-		// Pinning the OnceLock contract: two consecutive matches reuse
-		// the same compiled Regex instance.
-		let a = uid_regex() as *const regex::Regex;
-		let b = uid_regex() as *const regex::Regex;
-		assert!(std::ptr::eq(a, b));
 	}
 
 	#[test]

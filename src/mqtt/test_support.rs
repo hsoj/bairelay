@@ -32,7 +32,7 @@ pub struct MockHandle {
 /// Acquire the capture buffer's `MutexGuard`, recovering from poison
 /// rather than re-panicking — a panic in one test holding this lock
 /// would otherwise cascade to every subsequent test. Mirrors
-/// `lock_recover` in stream_source.rs (commit b394b95).
+/// `lock_recover` in src/sync.rs.
 fn capture_lock(
 	buf: &CaptureSink,
 ) -> std::sync::MutexGuard<'_, Vec<crate::mqtt::client::CaptureRow>> {

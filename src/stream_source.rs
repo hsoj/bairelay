@@ -50,6 +50,7 @@ use crate::baichuan::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
 use crate::camera::Video;
 use crate::gap_bridging::BridgingPolicy;
 pub use crate::gap_bridging::GapState;
+use crate::sync::{MutexPoisonRecover as _, RwLockPoisonRecover as _};
 
 use crate::bcmedia_dump::{BcMediaDumpConfig, FrameDumper};
 
@@ -82,59 +83,6 @@ pub(crate) const SDP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// most this interval; long enough that the ticker itself is cheap
 /// (roughly five wake-ups per second per source).
 const GAP_DETECTION_TICK: Duration = Duration::from_millis(200);
-
-/// Acquire a `Mutex` guard, recovering from poisoning rather than
-/// panicking. `expect("... poisoned")` cascades a single bug across
-/// every other holder (translator panic ⇒ pacer / aggregator / inert-
-/// test-stand-in panic on the next tick). The fields these helpers
-/// guard are small (counters, timestamps, enum, codec verdict) — the
-/// poisoned state is always recoverable, never structurally invalid.
-pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-	m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// `RwLock` read-side counterpart to [`lock_recover`]. Same rationale:
-/// the protected `SdpParams` / `AudioPresence` are recoverable on
-/// poison, and a panic in any holder would otherwise propagate to
-/// every reader.
-pub(crate) fn rlock_recover<T>(m: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-	m.read().unwrap_or_else(|e| e.into_inner())
-}
-
-/// `RwLock` write-side counterpart to [`lock_recover`].
-pub(crate) fn wlock_recover<T>(m: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-	m.write().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Method-shaped poison-recovering accessors for [`RwLock`]. Lets call
-/// sites read like `lock.read_recover()` instead of threading a free
-/// function. Same recovery semantics as [`rlock_recover`] /
-/// [`wlock_recover`] — drop any poisoning, return the guard the holder
-/// would have produced if no panic had run while holding.
-pub(crate) trait RwLockPoisonRecover<T> {
-	fn read_recover(&self) -> std::sync::RwLockReadGuard<'_, T>;
-	fn write_recover(&self) -> std::sync::RwLockWriteGuard<'_, T>;
-}
-
-impl<T> RwLockPoisonRecover<T> for RwLock<T> {
-	fn read_recover(&self) -> std::sync::RwLockReadGuard<'_, T> {
-		rlock_recover(self)
-	}
-	fn write_recover(&self) -> std::sync::RwLockWriteGuard<'_, T> {
-		wlock_recover(self)
-	}
-}
-
-/// Mutex variant of [`RwLockPoisonRecover`].
-pub(crate) trait MutexPoisonRecover<T> {
-	fn lock_recover(&self) -> std::sync::MutexGuard<'_, T>;
-}
-
-impl<T> MutexPoisonRecover<T> for Mutex<T> {
-	fn lock_recover(&self) -> std::sync::MutexGuard<'_, T> {
-		lock_recover(self)
-	}
-}
 
 /// A live `(camera, stream_kind)` media source. See module docs.
 pub struct StreamSource {
@@ -451,7 +399,7 @@ impl StreamSource {
 	/// callers that need them populated should use [`Self::await_sdp_ready`]
 	/// or retry manually.
 	pub fn sdp_params(&self) -> SdpParams {
-		rlock_recover(&self.sdp_params).clone()
+		self.sdp_params.read_recover().clone()
 	}
 
 	/// Access the shared `Arc<RwLock<SdpParams>>`. Used by
@@ -479,7 +427,7 @@ impl StreamSource {
 		let start = std::time::Instant::now();
 		loop {
 			{
-				let params = rlock_recover(&self.sdp_params).clone();
+				let params = self.sdp_params.read_recover().clone();
 				if params.video.is_some() {
 					return Ok(params);
 				}
@@ -531,7 +479,7 @@ impl StreamSource {
 	/// Current upstream-presence state as maintained by `reader_task`'s
 	/// 200 ms gap-detection ticker. See [`GapState`].
 	pub fn gap_state(&self) -> GapState {
-		lock_recover(&self.bridging).state()
+		self.bridging.lock_recover().state()
 	}
 
 	/// Request the reader task to exit. Idempotent.
@@ -562,7 +510,7 @@ impl StreamSource {
 		timeout: Duration,
 	) -> Result<(), tokio::time::error::Elapsed> {
 		self.cancel.cancel();
-		let handle = lock_recover(&self.task).take();
+		let handle = self.task.lock_recover().take();
 		if let Some(h) = handle {
 			match tokio::time::timeout(timeout, h).await {
 				Ok(_) => Ok(()),
@@ -701,7 +649,7 @@ impl StreamSource {
 	/// tests that need to observe "source is bridging" transitions in
 	/// sub-millisecond time.
 	pub(crate) fn set_gap_state_for_test(&self, state: GapState) {
-		lock_recover(&self.bridging).set_state_for_test(state);
+		self.bridging.lock_recover().set_state_for_test(state);
 	}
 
 	/// Test-only: overwrite the SDP parameters on this source. The inert
@@ -712,7 +660,7 @@ impl StreamSource {
 	/// `pub` (not `pub(crate)`) for the same reason as
 	/// [`Self::start_inert_for_test_with_gap_and_last_frame_and_injector`].
 	pub fn set_sdp_params_for_test(&self, params: SdpParams) {
-		*wlock_recover(&self.sdp_params) = params;
+		*self.sdp_params.write_recover() = params;
 	}
 }
 
@@ -744,7 +692,7 @@ impl FakeFrameInjector {
 	/// Does NOT broadcast — use [`Self::broadcast_live_video_frame`]
 	/// when a downstream subscriber needs to actually see the frame.
 	pub fn inject_fake_video_frame(&self) {
-		let mut policy = lock_recover(&self.bridging);
+		let mut policy = self.bridging.lock_recover();
 		policy.on_upstream_packet(now_std());
 		policy.set_state_for_test(GapState::Live);
 	}
@@ -763,7 +711,7 @@ impl FakeFrameInjector {
 		};
 		let _ = self.tx.send(frame);
 		let now = now_std();
-		let mut policy = lock_recover(&self.bridging);
+		let mut policy = self.bridging.lock_recover();
 		policy.on_upstream_packet(now);
 		match pts {
 			Some(pts) => policy.on_broadcast(pts, now),
@@ -787,7 +735,7 @@ pub async fn await_sdp_both(
 	let start = std::time::Instant::now();
 	loop {
 		{
-			let params = rlock_recover(sdp).clone();
+			let params = sdp.read_recover().clone();
 			if params.video.is_some() && params.audio.is_some() {
 				return Ok(params);
 			}
@@ -813,7 +761,7 @@ pub async fn await_audio_or_deadline(
 ) -> Result<(), &'static str> {
 	let start = std::time::Instant::now();
 	loop {
-		if rlock_recover(sdp).audio.is_some() {
+		if sdp.read_recover().audio.is_some() {
 			return Ok(());
 		}
 		if start.elapsed() > timeout {
@@ -1088,7 +1036,7 @@ fn tick_bridging(
 	// contention-free: a gap only opens when upstream is silent, so the
 	// reader has nothing to feed the same lock.
 	let mut payload = None;
-	let synth_pts = lock_recover(bridging).on_tick(now_std(), || {
+	let synth_pts = bridging.lock_recover().on_tick(now_std(), || {
 		let burst = last_frame.video_snapshot()?;
 		let nals: Vec<Bytes> = burst
 			.iframe_nals
@@ -1105,7 +1053,12 @@ fn tick_bridging(
 	let Some(synth_pts) = synth_pts else {
 		return;
 	};
-	let (codec, nals) = payload.expect("policy only emits when the closure supplied an anchor");
+	// The policy only emits when the closure supplied an anchor, and the
+	// closure fills `payload` whenever it does; skip the tick if that
+	// contract is ever broken rather than panic the ticker task.
+	let Some((codec, nals)) = payload else {
+		return;
+	};
 
 	let _ = tx.send(Frame::Video {
 		codec,
@@ -1394,14 +1347,14 @@ fn process_stream_result(
 			// metadata-only packet would fail to refresh `last_live_frame_at`
 			// and Bridging could fire spuriously.
 			if matches!(packet, BcMedia::Iframe(_) | BcMedia::Pframe(_)) {
-				lock_recover(bridging).on_upstream_packet(now_std());
+				bridging.lock_recover().on_upstream_packet(now_std());
 			}
 
 			// Read the gate once per packet: `apply_bcmedia_packet` is
 			// synchronous, so the answer cannot change underneath it.
-			let is_bridging = lock_recover(bridging).is_bridging();
+			let is_bridging = bridging.lock_recover().is_bridging();
 			let broadcast_pts = {
-				let mut s = lock_recover(translator_state);
+				let mut s = translator_state.lock_recover();
 				apply_bcmedia_packet(
 					&packet,
 					tx,
@@ -1416,7 +1369,7 @@ fn process_stream_result(
 			};
 
 			if let Some(pts_90khz) = broadcast_pts {
-				lock_recover(bridging).on_broadcast(pts_90khz, now_std());
+				bridging.lock_recover().on_broadcast(pts_90khz, now_std());
 			}
 			true
 		}
@@ -1634,9 +1587,7 @@ fn handle_iframe(
 			vps: vps_bytes.clone(),
 			profile_level_id,
 		};
-		if let Ok(mut guard) = sdp_params.write() {
-			guard.video = Some(video_params);
-		}
+		sdp_params.write_recover().video = Some(video_params);
 	}
 
 	// Update last-frame buffer with a fresh burst. We store the already
@@ -2081,8 +2032,8 @@ fn handle_aac(
 	// Small helpers so the three sdp-lock sites read uniformly. Use
 	// poison-recovering accessors so a panic elsewhere holding the
 	// SDP lock doesn't cascade through the audio handler.
-	let read_sdp = || rlock_recover(sdp_params);
-	let write_sdp = || wlock_recover(sdp_params);
+	let read_sdp = || sdp_params.read_recover();
+	let write_sdp = || sdp_params.write_recover();
 
 	// Populate SDP audio on first observation. Read-check first so the
 	// hot path doesn't grab the write lock on every packet.
@@ -2238,7 +2189,7 @@ fn handle_aac(
 	// frame was still "emitted" from the translator's perspective and
 	// presence reflects what we produced, not what anyone read. The
 	// empty-body drop above is the one case where we skip the upgrade.
-	let mut p = wlock_recover(audio_presence);
+	let mut p = audio_presence.write_recover();
 	*p = p.observed(AudioCodec::Aac);
 }
 
@@ -2346,8 +2297,8 @@ fn handle_adpcm(
 	// Populate SDP audio on first observation (read-then-write-lock
 	// pattern matches handle_aac). Poison-recovering accessors so a
 	// panic elsewhere holding the SDP lock doesn't cascade.
-	let read_sdp = || rlock_recover(sdp_params);
-	let write_sdp = || wlock_recover(sdp_params);
+	let read_sdp = || sdp_params.read_recover();
+	let write_sdp = || sdp_params.write_recover();
 	if read_sdp().audio.is_none() {
 		let mut w = write_sdp();
 		if w.audio.is_none() {
@@ -2389,7 +2340,7 @@ fn handle_adpcm(
 	let duration = paced_audio_duration(sample_count, 8_000);
 	dispatch_paced_audio(audio_pace_tx, tx, frame, duration);
 
-	let mut p = wlock_recover(audio_presence);
+	let mut p = audio_presence.write_recover();
 	*p = p.observed(AudioCodec::G711Ulaw);
 }
 
@@ -3138,8 +3089,7 @@ mod tests {
 		// I-frame. This is the exact signal the empty-SDP race broke on
 		// real cameras — asserting it here locks the contract in place.
 		let v = sdp_params
-			.read()
-			.expect("sdp lock poisoned")
+			.read_recover()
 			.video
 			.clone()
 			.expect("video params must be populated after the I-frame");
@@ -4630,7 +4580,9 @@ mod tests {
 		let translator_state = Arc::new(Mutex::new(StreamTranslatorState::default()));
 		// Starts Bridging so the test can prove a live frame flips it back.
 		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
-		lock_recover(&bridging).set_state_for_test(GapState::Bridging);
+		bridging
+			.lock_recover()
+			.set_state_for_test(GapState::Bridging);
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
@@ -4669,10 +4621,10 @@ mod tests {
 		);
 		assert!(keep_going);
 		assert!(rx.try_recv().is_ok());
-		assert_eq!(lock_recover(&bridging).state(), GapState::Live);
+		assert_eq!(bridging.lock_recover().state(), GapState::Live);
 		// Expected pts = 1_000_000 * 9 / 100 = 90_000.
 		assert_eq!(
-			lock_recover(&bridging).last_emitted_pts_90khz(),
+			bridging.lock_recover().last_emitted_pts_90khz(),
 			Some(90_000)
 		);
 	}
@@ -4696,7 +4648,7 @@ mod tests {
 		// audio packet touches neither the state nor the recorded PTS.
 		let bridging = Mutex::new(BridgingPolicy::new(Duration::from_secs(5), now_std()));
 		{
-			let mut policy = lock_recover(&bridging);
+			let mut policy = bridging.lock_recover();
 			policy.on_broadcast(12_345, now_std());
 			policy.set_state_for_test(GapState::Bridging);
 		}
@@ -4728,9 +4680,9 @@ mod tests {
 		);
 		assert!(keep);
 		// Bridging preserved because no video frame broadcast.
-		assert_eq!(lock_recover(&bridging).state(), GapState::Bridging);
+		assert_eq!(bridging.lock_recover().state(), GapState::Bridging);
 		assert_eq!(
-			lock_recover(&bridging).last_emitted_pts_90khz(),
+			bridging.lock_recover().last_emitted_pts_90khz(),
 			Some(12_345)
 		);
 	}
@@ -5087,7 +5039,9 @@ mod tests {
 		);
 		let bridging = Arc::clone(&args.bridging);
 		// Start Bridging so we can verify a live frame flips it back.
-		lock_recover(&bridging).set_state_for_test(GapState::Bridging);
+		bridging
+			.lock_recover()
+			.set_state_for_test(GapState::Bridging);
 
 		let packet = BcMedia::Iframe(BcMediaIframe {
 			video_type: VideoType::H264,
@@ -5117,10 +5071,10 @@ mod tests {
 		// A Frame::Video was broadcast.
 		assert!(matches!(rx.try_recv(), Ok(Frame::Video { .. })));
 		// State flipped back to Live.
-		assert_eq!(lock_recover(&bridging).state(), GapState::Live);
+		assert_eq!(bridging.lock_recover().state(), GapState::Live);
 		// The recorded PTS reflects the broadcast frame.
 		assert_eq!(
-			lock_recover(&bridging).last_emitted_pts_90khz(),
+			bridging.lock_recover().last_emitted_pts_90khz(),
 			Some(90_000)
 		);
 	}

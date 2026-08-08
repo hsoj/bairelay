@@ -67,7 +67,6 @@ get_if_addrs = "0.5.3"
 md5 = "0.7.0"
 nom = { version = "7.1.3", features = ["alloc"] }
 rand = "0.8.5"
-regex = "1.7.3"
 zeroize = "1.8"
 tokio-stream = { version = "0.1.12", features = ["sync", "time", "net"] }
 # Cloud bundle minting for account ("cloud") cameras: HTTPS to

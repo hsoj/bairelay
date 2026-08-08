@@ -267,13 +267,17 @@ pub enum BcUdpDropReceiverKind {
 
 impl From<std::io::Error> for Error {
 	fn from(k: std::io::Error) -> Self {
-		// Check for other error that is already an Error of this type
-		if k.get_ref()
-			.is_some_and(|e| e.downcast_ref::<Error>().is_some())
-		{
-			*k.into_inner().unwrap().downcast::<Error>().unwrap()
-		} else {
-			Error::Io(std::sync::Arc::new(k))
+		// An io::Error can wrap an Error of this type; unwrap it back
+		// out rather than double-wrapping. Os/simple errors carry no
+		// payload (`get_ref()` is `None`) and pass through untouched.
+		if k.get_ref().is_none() {
+			return Error::Io(std::sync::Arc::new(k));
+		}
+		let kind = k.kind();
+		match k.into_inner().map(|inner| inner.downcast::<Error>()) {
+			Some(Ok(e)) => *e,
+			Some(Err(inner)) => Error::Io(std::sync::Arc::new(std::io::Error::new(kind, inner))),
+			None => Error::Io(std::sync::Arc::new(kind.into())),
 		}
 	}
 }

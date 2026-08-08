@@ -19,6 +19,7 @@
 //! frames pile up — the unified-loop design that preceded this task
 //! produced audible 0.1–1.4 s audio gaps at the camera's GOP cadence.
 
+use crate::sync::MutexPoisonRecover as _;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -74,7 +75,7 @@ fn rebuild_runtime(
 	existing: &[RuntimeTrack],
 ) -> Vec<RuntimeTrack> {
 	let snapshot: Vec<(TrackKind, Arc<dyn Transport>, u32, u32)> = {
-		let guard = shared.lock().expect("session tracks lock poisoned");
+		let guard = shared.lock_recover();
 		guard
 			.iter()
 			.map(|t| (t.kind, Arc::clone(&t.transport), t.ssrc, t.clock_rate))
@@ -206,7 +207,7 @@ fn build_runtime_for_kind(
 	// `Arc<dyn Transport>` is the heavy bit). Hold the registry lock
 	// only across the lookup + Arc bump.
 	let (transport, ssrc, clock_rate) = {
-		let guard = shared.lock().expect("session tracks lock poisoned");
+		let guard = shared.lock_recover();
 		let entry = guard.iter().find(|t| t.kind == kind)?;
 		(Arc::clone(&entry.transport), entry.ssrc, entry.clock_rate)
 	};
@@ -414,11 +415,10 @@ async fn video_dispatch_loop(
 		// usually the first SETUP).
 		if track.is_none() {
 			track = build_runtime_for_kind(&session_tracks, TrackKind::Video, None);
-			if track.is_none() {
-				continue;
-			}
 		}
-		let track = track.as_mut().expect("just resolved Some above");
+		let Some(track) = track.as_mut() else {
+			continue;
+		};
 
 		// Suppress post-burst live video until a fresh IDR arrives.
 		// Cached IDR was from the previous GOP; live P-frames before
@@ -473,11 +473,10 @@ async fn audio_dispatch_loop(
 		// pair on video), so this branch fires on real traffic.
 		if track.is_none() {
 			track = build_runtime_for_kind(&session_tracks, TrackKind::Audio, None);
-			if track.is_none() {
-				continue;
-			}
 		}
-		let track = track.as_mut().expect("just resolved Some above");
+		let Some(track) = track.as_mut() else {
+			continue;
+		};
 
 		if dispatch_one(&frame, track, None).await.is_err() {
 			return;

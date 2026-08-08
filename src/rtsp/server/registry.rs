@@ -5,6 +5,7 @@
 //! The registry lets handlers find the session targeted by an RTSP
 //! request's `Session:` header.
 
+use crate::sync::MutexPoisonRecover as _;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -129,10 +130,7 @@ impl SessionEntry {
 	/// handler when a client issues a second SETUP against an existing
 	/// session ID to attach its audio track.
 	pub fn append_track(&self, track: TrackEntry) {
-		self.tracks
-			.lock()
-			.expect("tracks lock poisoned")
-			.push(track);
+		self.tracks.lock_recover().push(track);
 		// Order matters: notify AFTER push so a waiter woken by the
 		// notify sees the new track on its next snapshot rebuild.
 		self.tracks_changed.notify_one();
@@ -173,19 +171,12 @@ impl SessionRegistry {
 
 	/// Insert a new session.
 	pub fn insert(&self, id: String, entry: SessionEntry) {
-		self.entries
-			.lock()
-			.expect("registry lock poisoned")
-			.insert(id, entry);
+		self.entries.lock_recover().insert(id, entry);
 	}
 
 	/// Cancel and remove a session by ID. Returns the removed entry if any.
 	pub fn remove(&self, id: &str) -> Option<SessionEntry> {
-		let entry = self
-			.entries
-			.lock()
-			.expect("registry lock poisoned")
-			.remove(id)?;
+		let entry = self.entries.lock_recover().remove(id)?;
 		entry.cancel.cancel();
 		Some(entry)
 	}
@@ -193,7 +184,7 @@ impl SessionRegistry {
 	/// Drop all sessions (cancels all) — called on connection close.
 	pub fn clear(&self) {
 		let entries: HashMap<String, SessionEntry> =
-			std::mem::take(&mut self.entries.lock().expect("registry lock poisoned"));
+			std::mem::take(&mut self.entries.lock_recover());
 		for (_, entry) in entries {
 			entry.cancel.cancel();
 		}
@@ -201,10 +192,7 @@ impl SessionRegistry {
 
 	/// Does a session with this ID exist?
 	pub fn contains(&self, id: &str) -> bool {
-		self.entries
-			.lock()
-			.expect("registry lock poisoned")
-			.contains_key(id)
+		self.entries.lock_recover().contains_key(id)
 	}
 
 	/// True when no sessions are currently registered. Drives the
@@ -213,10 +201,7 @@ impl SessionRegistry {
 	/// that, the connection-level deadline is the only protection
 	/// against a slot-hogging client.
 	pub fn is_empty(&self) -> bool {
-		self.entries
-			.lock()
-			.expect("registry lock poisoned")
-			.is_empty()
+		self.entries.lock_recover().is_empty()
 	}
 
 	/// Clone the `Arc` holding the first-video-packet (seq, rtptime) slot
@@ -225,43 +210,15 @@ impl SessionRegistry {
 	/// inside its mutex until the session task has sent its first video
 	/// packet.
 	pub fn first_video_rtp(&self, id: &str) -> Option<FirstVideoRtpSlot> {
-		let entries = self.entries.lock().expect("registry lock poisoned");
+		let entries = self.entries.lock_recover();
 		entries
 			.get(id)
 			.map(|e| std::sync::Arc::clone(&e.first_video_rtp))
 	}
 
-	/// Clone the `Arc` holding the track list for the given session, if
-	/// it exists. Returns `None` if the session is not registered. Used
-	/// by the session send-loop spawn so that tracks appended later by
-	/// [`append_track`](Self::append_track) become visible to the loop
-	/// on its next iteration.
-	pub fn tracks_arc(&self, id: &str) -> Option<Arc<Mutex<Vec<TrackEntry>>>> {
-		let entries = self.entries.lock().expect("registry lock poisoned");
-		entries.get(id).map(|e| Arc::clone(&e.tracks))
-	}
-
-	/// Clone the `Arc<Notify>` fired on track append for the given session.
-	/// Returned so the session send-loop spawn can await appends without
-	/// per-iteration polling.
-	pub fn tracks_changed_arc(&self, id: &str) -> Option<Arc<tokio::sync::Notify>> {
-		let entries = self.entries.lock().expect("registry lock poisoned");
-		entries.get(id).map(|e| Arc::clone(&e.tracks_changed))
-	}
-
-	/// Clone the `(Arc<Notify>, Arc<AtomicBool>)` pair that gates the
-	/// session send loop on PLAY. Returned so the spawn can park until
-	/// the PLAY handler fires `mark_playing`.
-	pub fn play_gate_arc(&self, id: &str) -> Option<(Arc<tokio::sync::Notify>, Arc<AtomicBool>)> {
-		let entries = self.entries.lock().expect("registry lock poisoned");
-		entries
-			.get(id)
-			.map(|e| (Arc::clone(&e.play_signal), Arc::clone(&e.play_fired)))
-	}
-
 	/// Mark a session as playing — called by the PLAY handler. Idempotent.
 	pub fn mark_playing(&self, id: &str) {
-		let entries = self.entries.lock().expect("registry lock poisoned");
+		let entries = self.entries.lock_recover();
 		if let Some(e) = entries.get(id) {
 			e.mark_playing();
 		}
@@ -274,7 +231,7 @@ impl SessionRegistry {
 	/// rate on late-attached audio [`TrackEntry`]s for RTCP SR
 	/// extrapolation.
 	pub fn audio_sample_rate(&self, id: &str) -> Option<u32> {
-		let entries = self.entries.lock().expect("registry lock poisoned");
+		let entries = self.entries.lock_recover();
 		entries.get(id).and_then(|e| {
 			e.subscription
 				.sdp_params
@@ -288,7 +245,7 @@ impl SessionRegistry {
 	/// unknown — callers should verify via [`contains`](Self::contains)
 	/// first when that matters.
 	pub fn append_track(&self, id: &str, track: TrackEntry) {
-		let entries = self.entries.lock().expect("registry lock poisoned");
+		let entries = self.entries.lock_recover();
 		if let Some(entry) = entries.get(id) {
 			entry.append_track(track);
 		}
@@ -300,12 +257,9 @@ impl SessionRegistry {
 	/// matching `Session:` header is dispatched. If the session is not
 	/// registered (e.g. already torn down) the call is a no-op.
 	pub fn touch(&self, id: &str) {
-		let entries = self.entries.lock().expect("registry lock poisoned");
+		let entries = self.entries.lock_recover();
 		if let Some(entry) = entries.get(id) {
-			*entry
-				.last_activity
-				.lock()
-				.expect("last_activity lock poisoned") = Instant::now();
+			*entry.last_activity.lock_recover() = Instant::now();
 		}
 	}
 
@@ -322,14 +276,11 @@ impl SessionRegistry {
 	/// [`SubscriptionHandle`]: crate::rtsp::provider::SubscriptionHandle
 	pub fn sweep_expired(&self, max_idle: Duration) -> Vec<String> {
 		let expired: Vec<(String, SessionEntry)> = {
-			let mut entries = self.entries.lock().expect("registry lock poisoned");
+			let mut entries = self.entries.lock_recover();
 			let expired_ids: Vec<String> = entries
 				.iter()
 				.filter_map(|(id, entry)| {
-					let last = *entry
-						.last_activity
-						.lock()
-						.expect("last_activity lock poisoned");
+					let last = *entry.last_activity.lock_recover();
 					if last.elapsed() > max_idle {
 						Some(id.clone())
 					} else {
@@ -460,7 +411,7 @@ mod tests {
 			// already have landed in the Vec. Otherwise B3's session loop
 			// could wake, rebuild against a stale list, and miss the
 			// appended track.
-			let len = tracks.lock().expect("tracks lock poisoned").len();
+			let len = tracks.lock_recover().len();
 			assert!(len >= 2, "expected len >= 2 after append; got {len}");
 		});
 

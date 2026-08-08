@@ -19,6 +19,7 @@
 //! rate-limiting. See `login::run_sigv3_direct`.
 
 use crate::baichuan::{Error, Result};
+use crate::sync::MutexPoisonRecover as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -121,7 +122,7 @@ pub async fn mint_bundle(
 	refresh_token: Option<&str>,
 ) -> Result<Sigv3Bundle> {
 	let now = time::OffsetDateTime::now_utc().unix_timestamp();
-	if let Some((bundle, exp)) = cache().lock().unwrap().get(uid) {
+	if let Some((bundle, exp)) = cache().lock_recover().get(uid) {
 		if *exp - CACHE_MARGIN_SECS > now {
 			return Ok(bundle.clone());
 		}
@@ -130,8 +131,7 @@ pub async fn mint_bundle(
 	let bundle = mint_uncached(account, password, uid, mfa_trust_token, refresh_token).await?;
 	if let Some(exp) = token_exp(&bundle.token_p) {
 		cache()
-			.lock()
-			.unwrap()
+			.lock_recover()
 			.insert(uid.to_owned(), (bundle.clone(), exp));
 	}
 	Ok(bundle)
@@ -142,17 +142,14 @@ pub async fn mint_bundle(
 /// (mint → signed login) offline. Pair with [`drop_cache_for_test`].
 #[cfg(test)]
 pub(crate) fn seed_cache_for_test(uid: &str, bundle: Sigv3Bundle, exp: i64) {
-	cache()
-		.lock()
-		.unwrap()
-		.insert(uid.to_owned(), (bundle, exp));
+	cache().lock_recover().insert(uid.to_owned(), (bundle, exp));
 }
 
 /// Test-only: remove a [`seed_cache_for_test`] entry (the cache is a
 /// process-global static, so tests clean up after themselves).
 #[cfg(test)]
 pub(crate) fn drop_cache_for_test(uid: &str) {
-	cache().lock().unwrap().remove(uid);
+	cache().lock_recover().remove(uid);
 }
 
 async fn mint_uncached(
@@ -787,15 +784,14 @@ mod tests {
 			cert_chain: "C".into(),
 		};
 		cache()
-			.lock()
-			.unwrap()
+			.lock_recover()
 			.insert(uid.to_owned(), (bundle, now + 3600));
 		// Bogus creds would fail the network; the fresh cache entry short-circuits.
 		let got = mint_bundle("nobody@example.com", "wrong", uid, None, None)
 			.await
 			.unwrap();
 		assert_eq!(got.token_p, "P");
-		cache().lock().unwrap().remove(uid);
+		cache().lock_recover().remove(uid);
 	}
 
 	#[test]
@@ -919,7 +915,7 @@ mod tests {
 		.await
 		.expect("mint with trust token");
 		assert_eq!(got_trusted.token_s, "SIG");
-		cache().lock().unwrap().remove("9527000MOCKTEST2");
+		cache().lock_recover().remove("9527000MOCKTEST2");
 
 		// Same mock server also drives the full MFA bootstrap (codes ->
 		// sessions -> verified login), since TEST_BASE is a process-global
@@ -966,7 +962,7 @@ mod tests {
 			.await
 			.expect("mint via stored refresh token");
 		assert_eq!(got_refresh.token_s, "SIG");
-		cache().lock().unwrap().remove("9527000MOCKTEST3");
+		cache().lock_recover().remove("9527000MOCKTEST3");
 
 		// Error / edge arms (sentinel-driven from the same mock):
 		assert!(
@@ -996,6 +992,6 @@ mod tests {
 		assert!(got.token_p.contains("\"role\":\"admin\""));
 		// \r\n in the cert is normalised to \n.
 		assert_eq!(got.cert_chain, "-----BEGIN-----\nAAAA\n-----END-----\n");
-		cache().lock().unwrap().remove("9527000MOCKTEST0");
+		cache().lock_recover().remove("9527000MOCKTEST0");
 	}
 }

@@ -1,3 +1,6 @@
+// Same policy as `src/lib.rs`: production code must not panic.
+#![warn(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -322,27 +325,27 @@ async fn async_main() -> Result<()> {
 	// cancel edge.
 	let mqtt_cancel = CancellationToken::new();
 
-	// Spawn MQTT event loop with control dispatch.
-	let mqtt_task = if let Some(event_loop) = mqtt_event_loop {
-		let cameras_for_mqtt = orchestrator.cameras_arc();
-		let mqtt_for_dispatch = mqtt_shared
-			.clone()
-			.expect("mqtt_shared must exist when event_loop exists");
-		let cancel = mqtt_cancel.clone();
-		let prefix = topic_prefix.clone();
-		Some(tokio::spawn(async move {
-			run_mqtt_event_loop(
-				event_loop,
-				cameras_for_mqtt,
-				mqtt_for_dispatch,
-				prefix,
-				cancel,
-			)
-			.await;
-		}))
-	} else {
-		None
-	};
+	// Spawn MQTT event loop with control dispatch. The event loop and
+	// the shared client are created together, so zipping them encodes
+	// "both or neither" without an unwrap.
+	let mqtt_task =
+		if let Some((event_loop, mqtt_for_dispatch)) = mqtt_event_loop.zip(mqtt_shared.clone()) {
+			let cameras_for_mqtt = orchestrator.cameras_arc();
+			let cancel = mqtt_cancel.clone();
+			let prefix = topic_prefix.clone();
+			Some(tokio::spawn(async move {
+				run_mqtt_event_loop(
+					event_loop,
+					cameras_for_mqtt,
+					mqtt_for_dispatch,
+					prefix,
+					cancel,
+				)
+				.await;
+			}))
+		} else {
+			None
+		};
 
 	// Centralised supervisor for every long-running service that
 	// shares the global cancel token (watchdog, startup-wake, RTSP
