@@ -1,3 +1,7 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+# large_futures budget: a future bigger than this is copied in full
+# on every poll. 16 KiB is the clippy default; sized to catch the
+# multi-KiB connect/session futures without flagging routine handlers.
+future-size-threshold = 16384

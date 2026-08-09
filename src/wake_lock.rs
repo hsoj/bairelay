@@ -23,6 +23,7 @@ pub struct WakeLockCounter {
 	inner: Arc<WakeLockInner>,
 }
 
+#[must_use = "dropping the guard releases the wake lock; an unbound `acquire()` lets the camera sleep immediately"]
 pub struct WakeLockGuard {
 	inner: Arc<WakeLockInner>,
 }

@@ -19,8 +19,8 @@ use crate::cli_convert::{
 	service_name_to_kind,
 };
 use crate::oneshot::{
-	abilities, battery, errors::UsageError, floodlight, output::Outcome, pir, presets, ptz, reboot,
-	services, set_time, siren, snapshot, status_light, users, version,
+	abilities, battery, floodlight, output::Outcome, pir, presets, ptz, reboot, services, set_time,
+	siren, snapshot, status_light, users, version,
 };
 
 /// Pre-flight check for `snapshot --json`: the JSON status line and
@@ -32,13 +32,8 @@ use crate::oneshot::{
 /// `Snapshot` with no `--output` path. Every other combination is
 /// valid and returns `Ok(())`.
 pub fn snapshot_json_preflight(json_mode: bool, cmd: &Command) -> Result<()> {
-	if json_mode {
-		if let Command::Snapshot { output: None, .. } = cmd {
-			return Err(UsageError::new(
-				"snapshot --json requires --output <path> (can't mix JSON and bytes on stdout)",
-			)
-			.into());
-		}
+	if let Command::Snapshot { output, .. } = cmd {
+		crate::oneshot::snapshot::check_json_output(json_mode, output.as_deref())?;
 	}
 	Ok(())
 }

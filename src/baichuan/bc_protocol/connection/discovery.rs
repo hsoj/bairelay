@@ -1401,7 +1401,7 @@ fn get_local_ip() -> Result<std::net::IpAddr> {
 /// Why: a host with Wi-Fi (`192.168.1.10/24`), Docker bridge
 /// (`172.17.0.1/16`), Tailscale (`100.x.y.z/32`), and libvirt
 /// (`192.168.122.1/24`) returns these in OS-dependent order from
-/// `get_if_addrs`. The legacy first-match could pick the Docker
+/// `if_addrs`. The legacy first-match could pick the Docker
 /// bridge address, which is unreachable from the camera on the
 /// physical LAN — the camera then can't dial us back, discovery
 /// times out, and the operator sees an opaque "no registers
@@ -1413,13 +1413,13 @@ fn get_local_ip() -> Result<std::net::IpAddr> {
 /// fallback, which is identical to the legacy behaviour — no
 /// regression.
 fn get_local_ip_for_target(target: Option<std::net::IpAddr>) -> Result<std::net::IpAddr> {
-	let ifaces = get_if_addrs::get_if_addrs()?;
+	let ifaces = if_addrs::get_if_addrs()?;
 	if let Some(std::net::IpAddr::V4(target_v4)) = target {
 		for iface in &ifaces {
 			if iface.is_loopback() {
 				continue;
 			}
-			if let get_if_addrs::IfAddr::V4(v4) = &iface.addr {
+			if let if_addrs::IfAddr::V4(v4) = &iface.addr {
 				let mask_u32: u32 = v4.netmask.into();
 				let iface_u32: u32 = v4.ip.into();
 				let target_u32: u32 = target_v4.into();
@@ -1433,15 +1433,15 @@ fn get_local_ip_for_target(target: Option<std::net::IpAddr>) -> Result<std::net:
 	// behaviour when subnet-match finds nothing or target is unknown.
 	ifaces
 		.iter()
-		.find(|i| !i.is_loopback() && matches!(i.addr, get_if_addrs::IfAddr::V4(_)))
+		.find(|i| !i.is_loopback() && matches!(i.addr, if_addrs::IfAddr::V4(_)))
 		.map(|iface| Ok(iface.ip()))
 		.unwrap_or_else(|| Err(Error::Other("No Local Ip Address Found")))
 }
 
 fn get_broadcasts(ports: &[u16]) -> Result<Vec<SocketAddr>> {
 	let mut broadcasts = vec![Ipv4Addr::BROADCAST];
-	for iface in get_if_addrs::get_if_addrs()?.iter() {
-		if let get_if_addrs::IfAddr::V4(ifacev4) = &iface.addr {
+	for iface in if_addrs::get_if_addrs()?.iter() {
+		if let if_addrs::IfAddr::V4(ifacev4) = &iface.addr {
 			if let Some(broadcast) = ifacev4.broadcast.as_ref() {
 				broadcasts.push(*broadcast);
 			}
@@ -2128,7 +2128,7 @@ mod internal_tests {
 	/// Subnet-match preference: when a target is given,
 	/// `get_local_ip_for_target` prefers an interface whose subnet
 	/// contains it. We cannot fabricate interfaces in this test (the
-	/// `get_if_addrs` query is real) but we CAN verify the contract
+	/// `if_addrs` query is real) but we CAN verify the contract
 	/// in two ways: (a) any returned IP is non-loopback IPv4 (same as
 	/// the no-target path), and (b) when the host has any IPv4
 	/// interface, asking for a target on that interface's subnet
@@ -2138,13 +2138,13 @@ mod internal_tests {
 	/// (CI sandboxes).
 	#[test]
 	fn get_local_ip_for_target_prefers_subnet_match() {
-		let Ok(ifaces) = get_if_addrs::get_if_addrs() else {
+		let Ok(ifaces) = if_addrs::get_if_addrs() else {
 			return;
 		};
 		let v4_ifaces: Vec<_> = ifaces
 			.iter()
 			.filter_map(|i| match (&i.addr, i.is_loopback()) {
-				(get_if_addrs::IfAddr::V4(v4), false) => Some(v4.clone()),
+				(if_addrs::IfAddr::V4(v4), false) => Some(v4.clone()),
 				_ => None,
 			})
 			.collect();

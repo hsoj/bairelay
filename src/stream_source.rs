@@ -25,7 +25,7 @@
 //! packet; `AudioPresence` on the owning `CameraHandle` advances
 //! `Unknown → Present { codec }` at the same time. Dispatch to the
 //! right RTSP transport (video vs. audio track) happens inside
-//! `crates/rtsp/src/server/session_task.rs`.
+//! `src/rtsp/server/session_task.rs`.
 
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -122,12 +122,6 @@ pub struct StreamSource {
 	/// watchdog prune-grace smoothing. `None` while subscribers > 0 (and
 	/// reset to `None` on every transition back to > 0).
 	pub(crate) last_idle_since: Mutex<Option<Instant>>,
-	/// Per-source gap-bridging threshold. If the reader task goes silent
-	/// for longer than this interval, Task 5 will emit a
-	/// placeholder frame so downstream RTSP sessions don't stall. A
-	/// sentinel `Duration::MAX` (set when `PauseConfig::bridge_gaps` is
-	/// false) disables gap emission entirely — the ticker never fires.
-	gap_threshold: Duration,
 	/// Gap-bridging policy for this source: upstream-liveness tracking,
 	/// the `Live ⇄ Bridging` transition, and replay-PTS synthesis. The
 	/// decision logic is pure ([`crate::gap_bridging`]); this handle
@@ -155,7 +149,6 @@ struct StreamSourceParts {
 	sdp_params: Arc<RwLock<SdpParams>>,
 	translator_state: Arc<Mutex<StreamTranslatorState>>,
 	cancel: CancellationToken,
-	gap_threshold: Duration,
 	bridging: Arc<Mutex<BridgingPolicy>>,
 }
 
@@ -180,7 +173,6 @@ impl StreamSourceParts {
 			sdp_params,
 			translator_state: Arc::new(Mutex::new(StreamTranslatorState::default())),
 			cancel: CancellationToken::new(),
-			gap_threshold,
 			bridging: Arc::new(Mutex::new(BridgingPolicy::new(gap_threshold, now_std()))),
 		}
 	}
@@ -194,7 +186,6 @@ impl StreamSourceParts {
 			cancel: self.cancel,
 			task: Mutex::new(Some(task)),
 			last_idle_since: Mutex::new(None),
-			gap_threshold: self.gap_threshold,
 			bridging: self.bridging,
 		})
 	}
@@ -465,17 +456,6 @@ impl StreamSource {
 		self.tx.receiver_count()
 	}
 
-	/// Configured gap-bridging threshold for this source. Task 5 (Phase
-	/// 2H) reads this from inside the reader loop to drive the
-	/// placeholder-frame ticker. A sentinel `Duration::MAX` means
-	/// `PauseConfig::bridge_gaps = false`, so gap emission is disabled.
-	///
-	/// Compare against `Instant::elapsed()` — do **not** add this to an
-	/// `Instant` (`now + Duration::MAX` overflow-panics).
-	pub fn gap_threshold(&self) -> Duration {
-		self.gap_threshold
-	}
-
 	/// Current upstream-presence state as maintained by `reader_task`'s
 	/// 200 ms gap-detection ticker. See [`GapState`].
 	pub fn gap_state(&self) -> GapState {
@@ -552,7 +532,7 @@ impl StreamSource {
 	///
 	/// Spawns a ticker-only task that runs the same gap-detection loop
 	/// as `reader_task` but without any `BcCamera` dependency — this
-	/// lets Task 5 tests drive the `Live ↔ Bridging` transitions under
+	/// lets tests drive the `Live ↔ Bridging` transitions under
 	/// `tokio::test(start_paused = true)`. The injector-less variant
 	/// is sufficient for `Bridging` + `Duration::MAX` assertions; use
 	/// [`Self::start_inert_for_test_with_gap_and_injector`] when you
@@ -936,19 +916,7 @@ async fn media_pacer_task(
 		};
 
 		let now = tokio::time::Instant::now();
-		// Re-anchor in two cases:
-		// 1. Cursor too far in the FUTURE (queue overflow / startup
-		//    burst): always snap to `now`, regardless of `snap_on_past`.
-		// 2. Cursor in the PAST (queue ran dry, camera was idle): snap
-		//    to `now` only when `snap_on_past` is true. False preserves
-		//    the original burst-drain semantics for callers that prefer
-		//    long-term slope correctness over inter-packet smoothness.
-		let target = match next_emit_at {
-			Some(t) if t > now + max_lead => now,
-			Some(t) if snap_on_past && t < now => now,
-			Some(t) => t,
-			None => now + initial_latency,
-		};
+		let target = next_target(next_emit_at, now, max_lead, initial_latency, snap_on_past);
 
 		if target > now {
 			tokio::select! {
@@ -972,6 +940,35 @@ async fn media_pacer_task(
 		// audio PTS" jump every SR_INTERVAL. Absolute scheduling keeps
 		// the long-term slope at exactly `clock_rate`.
 		next_emit_at = Some(target.checked_add(item.duration).unwrap_or(target));
+	}
+}
+
+/// Where the pacer's emit cursor should land for the next item —
+/// the full re-anchor decision table, pure so it table-tests without
+/// a runtime:
+///
+/// - No cursor yet (first item): `now + initial_latency`, building the
+///   pre-buffer the absolute-anchor scheduling drains against.
+/// - Cursor too far in the FUTURE (`> now + max_lead`; queue overflow /
+///   startup burst): snap to `now`, regardless of `snap_on_past`.
+/// - Cursor in the PAST (queue ran dry, camera was idle): snap to `now`
+///   only when `snap_on_past` is true (audio — smooth spacing beats
+///   slope). False keeps the stale cursor so the caller burst-drains
+///   until it catches up, preserving the long-term wallclock-PTS slope
+///   (video).
+/// - Otherwise: the cursor stands.
+fn next_target(
+	cursor: Option<tokio::time::Instant>,
+	now: tokio::time::Instant,
+	max_lead: Duration,
+	initial_latency: Duration,
+	snap_on_past: bool,
+) -> tokio::time::Instant {
+	match cursor {
+		Some(t) if t > now + max_lead => now,
+		Some(t) if snap_on_past && t < now => now,
+		Some(t) => t,
+		None => now + initial_latency,
 	}
 }
 
@@ -1143,7 +1140,7 @@ async fn reader_task(args: ReaderTaskArgs) {
 	// translator panic unwinds reader_task itself, the spawned
 	// `tokio::spawn` in `StreamSource::start` swallows the panic, and
 	// the camera keeps streaming on its battery — the same class of
-	// shutdown leak Phase 1.5 closed for `listen_on_motion`.
+	// shutdown leak already closed for `listen_on_motion`.
 	let translator_camera = camera_name.clone();
 	let translator_kind = core_kind;
 	let translator_handle = tokio::spawn(async move {
@@ -1305,7 +1302,10 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 /// - `Ok(Err(_))` — decode error, log at warn, continue.
 /// - `Err(_)` — stream finished (normal on cancel, unexpected otherwise).
 ///   Log + break.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "S4-1 target: the driver still threads every side-effect handle through; the arg list shrinks when translate() becomes sans-IO"
+)]
 fn process_stream_result(
 	result: Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error>,
 	camera_name: &str,
@@ -1446,7 +1446,7 @@ fn maybe_capture_packet(
 /// observation.
 /// Returns `Some(pts_90khz)` iff this call broadcast a
 /// [`Frame::Video`] on `tx`; the value is that frame's 90 kHz RTP
-/// timestamp, used by 's replay-frame synth to seed the
+/// timestamp, used by the bridging replay-frame synth to seed the
 /// next `Bridging` PTS. Audio frames and info-variant drops always
 /// return `None` — they do not count as "upstream video frame
 /// arrived" for gap detection. Callers must gate
@@ -1460,7 +1460,10 @@ fn maybe_capture_packet(
 /// when `Bridging`, live audio frames are dropped silently (SDP
 /// population still happens, so DESCRIBE stays accurate). See the
 /// module-level notes.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "S4-1 target: the driver still threads every side-effect handle through; the arg list shrinks when translate() becomes sans-IO"
+)]
 pub fn apply_bcmedia_packet(
 	packet: &BcMedia,
 	tx: &broadcast::Sender<Frame>,
@@ -1711,7 +1714,10 @@ fn is_slice_nal(nal: &[u8], codec: VideoCodec) -> bool {
 /// Extract parameter sets (SPS/PPS for H.264, VPS/SPS/PPS for H.265) and
 /// IDR NALs from a split I-frame NAL sequence, for both
 /// [`LastFrameBuffer`] insertion and SDP generation.
-#[allow(clippy::type_complexity)]
+#[expect(
+	clippy::type_complexity,
+	reason = "one-caller tuple return; naming a struct for it would outweigh the tuple"
+)]
 fn extract_iframe_parts(
 	codec: VideoCodec,
 	nals: &[&[u8]],
@@ -1789,7 +1795,7 @@ fn extract_iframe_parts(
 /// Returns `Some(pts_90khz)` iff a [`Frame::Video`] P-frame was
 /// broadcast on `tx`. Returns `None` when the P-frame arrives before
 /// any I-frame has been seen (codec undetected) or after NAL
-/// splitting produces an empty list. 's gap marker must not
+/// splitting produces an empty list. The gap marker must not
 /// flip to `Live` in those cases — subscribers saw nothing.
 fn handle_pframe(
 	pframe: &BcMediaPframe,
@@ -2103,7 +2109,7 @@ fn handle_aac(
 	// RTP clock rate equals the audio sample rate, so each emitted AU
 	// advances the counter by the per-AU sample count. The packetizer
 	// forwards this `pts` verbatim into the RTP header (see
-	// crates/rtsp/src/server/packetizer.rs dispatch_audio). Zero-PTS
+	// src/rtsp/server/packetizer.rs dispatch_audio). Zero-PTS
 	// audio caused ffmpeg/mpv/gst-launch to reject streams with
 	// "DTS N >= N" on the 4K HEVC camera; monotonic increments fix the
 	// root cause. Wrap with `wrapping_add` — RTP timestamps intentionally
@@ -2346,12 +2352,49 @@ fn handle_adpcm(
 
 #[cfg(test)]
 mod tests {
+	use super::next_target;
+
+	/// The pacer re-anchor decision table — every branch of
+	/// [`next_target`], including the audio/video `snap_on_past`
+	/// asymmetry, with no runtime and no sleeps (paused clock only
+	/// supplies Instant values).
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn pacer_next_target_decision_table() {
+		let now = tokio::time::Instant::now();
+		let lead = Duration::from_millis(500);
+		let latency = Duration::from_millis(1500);
+
+		// First item: pre-buffer by initial_latency.
+		assert_eq!(next_target(None, now, lead, latency, false), now + latency);
+		assert_eq!(next_target(None, now, lead, latency, true), now + latency);
+
+		// Cursor within [now, now+max_lead]: stands, both modes.
+		let ahead = now + Duration::from_millis(300);
+		assert_eq!(next_target(Some(ahead), now, lead, latency, false), ahead);
+		assert_eq!(next_target(Some(ahead), now, lead, latency, true), ahead);
+
+		// Cursor exactly at the lead cap: stands (> is strict).
+		let at_cap = now + lead;
+		assert_eq!(next_target(Some(at_cap), now, lead, latency, true), at_cap);
+
+		// Cursor beyond the cap: snaps to now regardless of mode.
+		let runaway = now + lead + Duration::from_millis(1);
+		assert_eq!(next_target(Some(runaway), now, lead, latency, false), now);
+		assert_eq!(next_target(Some(runaway), now, lead, latency, true), now);
+
+		// Cursor in the past: audio (snap) re-anchors to now; video
+		// (no snap) keeps the stale cursor and burst-drains.
+		let stale = now - Duration::from_millis(200);
+		assert_eq!(next_target(Some(stale), now, lead, latency, true), now);
+		assert_eq!(next_target(Some(stale), now, lead, latency, false), stale);
+	}
+
 	use super::*;
 	use crate::baichuan::bcmedia::model::{BcMediaIframe, BcMediaPframe, VideoType};
 
 	/// Compile-time check that `Arc<StreamSource>` is `Send + Sync` so it
 	/// can be shared across tokio tasks (and stored in the per-camera
-	/// stream registry in Task 19).
+	/// stream registry).
 	#[test]
 	fn arc_stream_source_is_send_sync() {
 		fn assert_send_sync<T: Send + Sync>() {}
@@ -2453,15 +2496,6 @@ mod tests {
 			.await
 			.expect("pacer must exit on cancel")
 			.expect("pacer task panicked");
-	}
-
-	/// the `gap_threshold` supplied at construction
-	/// time must round-trip through the public accessor so Task 5's
-	/// reader_task can read it back via the shared `Arc<StreamSource>`.
-	#[tokio::test(flavor = "current_thread")]
-	async fn stream_source_start_stores_gap_threshold() {
-		let src = StreamSource::start_inert_for_test_with_gap(Duration::from_millis(2500));
-		assert_eq!(src.gap_threshold(), Duration::from_millis(2500));
 	}
 
 	/// with a short threshold and no injected frames,
@@ -3034,7 +3068,7 @@ mod tests {
 	#[test]
 	fn apply_bcmedia_packet_translates_iframe_then_pframe() {
 		// Shared unit test for the production-path translator used by
-		// both `reader_task` and the Task 3 fixture-replay harness.
+		// both `reader_task` and the fixture-replay harness.
 		let (tx, mut rx) = broadcast::channel::<Frame>(16);
 		let last_frame = Arc::new(LastFrameBuffer::new());
 		let sdp_params = Arc::new(RwLock::new(SdpParams {

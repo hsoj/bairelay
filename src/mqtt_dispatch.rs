@@ -70,7 +70,7 @@ pub async fn dispatch_control(
 	let reply_topic = cmd.control_topic(topic_prefix);
 	tracing::debug!(camera = %camera_name, command = %reply_topic, "Dispatching control command");
 
-	let bc = match cam.bc_camera() {
+	let bc = match cam.camera() {
 		Some(bc) => bc,
 		None => {
 			// Camera is asleep / connecting. The wake-lock acquire above
@@ -140,20 +140,14 @@ pub async fn dispatch_control(
 			};
 			let speed = 32.0_f32;
 			let seconds = (amount / speed).clamp(0.0, 10.0);
-			match timeout(CMD_TIMEOUT, bc.send_ptz(dir, speed)).await {
-				Ok(Err(e)) => {
-					tracing::warn!(camera = %camera_name, error = %e, "PTZ move failed");
-				}
-				Err(_) => {
-					tracing::warn!(camera = %camera_name, "PTZ move timed out");
-				}
-				Ok(Ok(())) => {
-					tokio::time::sleep(Duration::from_secs_f32(seconds)).await;
-				}
+			let move_result =
+				timeout_to_result(timeout(CMD_TIMEOUT, bc.send_ptz(dir, speed)).await);
+			if move_result.is_ok() {
+				tokio::time::sleep(Duration::from_secs_f32(seconds)).await;
 			}
 			// Always try to stop
 			let _ = timeout(CMD_TIMEOUT, bc.send_ptz(Direction::Stop, speed)).await;
-			Ok(())
+			move_result
 		}
 		ControlCommand::PtzPreset {
 			ref camera,
@@ -220,21 +214,28 @@ pub async fn dispatch_control(
 		// Query commands -- serialize response as XML to status topic
 		// (non-retained), matching neolink behavior.
 		ControlCommand::QueryBattery { ref camera, .. } => {
-			match timeout(CMD_TIMEOUT, bc.battery_status()).await {
-				Ok(Ok(status)) => {
+			match timeout_to_result(timeout(CMD_TIMEOUT, bc.battery_status()).await) {
+				Ok(status) => {
 					let topic = topics::status_battery(topic_prefix, camera);
-					if let Ok(xml) = serialize_xml(&BatteryXmlPayload::from(status)) {
-						let _ = mqtt.publish(&topic, xml.as_bytes()).await;
+					match serialize_xml(&BatteryXmlPayload::from(status)) {
+						Ok(xml) => {
+							let _ = mqtt.publish(&topic, xml.as_bytes()).await;
+							Ok(())
+						}
+						Err(e) => {
+							tracing::warn!(camera = %camera, error = %e, "Battery XML serialization failed");
+							Err(crate::baichuan::bc_protocol::Error::Other(
+								"battery XML serialization failed",
+							))
+						}
 					}
 				}
-				Ok(Err(e)) => tracing::warn!(camera = %camera, error = %e, "Battery query failed"),
-				Err(_) => tracing::warn!(camera = %camera, "Battery query timed out"),
+				Err(e) => Err(e),
 			}
-			Ok(())
 		}
 		ControlCommand::QueryPreview { ref camera } => {
-			match timeout(CMD_TIMEOUT, bc.snapshot()).await {
-				Ok(Ok(jpeg)) => {
+			match timeout_to_result(timeout(CMD_TIMEOUT, bc.snapshot()).await) {
+				Ok(jpeg) => {
 					// One-shot render (no shared cache); cheaper than
 					// threading the per-camera OverlayCache in for a
 					// single operator-triggered query.
@@ -244,58 +245,67 @@ pub async fn dispatch_control(
 						*cam.preview_state_rx().borrow(),
 						None,
 					);
-					if let Err(e) = cam
+					match cam
 						.status_reporter(mqtt)
 						.report(crate::camera_status::CameraEvent::Preview(payload))
 						.await
 					{
-						tracing::warn!(camera = %camera, error = %e, "QueryPreview publish failed");
+						Ok(()) => Ok(()),
+						Err(e) => {
+							tracing::warn!(camera = %camera, error = %e, "QueryPreview publish failed");
+							Err(crate::baichuan::bc_protocol::Error::Other(
+								"preview publish failed",
+							))
+						}
 					}
 				}
-				Ok(Err(e)) => {
-					tracing::warn!(camera = %camera, error = %e, "QueryPreview snapshot failed")
-				}
-				Err(_) => tracing::warn!(camera = %camera, "QueryPreview snapshot timed out"),
+				Err(e) => Err(e),
 			}
-			Ok(())
 		}
 		ControlCommand::QueryPir { ref camera, .. } => {
-			match timeout(CMD_TIMEOUT, bc.pir_config()).await {
-				Ok(Ok(pir_state)) => {
+			match timeout_to_result(timeout(CMD_TIMEOUT, bc.pir_config()).await) {
+				Ok(pir_state) => {
 					let topic = topics::status_pir(topic_prefix, camera);
-					if let Ok(xml) = serialize_xml(&pir_state) {
-						let _ = mqtt.publish(&topic, xml.as_bytes()).await;
+					match serialize_xml(&pir_state) {
+						Ok(xml) => {
+							let _ = mqtt.publish(&topic, xml.as_bytes()).await;
+							Ok(())
+						}
+						Err(e) => {
+							tracing::warn!(camera = %camera, error = %e, "PIR XML serialization failed");
+							Err(crate::baichuan::bc_protocol::Error::Other(
+								"PIR XML serialization failed",
+							))
+						}
 					}
 				}
-				Ok(Err(e)) => tracing::warn!(camera = %camera, error = %e, "PIR query failed"),
-				Err(_) => tracing::warn!(camera = %camera, "PIR query timed out"),
+				Err(e) => Err(e),
 			}
-			Ok(())
 		}
 		ControlCommand::QueryPtzPreset { ref camera } => {
-			match timeout(CMD_TIMEOUT, bc.ptz_presets()).await {
-				Ok(Ok(slots)) => {
+			match timeout_to_result(timeout(CMD_TIMEOUT, bc.ptz_presets()).await) {
+				Ok(slots) => {
 					let presets: Vec<(u8, String)> = slots
 						.into_iter()
 						.filter_map(|slot| slot.name.map(|n| (slot.id, n)))
 						.collect();
 					cam.replace_preset_cache(presets);
-					if let Err(e) = cam.publish_discovery().await {
-						tracing::warn!(
-							camera = %camera,
-							error = %e,
-							"QueryPtzPreset: discovery republish failed"
-						);
+					match cam.publish_discovery().await {
+						Ok(()) => Ok(()),
+						Err(e) => {
+							tracing::warn!(
+								camera = %camera,
+								error = %e,
+								"QueryPtzPreset: discovery republish failed"
+							);
+							Err(crate::baichuan::bc_protocol::Error::Other(
+								"discovery republish failed",
+							))
+						}
 					}
 				}
-				Ok(Err(e)) => {
-					tracing::warn!(camera = %camera, error = %e, "QueryPtzPreset: ptz_presets failed")
-				}
-				Err(_) => {
-					tracing::warn!(camera = %camera, "QueryPtzPreset: ptz_presets timed out")
-				}
+				Err(e) => Err(e),
 			}
-			Ok(())
 		}
 	};
 
@@ -320,7 +330,7 @@ async fn wait_for_bc_camera(
 	let cam_clone = Arc::clone(cam);
 	let inner = async move {
 		loop {
-			if let Some(bc) = cam_clone.bc_camera() {
+			if let Some(bc) = cam_clone.camera() {
 				return Some(bc);
 			}
 			tokio::time::sleep(Duration::from_millis(250)).await;
@@ -469,7 +479,7 @@ mod tests {
 		// wake-lock acquire never lands a `bc_camera`. Dispatch should
 		// wait, then bail when the camera's cancel token fires —
 		// without panicking and without spinning forever. The bound is
-		// 60 s (production timeout); cancellation breaks out earlier.
+		// 15 s (`wait_for_bc_camera`); cancellation breaks out earlier.
 		let cameras = test_cameras("cam-disc");
 		let mqtt = SharedMqttClient::for_test_stub("dispatch-disc");
 		let cmd = ControlCommand::Led {
@@ -1260,10 +1270,12 @@ mod tests {
 			vec![(7u8, "Front".to_string())],
 			"driver error must not clobber the previously-cached presets"
 		);
-		assert!(mock
-			.published()
-			.iter()
-			.any(|(t, p, _)| t == "bairelay/cam-qptze/query/ptz/preset" && p == b"OK"));
+		assert!(
+			mock.published()
+				.iter()
+				.any(|(t, p, _)| t == "bairelay/cam-qptze/query/ptz/preset" && p == b"FAIL"),
+			"a failed preset query must reply FAIL, not OK"
+		);
 	}
 
 	/// When `ptz_presets` hangs past `CMD_TIMEOUT` the handler logs

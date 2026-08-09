@@ -1,4 +1,4 @@
-// Tests for crates/mqtt/src/topics.rs.
+// Tests for src/mqtt/topics.rs.
 //
 // Baseline uses the default prefix "bairelay"; the legacy "neolink"
 // prefix is exercised explicitly where neolink-compat matters.

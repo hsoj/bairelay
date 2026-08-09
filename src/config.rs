@@ -925,54 +925,43 @@ pub mod test_helpers {
 /// `timeout` is kept as a soft alias for
 /// [`CameraConfig::idle_disconnect_timeout_secs`] — see
 /// [`resolve_idle_disconnect_timeout`].
-pub fn warn_deprecated_pause_fields(config: &Config) {
+pub fn warn_deprecated_pause_fields(config: &Config) -> Vec<ConfigWarning> {
+	let mut out = Vec::new();
 	for cam in &config.cameras {
 		let p = &cam.pause;
+		let mut dep = |msg: &str| {
+			out.push(ConfigWarning {
+				camera: Some(cam.name.clone()),
+				message: msg.to_string(),
+			})
+		};
 		if p.on_motion.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras.pause] on_motion is deprecated (neolink migration compat); the motion-driven pause model is replaced by upstream gap-bridging. Remove this field."
-			);
+			dep("config: [cameras.pause] on_motion is deprecated (neolink migration compat); the motion-driven pause model is replaced by upstream gap-bridging. Remove this field.");
 		}
 		if p.on_client.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras.pause] on_client is deprecated (neolink migration compat). Remove this field."
-			);
+			dep("config: [cameras.pause] on_client is deprecated (neolink migration compat). Remove this field.");
 		}
 		if p.on_disconnect.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras.pause] on_disconnect is deprecated (neolink migration compat). Remove this field."
-			);
+			dep("config: [cameras.pause] on_disconnect is deprecated (neolink migration compat). Remove this field.");
 		}
 		if p.motion_timeout.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras.pause] motion_timeout is deprecated (neolink migration compat). Remove this field."
-			);
+			dep("config: [cameras.pause] motion_timeout is deprecated (neolink migration compat). Remove this field.");
 		}
 		if p.mode.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras.pause] mode is deprecated (neolink migration compat); bairelay's overlay always draws the PreviewState label. Remove this field."
-			);
+			dep("config: [cameras.pause] mode is deprecated (neolink migration compat); bairelay's overlay always draws the PreviewState label. Remove this field.");
 		}
 		if let Some(t) = p.timeout {
 			if cam.idle_disconnect_timeout_secs.is_some() {
-				tracing::warn!(
-					camera = %cam.name,
-					"config: [cameras.pause] timeout is deprecated and overridden by idle_disconnect_timeout_secs; remove this field."
-				);
+				dep("config: [cameras.pause] timeout is deprecated and overridden by idle_disconnect_timeout_secs; remove this field.");
 			} else {
-				tracing::warn!(
-					camera = %cam.name,
-					seconds = t,
-					"config: [cameras.pause] timeout is deprecated (neolink migration compat); mapped to idle_disconnect_timeout_secs. Move the value under [cameras] to silence this warning."
-				);
+				out.push(ConfigWarning {
+					camera: Some(cam.name.clone()),
+					message: format!("config: [cameras.pause] timeout ({t}s) is deprecated (neolink migration compat); mapped to idle_disconnect_timeout_secs. Move the value under [cameras] to silence this warning."),
+				});
 			}
 		}
 	}
+	out
 }
 
 /// Log a one-line migration warning for each neolink-only field that
@@ -986,68 +975,50 @@ pub fn warn_deprecated_pause_fields(config: &Config) {
 /// `max_discovery_retries` / `push_notifications` / `strict` are all
 /// no-ops in bairelay; the per-camera `[cameras.mqtt] discovery` block
 /// is also a no-op (bairelay uses a single global `[mqtt.discovery]`).
-pub fn warn_neolink_compat_fields(config: &Config) {
+pub fn warn_neolink_compat_fields(config: &Config) -> Vec<ConfigWarning> {
+	let mut out = Vec::new();
 	if config.tokio_console.is_some() {
-		tracing::warn!(
-			"config: tokio_console is a neolink debugging knob; bairelay drives verbosity via RUST_LOG (or -v / -vv / -vvv on the CLI). Remove this field."
-		);
+		out.push(ConfigWarning {
+			camera: None,
+			message: "config: tokio_console is a neolink debugging knob; bairelay drives verbosity via RUST_LOG (or -v / -vv / -vvv on the CLI). Remove this field.".to_string(),
+		});
 	}
 	for cam in &config.cameras {
+		let mut compat = |msg: &str| {
+			out.push(ConfigWarning {
+				camera: Some(cam.name.clone()),
+				message: msg.to_string(),
+			})
+		};
 		if cam.print_format.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] print_format is a neolink stdout-dump knob; bairelay uses --dump-bcmedia <dir> on the CLI for fixture capture. Remove this field."
-			);
+			compat("config: [cameras] print_format is a neolink stdout-dump knob; bairelay uses --dump-bcmedia <dir> on the CLI for fixture capture. Remove this field.");
 		}
 		if cam.update_time.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] update_time/time is a neolink connect-time clock-sync knob; bairelay exposes this via the `bairelay set-time <camera>` one-shot command. Remove this field."
-			);
+			compat("config: [cameras] update_time/time is a neolink connect-time clock-sync knob; bairelay exposes this via the `bairelay set-time <camera>` one-shot command. Remove this field.");
 		}
 		if cam.buffer_duration.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] buffer_duration/duration/buffer is a neolink GStreamer queue knob; bairelay's audio + video pacers handle bursty delivery internally. Remove this field."
-			);
+			compat("config: [cameras] buffer_duration/duration/buffer is a neolink GStreamer queue knob; bairelay's audio + video pacers handle bursty delivery internally. Remove this field.");
 		}
 		if cam.use_splash.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] use_splash/splash is a neolink stream-overlay toggle; bairelay's nearest equivalent is `[cameras.pause] preview_overlay` (default true), which captions the MQTT preview JPEG. Remove this field."
-			);
+			compat("config: [cameras] use_splash/splash is a neolink stream-overlay toggle; bairelay's nearest equivalent is `[cameras.pause] preview_overlay` (default true), which captions the MQTT preview JPEG. Remove this field.");
 		}
 		if cam.splash_pattern.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] splash_pattern/pattern is a neolink GStreamer test-pattern selector; bairelay only renders CONNECTING / SLEEPING captions. Remove this field."
-			);
+			compat("config: [cameras] splash_pattern/pattern is a neolink GStreamer test-pattern selector; bairelay only renders CONNECTING / SLEEPING captions. Remove this field.");
 		}
 		if cam.max_discovery_retries.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] max_discovery_retries/retries/max_retries is a neolink discovery cap; bairelay uses exponential backoff with cancellation. Remove this field."
-			);
+			compat("config: [cameras] max_discovery_retries/retries/max_retries is a neolink discovery cap; bairelay uses exponential backoff with cancellation. Remove this field.");
 		}
 		if cam.push_notifications.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] push_notifications/push/push_noti is a neolink FCM toggle (deferred — spec §10); bairelay does not consume Reolink push at present. Remove this field."
-			);
+			compat("config: [cameras] push_notifications/push/push_noti is a neolink FCM toggle (deferred — spec §10); bairelay does not consume Reolink push at present. Remove this field.");
 		}
 		if cam.strict.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] strict is a neolink media-validation toggle; bairelay always validates parameter sets and NAL whitelists. Remove this field."
-			);
+			compat("config: [cameras] strict is a neolink media-validation toggle; bairelay always validates parameter sets and NAL whitelists. Remove this field.");
 		}
 		if cam.mqtt.discovery.is_some() {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras.mqtt] discovery is a neolink per-camera HA discovery override; bairelay uses a single global [mqtt.discovery] table. Move topic/features there. Remove this field."
-			);
+			compat("config: [cameras.mqtt] discovery is a neolink per-camera HA discovery override; bairelay uses a single global [mqtt.discovery] table. Move topic/features there. Remove this field.");
 		}
 	}
+	out
 }
 
 /// Log a one-line notice for each camera with wire-level protocol
@@ -1055,15 +1026,17 @@ pub fn warn_neolink_compat_fields(config: &Config) {
 /// payload dumps it unlocks include credential hashes and camera UIDs,
 /// so the operator should know the knob is live before sharing logs.
 /// Called once at startup alongside [`warn_neolink_compat_fields`].
-pub fn warn_wire_debug_enabled(config: &Config) {
+pub fn warn_wire_debug_enabled(config: &Config) -> Vec<ConfigWarning> {
+	let mut out = Vec::new();
 	for cam in &config.cameras {
 		if cam.debug == Some(true) {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=info,crate::baichuan::bc::de=trace to see them — the leading info, is required or the console goes silent); they include credential hashes — do not share these logs publicly"
-			);
+			out.push(ConfigWarning {
+				camera: Some(cam.name.clone()),
+				message: "config: [cameras] debug enables trace-level dumps of decrypted protocol payloads (set RUST_LOG=info,crate::baichuan::bc::de=trace to see them — the leading info, is required or the console goes silent); they include credential hashes — do not share these logs publicly".to_string(),
+			});
 		}
 	}
+	out
 }
 
 /// Warn when `[[users]]` is configured without a TLS listener. The
@@ -1071,11 +1044,14 @@ pub fn warn_wire_debug_enabled(config: &Config) {
 /// clients fall back to Digest — but Digest-MD5 is still offline-
 /// crackable by anyone who can capture the exchange, and the default
 /// bind is `0.0.0.0`. Called at startup and from `check-config`.
-pub fn warn_users_without_tls(config: &Config) {
+pub fn warn_users_without_tls(config: &Config) -> Vec<ConfigWarning> {
 	if !config.users.is_empty() && config.certificate.is_none() {
-		tracing::warn!(
-			"config: [[users]] is set but certificate is not — RTSP auth runs over plaintext, so Basic auth is disabled and clients must use Digest (MD5), which an on-LAN observer can capture and crack offline. Set certificate to enable the rtsps:// listener"
-		);
+		vec![ConfigWarning {
+			camera: None,
+			message: "config: [[users]] is set but certificate is not — RTSP auth runs over plaintext, so Basic auth is disabled and clients must use Digest (MD5), which an on-LAN observer can capture and crack offline. Set certificate to enable the rtsps:// listener".to_string(),
+		}]
+	} else {
+		Vec::new()
 	}
 }
 
@@ -1116,9 +1092,10 @@ pub fn resolve_idle_disconnect_timeout(
 /// surfaces the clamp to operators so they know their explicit config
 /// was overridden. Called once at startup, alongside
 /// [`warn_deprecated_pause_fields`].
-pub fn warn_idle_timeout_below_prune_floor(config: &Config) {
+pub fn warn_idle_timeout_below_prune_floor(config: &Config) -> Vec<ConfigWarning> {
 	let prune = std::time::Duration::from_secs(config.stream_prune_grace_secs);
 	let safe_floor = prune + std::time::Duration::from_secs(15);
+	let mut out = Vec::new();
 	for cam in &config.cameras {
 		let secs = cam
 			.idle_disconnect_timeout_secs
@@ -1126,16 +1103,50 @@ pub fn warn_idle_timeout_below_prune_floor(config: &Config) {
 			.unwrap_or(45.0);
 		let configured = std::time::Duration::from_secs_f64(secs);
 		if configured < prune {
-			tracing::warn!(
-				camera = %cam.name,
-				"config: idle_disconnect_timeout_secs ({:.1}s) is shorter than stream_prune_grace_secs ({}s); \
-				 clamped at runtime to {}s so the cached StreamSource cannot outlive the Baichuan session. \
-				 Raise idle_disconnect_timeout_secs (recommended >= {}s) or lower stream_prune_grace_secs.",
-				configured.as_secs_f64(),
-				prune.as_secs(),
-				safe_floor.as_secs(),
-				safe_floor.as_secs(),
-			);
+			out.push(ConfigWarning {
+				camera: Some(cam.name.clone()),
+				message: format!(
+					"config: idle_disconnect_timeout_secs ({:.1}s) is shorter than stream_prune_grace_secs ({}s); \
+					 clamped at runtime to {}s so the cached StreamSource cannot outlive the Baichuan session. \
+					 Raise idle_disconnect_timeout_secs (recommended >= {}s) or lower stream_prune_grace_secs.",
+					configured.as_secs_f64(),
+					prune.as_secs(),
+					safe_floor.as_secs(),
+					safe_floor.as_secs(),
+				),
+			});
+		}
+	}
+	out
+}
+
+/// One operator-facing configuration warning: a message plus the camera
+/// it concerns (`None` for config-global findings). The `warn_*`
+/// collectors return these as values so `check-config`, startup, and
+/// the tests all see the same list; only the callers log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigWarning {
+	pub camera: Option<String>,
+	pub message: String,
+}
+
+/// Every startup config warning, in emission order.
+pub fn config_warnings(config: &Config) -> Vec<ConfigWarning> {
+	let mut out = warn_deprecated_pause_fields(config);
+	out.extend(warn_neolink_compat_fields(config));
+	out.extend(warn_wire_debug_enabled(config));
+	out.extend(warn_idle_timeout_below_prune_floor(config));
+	out.extend(warn_users_without_tls(config));
+	out
+}
+
+/// Collect and warn-log every config warning. The single logging point
+/// for startup (`main.rs`) and `check-config` (`run_support.rs`).
+pub fn log_config_warnings(config: &Config) {
+	for w in config_warnings(config) {
+		match &w.camera {
+			Some(camera) => tracing::warn!(camera = %camera, "{}", w.message),
+			None => tracing::warn!("{}", w.message),
 		}
 	}
 }

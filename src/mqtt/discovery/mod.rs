@@ -19,7 +19,7 @@
 //! Each `build_*` function returns `(topic, payload_bytes)` ready to
 //! hand straight to `SharedMqttClient::publish_retained`. All
 //! builders are pure — no I/O, no async — so the discovery publisher
-//! (Task 11) can test its topic set without a broker.
+//! can test its topic set without a broker.
 
 use serde::{Deserialize, Serialize, Serializer};
 

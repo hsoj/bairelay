@@ -61,7 +61,7 @@ async fn camera_handle_starts_with_no_bc_camera() {
 		None,
 	));
 	assert!(
-		cam.bc_camera().is_none(),
+		cam.camera().is_none(),
 		"bc_camera() should be None before connecting"
 	);
 	assert!(
@@ -160,7 +160,7 @@ fn wakeup_one_accepted() {
 // `CameraHandle::publish_discovery` / `unpublish_discovery`, the
 // capability cache, and the optional `DiscoveryPublisher`. The actual
 // payload content is covered by the pure-function tests in
-// `crates/mqtt/src/discovery/`. Here we check the early-return
+// `src/mqtt/discovery/`. Here we check the early-return
 // guards that stop `publish`/`unpublish` from generating MQTT
 // traffic under the wrong conditions.
 

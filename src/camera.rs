@@ -323,7 +323,7 @@ pub struct CameraHandle {
 	/// One handle serves queries, control commands, stream spawns
 	/// ([`Camera::start_video`]) and teardown ([`Camera::end_session`])
 	/// — there is no parallel concrete handle.
-	bc_camera: std::sync::RwLock<Option<Arc<dyn Camera>>>,
+	camera: std::sync::RwLock<Option<Arc<dyn Camera>>>,
 	mqtt_client: Option<crate::mqtt::SharedMqttClient>,
 	/// MQTT topic prefix (e.g. `"bairelay"` or `"neolink"`) propagated
 	/// from the config so every per-camera task publishes under the
@@ -456,7 +456,7 @@ impl CameraHandle {
 			cancel: parent_cancel.child_token(),
 			wake_lock: WakeLockCounter::new(),
 			state: Arc::new(RwLock::new(CameraState::Disconnected)),
-			bc_camera: std::sync::RwLock::new(None),
+			camera: std::sync::RwLock::new(None),
 			mqtt_client,
 			topic_prefix,
 			disconnect_signal: Arc::new(Notify::new()),
@@ -745,8 +745,8 @@ impl CameraHandle {
 	/// Returning `Arc<dyn Camera>` (rather than the concrete
 	/// `BcCamera`) lets unit tests substitute a fake camera at this
 	/// boundary without touching the binary's call-sites.
-	pub fn bc_camera(&self) -> Option<Arc<dyn Camera>> {
-		self.bc_camera.read_recover().clone()
+	pub fn camera(&self) -> Option<Arc<dyn Camera>> {
+		self.camera.read_recover().clone()
 	}
 
 	/// Signal the camera to disconnect (used by the watchdog for idle cameras).
@@ -825,7 +825,7 @@ impl CameraHandle {
 		}
 
 		// State re-check under the create-lock: closes the TOCTOU
-		// between the polling loop above and the bc_camera_concrete
+		// between the polling loop above and the concrete-handle
 		// read below. While we waited for the create-lock, the
 		// keepalive loop may have failed → `run_connected_session`
 		// proceeded to `stop_all_stream_sources()` → just-cleared the
@@ -843,7 +843,7 @@ impl CameraHandle {
 		}
 
 		// Need to start a new source against the connected session.
-		let camera = self.bc_camera().ok_or_else(|| {
+		let camera = self.camera().ok_or_else(|| {
 			StreamError::Unavailable(format!(
 				"camera '{}' is not currently connected",
 				self.config.name
@@ -856,8 +856,8 @@ impl CameraHandle {
 		// source for this camera writes to the same buffer (one JPEG per
 		// camera, not per stream).
 		//
-		// Gap threshold: Task 5 will read this in
-		// `reader_task` to drive placeholder-frame emission when the
+		// Gap threshold: `reader_task` reads this to drive
+		// placeholder-frame emission when the
 		// camera goes silent. `bridge_gaps = false` folds to
 		// `Duration::MAX` so the ticker never fires — no separate
 		// "disabled" code path needed.
@@ -1107,7 +1107,7 @@ impl CameraHandle {
 			}
 		}
 
-		*self.bc_camera.write_recover() = Some(Arc::clone(&driver));
+		*self.camera.write_recover() = Some(Arc::clone(&driver));
 
 		// Populate the capability cache for HA discovery.
 		// `capabilities()` is idempotent and read-only. On success we
@@ -1228,7 +1228,7 @@ impl CameraHandle {
 					self.config.name.clone(),
 					power,
 					Arc::clone(&reporter),
-					self.config.mqtt.battery_update,
+					Duration::from_millis(self.config.mqtt.battery_update),
 					session_cancel.clone(),
 					Arc::clone(&self.battery_unsupported),
 				));
@@ -1239,7 +1239,7 @@ impl CameraHandle {
 					self.config.name.clone(),
 					lighting,
 					Arc::clone(&reporter),
-					self.config.mqtt.floodlight_update,
+					Duration::from_millis(self.config.mqtt.floodlight_update),
 					session_cancel.clone(),
 				));
 				let events: Arc<dyn Events> = driver.clone();
@@ -1330,7 +1330,7 @@ impl CameraHandle {
 		// Clear the slot; the caller's `driver` Arc drops when
 		// `run_connected_session` returns, releasing the session's
 		// backing connection threads.
-		*self.bc_camera.write_recover() = None;
+		*self.camera.write_recover() = None;
 
 		self.set_state(CameraState::Disconnected);
 		tracing::info!(camera = %self.config.name, "Disconnected");
@@ -1352,8 +1352,11 @@ impl CameraHandle {
 		// Publish initial "disconnected" / "unknown" states before connecting.
 		if let Some(ref mqtt) = self.mqtt_client {
 			let reporter = self.status_reporter(mqtt);
-			let _ = reporter.report(CameraEvent::Connection(false)).await;
-			let _ = reporter.report(CameraEvent::MotionUnknown).await;
+			for event in [CameraEvent::Connection(false), CameraEvent::MotionUnknown] {
+				if let Err(e) = reporter.report(event).await {
+					tracing::warn!(camera = %self.config.name, error = %e, "Initial status report failed");
+				}
+			}
 		}
 
 		// Spawn the preview publisher at camera lifetime (NOT session
@@ -1365,10 +1368,10 @@ impl CameraHandle {
 			if self.config.mqtt.enable_preview {
 				Some(tokio::spawn(camera_tasks::preview_poller(
 					self.config.name.clone(),
-					Arc::clone(self),
+					Arc::clone(self) as Arc<dyn camera_tasks::ConnectedStills>,
 					Arc::clone(&self.last_frame_main),
 					self.status_reporter(mqtt),
-					self.config.mqtt.preview_update,
+					Duration::from_millis(self.config.mqtt.preview_update),
 					self.preview_state_rx(),
 					self.config.pause.preview_overlay,
 					self.cancel.clone(),
@@ -1551,62 +1554,12 @@ impl ReconnectBackoff {
 	}
 }
 
-/// Outcome of [`drive_reconnect_with_backoff`]: either a successful
-/// connect, a bail-out signal from the connect fn (auth failure), or
-/// cancellation.
-#[cfg(test)]
-#[derive(Debug)]
-#[allow(dead_code)] // variant payloads inspected via Debug only
-pub(crate) enum ReconnectOutcome<T> {
-	/// Connect callback returned `Ok(T)` — the caller now owns the
-	/// connected handle.
-	Connected(T),
-	/// Connect callback returned `Err` and `should_bail(err) == true`
-	/// — e.g. an auth failure that must not be retried. The original
-	/// error is returned so the caller can log it.
-	Bailed(anyhow::Error),
-	/// `cancel.cancelled()` fired while waiting for the next attempt.
-	Cancelled,
-}
-
-/// Run the connect / backoff / cancel loop against an injected
-/// connect callable and clock, producing a [`ReconnectOutcome`].
-///
-/// Keeps the pure reconnect-timing logic testable independently of
-/// the camera's full [`CameraHandle`] machinery (wake lock, preview
-/// state, MQTT publish). The backoff sleep delegates to
-/// [`ReconnectBackoff::sleep_with_cancel`] — the same path
-/// `CameraHandle::run` uses — so the
-/// "sleep-then-retry-with-cancel" contract is genuinely shared.
-#[cfg(test)]
-pub(crate) async fn drive_reconnect_with_backoff<T, F, Fut>(
-	mut backoff: ReconnectBackoff,
-	cancel: CancellationToken,
-	mut connect: F,
-	should_bail: impl Fn(&anyhow::Error) -> bool,
-) -> ReconnectOutcome<T>
-where
-	F: FnMut() -> Fut,
-	Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-	loop {
-		if cancel.is_cancelled() {
-			return ReconnectOutcome::Cancelled;
-		}
-		let attempt = tokio::select! {
-			_ = cancel.cancelled() => return ReconnectOutcome::Cancelled,
-			r = connect() => r,
-		};
-		match attempt {
-			Ok(value) => return ReconnectOutcome::Connected(value),
-			Err(e) => {
-				if should_bail(&e) {
-					return ReconnectOutcome::Bailed(e);
-				}
-				if !backoff.sleep_with_cancel(&cancel).await {
-					return ReconnectOutcome::Cancelled;
-				}
-			}
+impl crate::camera_tasks::ConnectedStills for CameraHandle {
+	fn connected_stills(&self) -> Option<Arc<dyn Stills>> {
+		if self.state().is_connected() {
+			self.camera().map(|c| c as Arc<dyn Stills>)
+		} else {
+			None
 		}
 	}
 }
@@ -1651,7 +1604,7 @@ impl CameraHandle {
 	/// Bypasses the connect path.
 	#[allow(dead_code)] // used by upcoming mqtt_dispatch tests in this phase
 	pub(crate) fn set_driver_for_test(&self, driver: Arc<dyn Camera>) {
-		*self.bc_camera.write_recover() = Some(driver);
+		*self.camera.write_recover() = Some(driver);
 		self.set_state(CameraState::Connected);
 	}
 
@@ -1877,7 +1830,7 @@ mod tests {
 
 	// ── Keepalive tick classification & counter ─────────────────────
 	//
-	// Stage 6 Task 33 coverage. Drives `classify_keepalive_tick` +
+	// Drives `classify_keepalive_tick` +
 	// `advance_keepalive_counter` with scripted inputs so we don't need
 	// a live `get_linktype()` round-trip to pin the decision table.
 
@@ -2049,126 +2002,6 @@ mod tests {
 		assert_eq!(b.next_delay(), Duration::from_millis(400));
 		// Clamps at max on subsequent calls.
 		assert_eq!(b.next_delay(), Duration::from_millis(400));
-	}
-
-	// ── drive_reconnect_with_backoff ────────────────────────────────
-
-	/// After N failed attempts, the next success returns
-	/// `Connected(value)` and the virtual clock advanced by exactly
-	/// the expected sum of backoff delays. Uses tokio's paused-time
-	/// clock so the test is deterministic regardless of real time.
-	#[tokio::test(start_paused = true)]
-	async fn drive_reconnect_retries_until_success_with_doubling_backoff() {
-		use std::sync::atomic::{AtomicU32, Ordering};
-
-		let calls = Arc::new(AtomicU32::new(0));
-		let calls_c = Arc::clone(&calls);
-		let backoff = ReconnectBackoff::new(Duration::from_secs(2), Duration::from_secs(60));
-		let cancel = CancellationToken::new();
-
-		let start = tokio::time::Instant::now();
-		let outcome = drive_reconnect_with_backoff::<_, _, _>(
-			backoff,
-			cancel,
-			move || {
-				let calls_c = Arc::clone(&calls_c);
-				async move {
-					let n = calls_c.fetch_add(1, Ordering::AcqRel);
-					if n < 3 {
-						Err(anyhow::anyhow!("transient failure #{n}"))
-					} else {
-						Ok::<u32, anyhow::Error>(n)
-					}
-				}
-			},
-			|_| false,
-		)
-		.await;
-
-		match outcome {
-			ReconnectOutcome::Connected(n) => assert_eq!(n, 3),
-			other => panic!("expected Connected(3), got {:?}", other),
-		}
-		assert_eq!(
-			calls.load(Ordering::Acquire),
-			4,
-			"connect should be called four times (three Err, one Ok)"
-		);
-
-		// Three failures → three sleeps: 2 + 4 + 8 = 14 s.
-		let elapsed = start.elapsed();
-		assert!(
-			elapsed >= Duration::from_secs(14) && elapsed < Duration::from_secs(15),
-			"elapsed {:?} should be ~14s (2+4+8 backoff)",
-			elapsed
-		);
-	}
-
-	/// `should_bail` returns true on the first error → the loop exits
-	/// with `Bailed(err)` without retrying. Pins the "auth failure
-	/// short-circuit" contract the real loop applies via
-	/// `ConnectError::Auth`.
-	#[tokio::test(start_paused = true)]
-	async fn drive_reconnect_bails_on_should_bail() {
-		use std::sync::atomic::{AtomicU32, Ordering};
-
-		let calls = Arc::new(AtomicU32::new(0));
-		let calls_c = Arc::clone(&calls);
-		let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(60));
-		let cancel = CancellationToken::new();
-
-		let outcome = drive_reconnect_with_backoff::<(), _, _>(
-			backoff,
-			cancel,
-			move || {
-				calls_c.fetch_add(1, Ordering::AcqRel);
-				async move { Err(anyhow::anyhow!("AuthFailed")) }
-			},
-			|e| format!("{e:?}").contains("AuthFailed"),
-		)
-		.await;
-
-		assert!(
-			matches!(outcome, ReconnectOutcome::Bailed(_)),
-			"expected Bailed, got {:?}",
-			outcome
-		);
-		assert_eq!(
-			calls.load(Ordering::Acquire),
-			1,
-			"bail-on-auth must not retry"
-		);
-	}
-
-	/// Cancellation mid-backoff short-circuits the sleep and returns
-	/// `Cancelled` without waiting the full delay. Uses paused time so
-	/// the test exits instantly on the cancel signal.
-	#[tokio::test(start_paused = true)]
-	async fn drive_reconnect_cancels_during_backoff_sleep() {
-		let backoff = ReconnectBackoff::new(Duration::from_secs(60), Duration::from_secs(60));
-		let cancel = CancellationToken::new();
-		let cancel_c = cancel.clone();
-
-		// Trip cancel shortly after the first Err lands. Paused time
-		// means the 60 s sleep would otherwise never resolve.
-		tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			cancel_c.cancel();
-		});
-
-		let outcome = drive_reconnect_with_backoff::<(), _, _>(
-			backoff,
-			cancel,
-			|| async { Err(anyhow::anyhow!("transient")) },
-			|_| false,
-		)
-		.await;
-
-		assert!(
-			matches!(outcome, ReconnectOutcome::Cancelled),
-			"expected Cancelled, got {:?}",
-			outcome
-		);
 	}
 
 	#[test]
@@ -2378,7 +2211,7 @@ mod tests {
 		// Task must actually have completed (not been canceled by the
 		// timeout). A regression that breaks cancel-during-backoff
 		// would leave the loop spinning past the 10 s timeout, and the
-		// pre-fix `let _ = ...` swallowed that case silently.
+		// a bare `let _ = ...` here once swallowed that case silently.
 		let join_result = join_outcome.expect("run() did not exit within 10 s after cancel");
 		join_result.expect("run() task panicked");
 		// Final state must be Disconnected — pinned so a future change
@@ -2439,7 +2272,7 @@ mod tests {
 		assert_eq!(handle.topic_prefix(), "bairelay");
 		assert_eq!(handle.state(), CameraState::Disconnected);
 		assert!(!handle.is_cancelled());
-		assert!(handle.bc_camera().is_none());
+		assert!(handle.camera().is_none());
 		assert_eq!(handle.config().name, "cam-acc");
 		// Touch the cancel_token accessor — it must match the one the
 		// `new()` ctor stored internally (child of the parent token).
@@ -2813,6 +2646,7 @@ mod tests {
 
 		use crate::fake_camera::FakeCameraBuilder;
 
+		crate::log_capture::install();
 		let mut config = minimal_camera_config("cam-sess");
 		config.mqtt.enable_motion = true;
 		config.mqtt.enable_battery = true;
@@ -2888,7 +2722,7 @@ mod tests {
 
 		// Teardown visible: state is Disconnected, bc_camera cleared.
 		assert_eq!(handle.state(), CameraState::Disconnected);
-		assert!(handle.bc_camera().is_none());
+		assert!(handle.camera().is_none());
 
 		// Capability cache populated (capabilities probe returned Ok).
 		let caps = handle.capabilities().expect("caps populated from fake");
@@ -2918,6 +2752,49 @@ mod tests {
 			pir_published,
 			"enable_pir = true must trigger a status/pir publish"
 		);
+
+		// Live-verify marker: manual-verify.sh counts "Disconnected"
+		// hits to decide the battery-sleep stage.
+		crate::log_capture::assert_marker("Disconnected", "cam-sess");
+	}
+
+	/// Battery-camera sleep path: with `idle_disconnect` on and the
+	/// wake lock released, the grace-period task counts down and
+	/// cancels the session, emitting the "Grace period expired,
+	/// disconnecting" marker that `manual-verify.sh` greps in its
+	/// battery-sleep stage.
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn grace_period_expiry_emits_live_verify_marker() {
+		use crate::config::test_helpers::minimal_camera_config;
+		use crate::fake_camera::FakeCameraBuilder;
+
+		crate::log_capture::install();
+		let mut config = minimal_camera_config("cam-grace");
+		config.idle_disconnect = true;
+		config.idle_disconnect_timeout_secs = Some(0.05);
+
+		let fake = FakeCameraBuilder::new()
+			.with_keepalive_probe(|| Ok(()))
+			.with_capabilities(|| Ok(CameraCapabilities { has_ptz: false }))
+			.build();
+		let driver: Arc<dyn Camera> = fake;
+
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::new(config, cancel, None));
+
+		// Acquire-and-drop stamps a release; the grace countdown then
+		// runs on virtual time inside the session.
+		drop(handle.wake_lock().acquire());
+
+		tokio::time::timeout(
+			Duration::from_secs(30),
+			handle.run_connected_session_for_test(driver),
+		)
+		.await
+		.expect("grace expiry must cancel the session");
+
+		assert_eq!(handle.state(), CameraState::Disconnected);
+		crate::log_capture::assert_marker("Grace period expired, disconnecting", "cam-grace");
 	}
 
 	/// A logout (`end_session`) failure at teardown must not abort the
@@ -2964,7 +2841,7 @@ mod tests {
 		.expect("session must exit despite end_session failure");
 
 		assert_eq!(handle.state(), CameraState::Disconnected);
-		assert!(handle.bc_camera().is_none());
+		assert!(handle.camera().is_none());
 		assert_eq!(
 			*fake.calls().end_session.lock().unwrap(),
 			1,

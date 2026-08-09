@@ -1,5 +1,7 @@
-// Same policy as `src/lib.rs`: production code must not panic.
+// Same policy as `src/lib.rs`: production code must not panic, and
+// futures stay under clippy.toml's future-size-threshold.
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+#![warn(clippy::large_futures)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,10 +16,7 @@ use bairelay::bcmedia_dump::BcMediaDumpConfig;
 use bairelay::camera::CameraHandle;
 use bairelay::cli::{Cli, Command};
 use bairelay::cli_convert::{should_emit_ansi, verbosity_env_filter};
-use bairelay::config::{
-	load_config, warn_deprecated_pause_fields, warn_idle_timeout_below_prune_floor,
-	warn_neolink_compat_fields, warn_users_without_tls, warn_wire_debug_enabled,
-};
+use bairelay::config::{load_config, log_config_warnings};
 use bairelay::local_time::LocalTimer;
 use bairelay::mqtt::{parse_control_message, MqttEventLoop, SharedMqttClient};
 use bairelay::mqtt_dispatch::dispatch_control;
@@ -64,7 +63,10 @@ async fn async_main() -> Result<()> {
 		.with_writer(std::io::stderr)
 		.with_ansi(ansi)
 		.with_timer(LocalTimer)
-		.with_env_filter(verbosity_env_filter(cli.verbose))
+		.with_env_filter(verbosity_env_filter(
+			cli.verbose,
+			std::env::var("RUST_LOG").ok().as_deref(),
+		))
 		.init();
 
 	// `render-hassio-config` is a pure-templating subcommand for the HA
@@ -111,23 +113,10 @@ async fn async_main() -> Result<()> {
 	let config_path = cli.config_path();
 	let config = load_config(config_path)?;
 
-	// Emit one-line migration warnings for deprecated neolink
-	// `[cameras.pause]` fields kept only for smooth upgrades.
-	warn_deprecated_pause_fields(&config);
-	// Same shape, broader scope: every neolink top-level / per-camera
-	// field bairelay accepts but does not honour gets a single-line
-	// pointer to the bairelay equivalent.
-	warn_neolink_compat_fields(&config);
-	// Surface any camera with wire-level protocol debugging live —
-	// the trace dumps it unlocks contain credential hashes.
-	warn_wire_debug_enabled(&config);
-	// Surface any per-camera `idle_disconnect_timeout_secs` shorter
-	// than the global `stream_prune_grace_secs`; the runtime clamps
-	// silently, this warning makes the override visible.
-	warn_idle_timeout_below_prune_floor(&config);
-	// Surface `[[users]]` without TLS — auth then runs over plaintext
-	// and Digest-MD5 is offline-crackable by an on-LAN observer.
-	warn_users_without_tls(&config);
+	// One-line operator warnings: deprecated/neolink-compat fields,
+	// live wire-debug, idle-timeout clamps, and users-without-TLS —
+	// collected as values (`config_warnings`) and logged here.
+	log_config_warnings(&config);
 
 	info!(
 		cameras = config.cameras.len(),

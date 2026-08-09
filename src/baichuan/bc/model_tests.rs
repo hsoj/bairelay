@@ -351,12 +351,10 @@ fn bc_payload_unencrypted_roundtrip_preserves_xml() {
 	let decoded = Bc::deserialize(&ctx, &mut BytesMut::from(bytes.as_slice())).unwrap();
 	match decoded.body {
 		BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				ptz_control: Some(pc),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) => {
+		}) if xml.ptz_control.is_some() => {
+			let pc = xml.ptz_control.expect("guard checked ptz_control");
 			assert_eq!(pc.command, "left");
 			assert!((pc.speed - 32.0).abs() < 0.0001);
 		}
@@ -382,12 +380,10 @@ fn bc_payload_xor_encrypted_roundtrip_preserves_xml() {
 	let decoded = Bc::deserialize(&ctx, &mut BytesMut::from(bytes.as_slice())).unwrap();
 	match decoded.body {
 		BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				ptz_control: Some(pc),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) => {
+		}) if xml.ptz_control.is_some() => {
+			let pc = xml.ptz_control.expect("guard checked ptz_control");
 			assert_eq!(pc.command, "left");
 		}
 		other => panic!("expected ptz_control payload, got {other:?}"),
@@ -415,12 +411,10 @@ fn bc_payload_aes_encrypted_roundtrip_preserves_xml() {
 	let decoded = Bc::deserialize(&ctx, &mut BytesMut::from(bytes.as_slice())).unwrap();
 	match decoded.body {
 		BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				ptz_control: Some(pc),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) => {
+		}) if xml.ptz_control.is_some() => {
+			let pc = xml.ptz_control.expect("guard checked ptz_control");
 			assert_eq!(pc.command, "left");
 		}
 		other => panic!("expected ptz_control payload, got {other:?}"),

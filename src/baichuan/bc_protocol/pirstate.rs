@@ -56,22 +56,20 @@ impl BcCamera {
 				});
 			} else {
 				// Valid message with response_code == 200
+				let mut msg = msg;
 				if let BcBody::ModernMsg(ModernMsg {
-					payload:
-						Some(BcPayloads::BcXml(BcXml {
-							rf_alarm_cfg: Some(pirstate),
-							..
-						})),
+					payload: Some(BcPayloads::BcXml(xml)),
 					..
-				}) = msg.body
+				}) = &mut msg.body
 				{
-					return Ok(pirstate);
-				} else {
-					return Err(Error::UnintelligibleReply {
-						reply: std::sync::Arc::new(msg),
-						why: "Expected PirSate xml but it was not received",
-					});
+					if let Some(pirstate) = xml.rf_alarm_cfg.take() {
+						return Ok(pirstate);
+					}
 				}
+				return Err(Error::UnintelligibleReply {
+					reply: std::sync::Arc::new(msg),
+					why: "Expected PirSate xml but it was not received",
+				});
 			}
 		}
 	}
@@ -99,10 +97,10 @@ impl BcCamera {
 					rf_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					rf_alarm_cfg: Some(rf_alarm_cfg),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 

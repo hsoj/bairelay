@@ -1,0 +1,56 @@
+# Supply-chain gate: with Cargo.lock pinned and every CI invocation
+# --locked, nothing else ever surfaces a published advisory against the
+# 379 locked crates — this file is the advisory feed, licence check, and
+# duplicate-version cap. Run: cargo deny check.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+	# rustls-webpki 0.102.x: four advisories fixed in 0.103.13 (already
+	# in the graph for rustls 0.23). The vulnerable copy survives only
+	# because rumqttc 0.25.1 — the latest release — pins ^0.102. It
+	# verifies the operator's own MQTT broker cert on the LAN, not
+	# camera traffic. Drop these when rumqttc releases past 0.25.1.
+	"RUSTSEC-2026-0049",
+	"RUSTSEC-2026-0098",
+	"RUSTSEC-2026-0099",
+	"RUSTSEC-2026-0104",
+	# rustls-pemfile is unmaintained but frozen-complete: it parses the
+	# operator's own PEM files at startup. Direct dep + rumqttc. Replace
+	# with rustls-pki-types' PemObject when rumqttc drops it too.
+	"RUSTSEC-2025-0134",
+	# ttf-parser (via ab_glyph) is unmaintained; it parses only the
+	# font embedded in the binary for placeholder frames — no untrusted
+	# input. Revisit if ab_glyph migrates to skrifa.
+	"RUSTSEC-2026-0192",
+]
+
+[licenses]
+version = 2
+# The binary is AGPL-3.0-or-later; dependencies must be compatible.
+allow = [
+	"MIT",
+	"Apache-2.0",
+	"Apache-2.0 WITH LLVM-exception",
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"ISC",
+	"Zlib",
+	"Unicode-3.0",
+	"AGPL-3.0-or-later",
+	"CDLA-Permissive-2.0",
+]
+
+[bans]
+# Caps the rand drift (0.8 / 0.9 / 0.10 all locked today) at its current
+# extent: a fourth simultaneous version fails CI. Migrate when rand is
+# touched anyway (action-plan: deferred).
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

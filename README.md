@@ -11,7 +11,7 @@ Bairelay stands on the shoulders of [Neolink](https://github.com/QuantumEntangle
 - **[thirtythreeforty](https://github.com/thirtythreeforty/neolink)** — original author, who did the bulk of the protocol reverse-engineering and shipped the first working RTSP bridge.
 - **[QuantumEntangledAndy](https://github.com/QuantumEntangledAndy/neolink)** — long-term maintainer of the active fork, who added MQTT, motion detection, paused streams, and the deeper battery-camera support that bairelay builds on.
 
-Without their multi-year work this project would not exist. The vendored `bairelay_neolink_core` crate is a modernised descendant of their codebase under the same AGPL-3.0 license.
+Without their multi-year work this project would not exist. The vendored `src/baichuan/` module is a modernised descendant of their codebase under the same AGPL-3.0 license.
 
 This project's development made use of **AI agentic coding**, especially for test generation, packet capture analysis, and reverse-engineering tasks against pcap dumps of camera ↔ cloud traffic. The protocol work itself is grounded in public reverse-engineering of cameras the operator owns; no Reolink code, firmware, or proprietary documentation was used.
 
@@ -96,7 +96,7 @@ Running as a Windows service is not packaged; use Task Scheduler or run interact
 
 ### Prerequisites
 
-- A current stable Rust toolchain (1.93+). Distro-packaged rustc is often too old for the workspace tests; install via [rustup](https://rustup.rs/) for the smoothest path.
+- A current stable Rust toolchain (1.93+). Distro-packaged rustc is often too old for the tests; install via [rustup](https://rustup.rs/) for the smoothest path.
 - A C toolchain for `aws-lc-rs` (the rustls crypto provider) — `build-essential` on Debian / Ubuntu, Xcode Command Line Tools on macOS, MSVC build tools on Windows.
 - That's it. No GStreamer. No OpenSSL. No system MQTT library.
 
@@ -109,6 +109,8 @@ cargo build --release
 ```
 
 The binary lands at `target/release/bairelay`. Copy it wherever you run services from (`~/bin`, `/usr/local/bin`, a systemd unit's `ExecStart`, a Docker image — your choice).
+
+> **Stability note:** the binary CLI and its TOML config are the stable interface. The `bairelay` library surface published to crates.io exists for the project's own test harness and carries no semver guarantee.
 
 ### Install as a Home Assistant App
 
@@ -487,7 +489,7 @@ The workspace ships thousands of tests across the four crates plus the binary. T
 
 ### Benchmarks
 
-`crates/rtsp/benches/` ships [criterion](https://crates.io/crates/criterion) benchmarks for the H.264 / H.265 RTP packetisers and the `LastFrameBuffer` read / write paths. Run with `cargo bench -p bairelay_rtsp`.
+`benches/` ships [criterion](https://crates.io/crates/criterion) benchmarks for the H.264 / H.265 RTP packetisers and the `LastFrameBuffer` read / write paths. Run with `cargo bench`.
 
 ### Coding standards
 

@@ -400,31 +400,29 @@ pub mod pcap_decode_api {
 								},
 							body:
 								BcBody::ModernMsg(ModernMsg {
-									payload:
-										Some(BcPayloads::BcXml(BcXml {
-											encryption: Some(Encryption { ref nonce, .. }),
-											..
-										})),
+									payload: Some(BcPayloads::BcXml(ref xml)),
 									..
 								}),
 						} = bc
 						{
-							if response_code >> 8 == 0xdd {
-								let kind = (response_code & 0xff) as u8;
-								let new_proto = match kind {
-									0x00 => EncryptionProtocol::Unencrypted,
-									0x01 => EncryptionProtocol::BCEncrypt,
-									0x02 => EncryptionProtocol::aes(
-										self.ctx.credentials.make_aeskey(nonce),
-									),
-									0x12 => EncryptionProtocol::full_aes(
-										self.ctx.credentials.make_aeskey(nonce),
-									),
-									other => {
-										return Err(Error::UnknownEncryption(other as usize));
-									}
-								};
-								self.ctx.set_encrypted(new_proto);
+							if let Some(Encryption { ref nonce, .. }) = xml.encryption {
+								if response_code >> 8 == 0xdd {
+									let kind = (response_code & 0xff) as u8;
+									let new_proto = match kind {
+										0x00 => EncryptionProtocol::Unencrypted,
+										0x01 => EncryptionProtocol::BCEncrypt,
+										0x02 => EncryptionProtocol::aes(
+											self.ctx.credentials.make_aeskey(nonce),
+										),
+										0x12 => EncryptionProtocol::full_aes(
+											self.ctx.credentials.make_aeskey(nonce),
+										),
+										other => {
+											return Err(Error::UnknownEncryption(other as usize));
+										}
+									};
+									self.ctx.set_encrypted(new_proto);
+								}
 							}
 						}
 

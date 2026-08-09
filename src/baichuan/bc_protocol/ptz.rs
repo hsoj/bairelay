@@ -64,7 +64,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					ptz_control: Some(PtzControl {
 						version: xml_ver(),
 						channel_id: self.channel_id,
@@ -72,7 +72,7 @@ impl BcCamera {
 						command: direction_str,
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 
@@ -121,23 +121,21 @@ impl BcCamera {
 		};
 
 		sub_set.send(send).await?;
-		let msg = sub_set.recv().await?;
+		let mut msg = sub_set.recv().await?;
 
 		if let BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				ptz_preset: Some(ptz_preset),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) = msg.body
+		}) = &mut msg.body
 		{
-			Ok(ptz_preset)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "The camera did not return a valid PtzPreset xml",
-			})
+			if let Some(ptz_preset) = xml.ptz_preset.take() {
+				return Ok(ptz_preset);
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "The camera did not return a valid PtzPreset xml",
+		})
 	}
 
 	/// Set a PTZ preset.
@@ -171,7 +169,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					ptz_preset: Some(PtzPreset {
 						preset_list: PresetList {
 							preset: vec![preset],
@@ -179,7 +177,7 @@ impl BcCamera {
 						..Default::default()
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 
@@ -228,7 +226,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					ptz_preset: Some(PtzPreset {
 						preset_list: PresetList {
 							preset: vec![preset],
@@ -236,7 +234,7 @@ impl BcCamera {
 						..Default::default()
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 
@@ -281,7 +279,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					start_zoom_focus: Some(StartZoomFocus {
 						version: xml_ver(),
 						channel_id: self.channel_id,
@@ -289,7 +287,7 @@ impl BcCamera {
 						move_pos: zoom_pos,
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 
@@ -335,7 +333,7 @@ impl BcCamera {
 		};
 
 		sub_get.send(get).await?;
-		let msg = sub_get.recv().await?;
+		let mut msg = sub_get.recv().await?;
 		if msg.meta.response_code != 200 {
 			return Err(Error::CameraServiceUnavailable {
 				id: msg.meta.msg_id,
@@ -344,20 +342,18 @@ impl BcCamera {
 		}
 
 		if let BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				ptz_zoom_focus: Some(xml),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) = msg.body
+		}) = &mut msg.body
 		{
-			Ok(xml)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "Expected PtzZoomFocus xml but it was not received",
-			})
+			if let Some(xml) = xml.ptz_zoom_focus.take() {
+				return Ok(xml);
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "Expected PtzZoomFocus xml but it was not received",
+		})
 	}
 }
 

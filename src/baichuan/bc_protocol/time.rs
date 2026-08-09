@@ -115,9 +115,20 @@ impl BcCamera {
 		// parser).
 		let dst = match msg.body {
 			BcBody::ModernMsg(ModernMsg {
-				payload: Some(BcPayloads::BcXml(BcXml { dst: Some(d), .. })),
+				payload: Some(BcPayloads::BcXml(xml)),
 				..
-			}) => d,
+			}) => match xml.dst {
+				Some(d) => d,
+				None => {
+					return Err(Error::UnintelligibleReply {
+						reply: std::sync::Arc::new(Bc {
+							meta: msg.meta,
+							body: BcBody::ModernMsg(ModernMsg::default()),
+						}),
+						why: "GetDst reply lacked a <Dst> body",
+					});
+				}
+			},
 			BcBody::ModernMsg(ModernMsg {
 				payload: Some(BcPayloads::Binary(bytes)),
 				..
@@ -164,7 +175,7 @@ impl BcCamera {
 		};
 
 		sub_get_general.send(get).await?;
-		let msg = sub_get_general.recv().await?;
+		let mut msg = sub_get_general.recv().await?;
 		if msg.meta.response_code != 200 {
 			return Err(Error::CameraServiceUnavailable {
 				id: msg.meta.msg_id,
@@ -173,20 +184,18 @@ impl BcCamera {
 		}
 
 		if let BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				system_general: Some(general),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) = msg.body
+		}) = &mut msg.body
 		{
-			Ok(general)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "Reply did not contain a SystemGeneral block",
-			})
+			if let Some(general) = xml.system_general.take() {
+				return Ok(general);
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "Reply did not contain a SystemGeneral block",
+		})
 	}
 
 	///

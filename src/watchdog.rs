@@ -58,21 +58,23 @@ impl Watchdog {
 						// the watchdog only fires when grace_period.rs
 						// failed (didn't get spawned, panicked, etc.) —
 						// the safety-net role its docs always claimed.
-						if cam.config().idle_disconnect && cam.state().is_connected() {
-							let grace = crate::config::resolve_idle_disconnect_timeout(
-								cam.config(),
-								self.prune_grace,
+						let grace = crate::config::resolve_idle_disconnect_timeout(
+							cam.config(),
+							self.prune_grace,
+						);
+						let idle_for = cam.wake_lock().idle_since().map(|t| t.elapsed());
+						if should_disconnect(
+							cam.config().idle_disconnect,
+							cam.state().is_connected(),
+							idle_for,
+							grace,
+						) {
+							tracing::warn!(
+								camera = %name,
+								idle_secs = idle_for.unwrap_or_default().as_secs(),
+								"Watchdog: idle camera connected past grace, requesting disconnect"
 							);
-							if let Some(idle_since) = cam.wake_lock().idle_since() {
-								if idle_since.elapsed() >= grace {
-									tracing::warn!(
-										camera = %name,
-										idle_secs = idle_since.elapsed().as_secs(),
-										"Watchdog: idle camera connected past grace, requesting disconnect"
-									);
-									cam.request_disconnect();
-								}
-							}
+							cam.request_disconnect();
 						}
 					}
 				}
@@ -81,10 +83,44 @@ impl Watchdog {
 	}
 }
 
+/// Safety-net disconnect predicate: fire only for a camera that opted
+/// into `idle_disconnect`, is currently connected, and has been
+/// wake-lock-idle (`idle_for = Some`) for at least `grace`. `None`
+/// means the wake lock is held or was never acquired — never disconnect
+/// on that: the per-camera `grace_period.rs` task owns the normal path
+/// and this predicate is only its backstop.
+fn should_disconnect(
+	idle_disconnect: bool,
+	connected: bool,
+	idle_for: Option<Duration>,
+	grace: Duration,
+) -> bool {
+	idle_disconnect && connected && idle_for.is_some_and(|idle| idle >= grace)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::config::test_helpers::minimal_camera_config;
+
+	#[test]
+	fn should_disconnect_decision_table() {
+		let g = Duration::from_secs(5);
+		let past = Some(Duration::from_secs(6));
+		let within = Some(Duration::from_secs(4));
+		// Fires only when every condition holds.
+		assert!(should_disconnect(true, true, past, g));
+		// Idle exactly at grace fires (>=).
+		assert!(should_disconnect(true, true, Some(g), g));
+		// Still inside grace.
+		assert!(!should_disconnect(true, true, within, g));
+		// Lock held / never acquired.
+		assert!(!should_disconnect(true, true, None, g));
+		// Not connected.
+		assert!(!should_disconnect(true, false, past, g));
+		// Opt-out camera.
+		assert!(!should_disconnect(false, true, past, g));
+	}
 
 	#[tokio::test]
 	async fn watchdog_exits_immediately_on_cancel() {

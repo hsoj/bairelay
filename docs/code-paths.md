@@ -431,7 +431,7 @@ flowchart TD
     CMD --> C3["Pir / Reboot / SetTime"]
     CMD --> C4["Snapshot / Preview"]
 
-    C1 --> DRV["Arc&lt;dyn CameraDriver&gt;<br/>src/baichuan/bc_protocol/camera_driver.rs:28"]
+    C1 --> DRV["Arc&lt;dyn camera::Camera&gt;<br/>src/camera.rs"]
     C2 --> DRV
     C3 --> DRV
     C4 --> DRV
@@ -636,7 +636,7 @@ graph LR
 
     subgraph TRAIT ["trait seam"]
         direction TB
-        T1["CameraDriver<br/>core/bc_protocol/camera_driver.rs:28<br/><i>~42 methods</i>"]
+        T1["camera::Camera<br/>src/camera.rs<br/><i>8 flat role traits</i>"]
         T2["CameraDiscoverer"]
         T3["VideoStream"]
         T4["PacketSource"]
@@ -661,14 +661,13 @@ graph LR
     P5 --> T5 --> F5
     P6 --> T6 --> F6
 
-    classDef fat fill:#78350f,stroke:#451a03,color:#fff
-    class T1 fat
 ```
 
-`CameraDriver` is the one seam under active question: it mirrors `BcCamera` so
-the forwarding blanket impl reads one line per method, but no consumer needs all
-~42 and every fake pays for all of them. Remediation P3-3 asks for an explicit
-decision either way.
+The camera seam was decomposed (S4-2) into eight flat role traits
+(`Session`, `Video`, `Stills`, `Events`, `Power`, `Lighting`, `Ptz`,
+`DeviceAdmin`) composed into `camera::Camera` via a marker blanket impl;
+consumers take the narrowest role that covers them, and per-role fakes
+exist alongside `FakeCameraBuilder`.
 
 **Hang-protection discipline**: every mock-based "camera doesn't answer" test
 wraps the op in `tokio::time::timeout(Duration::from_millis(200), …)`. A test
@@ -789,7 +788,7 @@ flowchart LR
 | §14 Log-marker contract | P1-4 — marker contract unpinned |
 | §8 MQTT control path | P3-2 — error-type layering inversion |
 | §11 One-shot path | P2-5 — large futures |
-| §12 Test seams | P3-3 — `CameraDriver` is a ~42-method trait |
+| §12 Test seams | resolved — the camera seam is 8 role traits (was P3-3) |
 | §5 Media data path, §6 gap bridging | P3-6 — `stream_source.rs` at 5441 lines |
 | §7 Wake lock lifecycle | P2-3 — `#[must_use]` missing on `WakeLockGuard` |
 | §2 Startup sequence | P1-5 — `permitted_users` unvalidated by `check-config` |

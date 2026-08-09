@@ -35,27 +35,20 @@ impl BcCamera {
 				code: modern_reply.meta.response_code,
 			});
 		}
-		let version_info;
-		match modern_reply.body {
-			BcBody::ModernMsg(ModernMsg {
-				payload:
-					Some(BcPayloads::BcXml(BcXml {
-						version_info: Some(info),
-						..
-					})),
-				..
-			}) => {
-				version_info = info;
-			}
-			_ => {
-				return Err(Error::UnintelligibleReply {
-					reply: std::sync::Arc::new(modern_reply),
-					why: "Expected a VersionInfo message",
-				})
+		let mut modern_reply = modern_reply;
+		if let BcBody::ModernMsg(ModernMsg {
+			payload: Some(BcPayloads::BcXml(xml)),
+			..
+		}) = &mut modern_reply.body
+		{
+			if let Some(info) = xml.version_info.take() {
+				return Ok(info);
 			}
 		}
-
-		Ok(version_info)
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(modern_reply),
+			why: "Expected a VersionInfo message",
+		})
 	}
 }
 

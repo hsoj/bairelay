@@ -1,4 +1,4 @@
-// Tests for crates/mqtt/src/control.rs. These tests exercise the full
+// Tests for src/mqtt/control.rs. These tests exercise the full
 // parser + control_topic round-trip.
 //
 // Uses the legacy `"neolink"` prefix throughout to keep the topic

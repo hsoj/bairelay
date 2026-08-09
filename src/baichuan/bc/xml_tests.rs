@@ -42,7 +42,7 @@ fn assert_xml_roundtrip_via_bcxml(xml: &str) -> BcXml {
 }
 
 // ---------------------------------------------------------------------------
-// Task 22 — pilot round-trips
+// Pilot round-trips
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -322,7 +322,7 @@ impl RfAlarmCfgAccessors for RfAlarmCfg {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch A — login + device metadata structs
+// Round-trip batch A — login + device metadata structs
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -615,7 +615,7 @@ fn xml_led_state_tolerates_missing_led_version() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch B — talk / motion / PTZ / floodlight / battery list
+// Round-trip batch B — talk / motion / PTZ / floodlight / battery list
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -818,7 +818,7 @@ fn xml_battery_list_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch C — ability info / push / link / snap / uid / stream info
+// Round-trip batch C — ability info / push / link / snap / uid / stream info
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -996,7 +996,7 @@ fn xml_stream_info_list_roundtrip_preserves_all_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch D — port configs + email + user list
+// Round-trip batch D — port configs + email + user list
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1249,7 +1249,7 @@ fn xml_user_list_empty_parses_cleanly() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch E — floodlight task, PTZ zoom/focus, audio, support
+// Round-trip batch E — floodlight task, PTZ zoom/focus, audio, support
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1499,7 +1499,7 @@ fn xml_rf_alarm_cfg_tolerates_missing_enable_field() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch F — Extension (standalone serialize surface)
+// Round-trip batch F — Extension (standalone serialize surface)
 // ---------------------------------------------------------------------------
 
 fn extension_roundtrip_assert(ext: &Extension) {
@@ -1569,7 +1569,7 @@ fn xml_extension_roundtrip_binary_marker_only() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 23 batch G — SupportItem (per-channel support flags)
+// Round-trip batch G — SupportItem (per-channel support flags)
 // ---------------------------------------------------------------------------
 
 #[test]

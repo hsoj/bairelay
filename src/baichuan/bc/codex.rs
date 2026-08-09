@@ -55,12 +55,13 @@ impl Encoder<Bc> for BcCodex {
 		// BCEncrypt so both this encode AND the reply decode use it.
 		let signed_login_aes = match &item.body {
 			BcBody::ModernMsg(ModernMsg {
-				payload: Some(BcPayloads::BcXml(BcXml {
-					login_user: Some(lu),
-					..
-				})),
+				payload: Some(BcPayloads::BcXml(xml)),
 				..
-			}) if lu.public_key.is_some() => Some(lu.session_aes),
+			}) => xml
+				.login_user
+				.as_ref()
+				.filter(|lu| lu.public_key.is_some())
+				.map(|lu| lu.session_aes),
 			_ => None,
 		};
 		if let Some(session_aes) = signed_login_aes {
@@ -143,30 +144,28 @@ impl Decoder for BcCodex {
 			},
 			body:
 				BcBody::ModernMsg(ModernMsg {
-					payload:
-						Some(BcPayloads::BcXml(BcXml {
-							encryption: Some(Encryption { nonce, .. }),
-							..
-						})),
+					payload: Some(BcPayloads::BcXml(xml)),
 					..
 				}),
 		} = &bc
 		{
-			if response_code >> 8 == 0xdd {
-				// Login reply has the encryption info
-				// Set that the encryption type now
-				let encryption_protocol_byte = (response_code & 0xff) as usize;
-				match encryption_protocol_byte {
-					0x00 => self.context.set_encrypted(EncryptionProtocol::Unencrypted),
-					0x01 => self.context.set_encrypted(EncryptionProtocol::BCEncrypt),
-					0x02 => self.context.set_encrypted(EncryptionProtocol::aes(
-						self.context.credentials.make_aeskey(nonce),
-					)),
-					0x12 => self.context.set_encrypted(EncryptionProtocol::full_aes(
-						self.context.credentials.make_aeskey(nonce),
-					)),
-					_ => {
-						return Err(Error::UnknownEncryption(encryption_protocol_byte));
+			if let Some(Encryption { nonce, .. }) = &xml.encryption {
+				if response_code >> 8 == 0xdd {
+					// Login reply has the encryption info
+					// Set that the encryption type now
+					let encryption_protocol_byte = (response_code & 0xff) as usize;
+					match encryption_protocol_byte {
+						0x00 => self.context.set_encrypted(EncryptionProtocol::Unencrypted),
+						0x01 => self.context.set_encrypted(EncryptionProtocol::BCEncrypt),
+						0x02 => self.context.set_encrypted(EncryptionProtocol::aes(
+							self.context.credentials.make_aeskey(nonce),
+						)),
+						0x12 => self.context.set_encrypted(EncryptionProtocol::full_aes(
+							self.context.credentials.make_aeskey(nonce),
+						)),
+						_ => {
+							return Err(Error::UnknownEncryption(encryption_protocol_byte));
+						}
 					}
 				}
 			}
@@ -200,7 +199,7 @@ mod tests {
 		// Anonymous-login shape: empty username, no password. Replaces
 		// the earlier `Credentials::default()` which baked in the
 		// Reolink factory password — that impl is gone, see
-		// `crates/core/src/bc_protocol/credentials.rs`.
+		// `src/baichuan/bc_protocol/credentials.rs`.
 		Credentials::new("", None::<String>)
 	}
 

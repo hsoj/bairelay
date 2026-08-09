@@ -31,20 +31,6 @@ pub fn cli_output_mode(cli: &Cli) -> Mode {
 	}
 }
 
-/// Write a success [`Outcome`] to stdout/stderr per the given mode.
-/// Returns the written-byte counts as `(stdout_len, stderr_len)` so
-/// tests can assert the split without capturing real fds.
-pub fn emit_success_bytes(mode: Mode, outcome: &Outcome) -> (String, String) {
-	format_success(mode, outcome)
-}
-
-/// Produce the textual failure payload for the given mode + kind.
-/// Mirrors the side-effectful `emit_failure` in `main.rs` but returns
-/// the string + target-stream tag so tests don't need to capture fds.
-pub fn emit_failure_payload(mode: Mode, err: &anyhow::Error, kind: &str) -> (Mode, String) {
-	(mode, format_failure(mode, err, kind))
-}
-
 /// Sleep for `delay` or until `cancel` fires, whichever comes first.
 /// Returns `true` if the sleep completed normally and `false` if
 /// cancellation pre-empted it. Shared by every retry / backoff path
@@ -185,11 +171,7 @@ pub fn run_check_config_to<W1: std::io::Write, W2: std::io::Write>(
 	// inversions. Warnings flow through `tracing::warn!` to stderr;
 	// in `--json` mode the JSON success payload still goes to stdout
 	// cleanly, so machine-readable consumers are unaffected.
-	crate::config::warn_deprecated_pause_fields(&config);
-	crate::config::warn_neolink_compat_fields(&config);
-	crate::config::warn_wire_debug_enabled(&config);
-	crate::config::warn_idle_timeout_below_prune_floor(&config);
-	crate::config::warn_users_without_tls(&config);
+	crate::config::log_config_warnings(&config);
 	// Success — short summary so operators get a quick affirmation.
 	let summary = format!(
 		"config OK: {} camera(s), bind {}:{}\n",
@@ -374,31 +356,6 @@ mod tests {
 	}
 
 	#[test]
-	fn emit_success_bytes_returns_both_streams() {
-		// Outcome::Snapshot payload in Human mode goes to stderr (progress)
-		// + stdout (bytes) — smoke-test the split exists regardless of
-		// exact wording.
-		let (stdout, _stderr) = emit_success_bytes(
-			Mode::Human,
-			&Outcome::Snapshot {
-				bytes: 4,
-				path: Some("/tmp/x.jpg".into()),
-				format: "jpeg".into(),
-			},
-		);
-		// At least one channel produced something.
-		assert!(!stdout.is_empty() || !_stderr.is_empty());
-	}
-
-	#[test]
-	fn emit_failure_payload_packages_mode() {
-		let err = anyhow::anyhow!("boom");
-		let (mode, s) = emit_failure_payload(Mode::Human, &err, "protocol");
-		assert!(matches!(mode, Mode::Human));
-		assert!(!s.is_empty());
-	}
-
-	#[test]
 	fn emit_success_to_routes_snapshot_payload_to_stdout_and_stderr() {
 		// `Outcome::Snapshot` writes the captured JPEG bytes to stdout
 		// and a one-line confirmation to stderr (Human mode).
@@ -561,9 +518,8 @@ cameras = []
 	}
 
 	// `emit_success` / `emit_failure` are 5-line wrappers around
-	// `format_success` / `format_failure` (covered above by
-	// `emit_success_bytes_returns_both_streams` and
-	// `emit_failure_payload_packages_mode`). Their only side effect is
+	// `format_success` / `format_failure` (covered above by the
+	// `emit_success_to_*` / `emit_failure_to_*` tests). Their only side effect is
 	// writing to the real process stdout/stderr, which would pollute
 	// the cargo-test output for zero correctness signal — no test here.
 

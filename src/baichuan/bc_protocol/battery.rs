@@ -5,7 +5,7 @@
 //! - BatteryInfo which the client can request on demand
 //!
 
-use super::{BcCamera, PrintFormat, Result};
+use super::{BcCamera, Result};
 use crate::baichuan::{
 	bc::{model::*, xml::BatteryInfo},
 	Error,
@@ -17,72 +17,6 @@ use crate::baichuan::bc::xml::BcXml;
 use crate::baichuan::bc_protocol::connection::mock::{reply_200_xml, MockConnection};
 
 impl BcCamera {
-	/// Create a handller to respond to battery messages
-	/// These messages are sent by the camera on login and maybe
-	/// also on low battery events
-	pub async fn monitor_battery(&self, format: PrintFormat) -> Result<()> {
-		let connection = self.get_connection();
-		connection
-			.handle_msg(MSG_ID_BATTERY_INFO_LIST, move |bc| {
-				Box::pin(async move {
-					if let Bc {
-						body:
-							BcBody::ModernMsg(ModernMsg {
-								payload:
-									Some(BcPayloads::BcXml(BcXml {
-										battery_list: Some(battery_list),
-										..
-									})),
-								..
-							}),
-						..
-					} = bc
-					{
-						for battery in battery_list.battery_info.iter() {
-							match format {
-								PrintFormat::None => {}
-								PrintFormat::Human => {
-									println!(
-										"==Battery==\n\
-                                    Charge: {}%,\n\
-                                    Temperature: {}°C,\n\
-                                    LowPower: {},\n\
-                                    Adapter: {},\n\
-                                    ChargeStatus: {},\n\
-                                    ",
-										battery.battery_percent,
-										battery.temperature,
-										if battery.low_power == 1 {
-											"true"
-										} else {
-											"false"
-										},
-										battery.adapter_status,
-										battery.charge_status,
-									);
-								}
-								PrintFormat::Xml => {
-									let mut ser_buf = bytes::BytesMut::new();
-									let ser = quick_xml::se::to_writer(&mut ser_buf, &battery)
-										.map(|_| ser_buf.to_vec())
-										.map(String::from_utf8);
-									match ser {
-										Ok(Ok(bat_ser)) => println!("{}", bat_ser),
-										// Skip the entry rather than kill the
-										// monitor stream over one bad record.
-										_ => eprintln!("could not serialise battery XML"),
-									}
-								}
-							}
-						}
-					}
-					Option::<Bc>::None
-				})
-			})
-			.await?;
-		Ok(())
-	}
-
 	/// Requests the current battery status of the camera
 	pub async fn battery_info(&self) -> Result<BatteryInfo> {
 		let connection = self.get_connection();
@@ -109,30 +43,23 @@ impl BcCamera {
 		};
 
 		sub.send(msg).await?;
-		let msg = sub.recv().await?;
+		let mut msg = sub.recv().await?;
 
-		if let Bc {
-			meta: BcMeta {
-				response_code: 200, ..
-			},
-			body:
-				BcBody::ModernMsg(ModernMsg {
-					payload:
-						Some(BcPayloads::BcXml(BcXml {
-							battery_info: Some(battery_info),
-							..
-						})),
-					..
-				}),
-		} = msg
-		{
-			Ok(battery_info)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "The camera did not accept the battery info (maybe no battery) command.",
-			})
+		if msg.meta.response_code == 200 {
+			if let BcBody::ModernMsg(ModernMsg {
+				payload: Some(BcPayloads::BcXml(xml)),
+				..
+			}) = &mut msg.body
+			{
+				if let Some(battery_info) = xml.battery_info.take() {
+					return Ok(battery_info);
+				}
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "The camera did not accept the battery info (maybe no battery) command.",
+		})
 	}
 }
 
@@ -184,60 +111,5 @@ mod tests {
 		let cam = BcCamera::from_mock_connection(mock).await;
 		let err = cam.battery_info().await.expect_err("should fail");
 		assert!(matches!(err, Error::UnintelligibleReply { .. }));
-	}
-
-	async fn exercise_monitor_battery(format: PrintFormat) {
-		use crate::baichuan::bc::xml::{BatteryInfo, BatteryList};
-		let mock = MockConnection::new().build().await;
-		let injector = mock.injector();
-		let cam = BcCamera::from_mock_connection(mock).await;
-		cam.monitor_battery(format).await.expect("register");
-
-		// Let the AddHandler command reach the poller.
-		tokio::task::yield_now().await;
-		tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-		// Push a battery-info-list frame; closure body runs once.
-		let push = Bc::new_from_xml(
-			BcMeta {
-				msg_id: MSG_ID_BATTERY_INFO_LIST,
-				channel_id: 0,
-				msg_num: 0,
-				stream_type: 0,
-				response_code: 0,
-				class: 0x6414,
-			},
-			BcXml {
-				battery_list: Some(BatteryList {
-					battery_info: vec![BatteryInfo {
-						battery_percent: 55,
-						temperature: 25,
-						low_power: 1,
-						adapter_status: "charging".into(),
-						charge_status: "chargeNormal".into(),
-						..Default::default()
-					}],
-					..Default::default()
-				}),
-				..Default::default()
-			},
-		);
-		injector.push(push).await;
-		tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-	}
-
-	#[tokio::test]
-	async fn monitor_battery_none_format_silent_path() {
-		exercise_monitor_battery(PrintFormat::None).await;
-	}
-
-	#[tokio::test]
-	async fn monitor_battery_human_format_path() {
-		exercise_monitor_battery(PrintFormat::Human).await;
-	}
-
-	#[tokio::test]
-	async fn monitor_battery_xml_format_path() {
-		exercise_monitor_battery(PrintFormat::Xml).await;
 	}
 }

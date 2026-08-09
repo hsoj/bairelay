@@ -1,6 +1,6 @@
 use super::{BcCamera, Error, Result};
 use crate::baichuan::bc::{model::*, xml::*};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc::{channel, error::TryRecvError, Receiver};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -38,36 +38,10 @@ pub struct MotionData {
 }
 
 impl MotionData {
-	/// Get if motion has been detected. Returns None if
-	/// no motion data has yet been received from the camera
-	///
-	/// An error is raised if the motion connection to the camera is dropped
-	pub fn motion_detected(&mut self) -> Result<Option<bool>> {
-		self.consume_motion_events()?;
-		Ok(match &self.last_update {
-			MotionStatus::Start(_) => Some(true),
-			MotionStatus::Stop(_) => Some(false),
-			MotionStatus::NoChange(_) => None,
-		})
-	}
-
-	/// Get if motion has been detected within given duration. Returns None if
-	/// no motion data has yet been received from the camera
-	///
-	/// An error is raised if the motion connection to the camera is dropped
-	pub fn motion_detected_within(&mut self, duration: Duration) -> Result<Option<bool>> {
-		self.consume_motion_events()?;
-		Ok(match &self.last_update {
-			MotionStatus::Start(_) => Some(true),
-			MotionStatus::Stop(time) => Some((Instant::now() - *time) < duration),
-			MotionStatus::NoChange(_) => None,
-		})
-	}
-
 	/// Consume the motion events diretly
 	///
 	/// An error is raised if the motion connection to the camera is dropped
-	pub fn consume_motion_events(&mut self) -> Result<Vec<MotionStatus>> {
+	fn consume_motion_events(&mut self) -> Result<Vec<MotionStatus>> {
 		let mut results: Vec<MotionStatus> = vec![];
 		loop {
 			match self.rx.try_recv() {
@@ -95,85 +69,6 @@ impl MotionData {
 			Ok(motion)
 		} else {
 			Err(Error::Other("Motion dropped"))
-		}
-	}
-
-	/// Wait for the motion to stop
-	///
-	/// It must be stopped for at least the given duration
-	pub async fn await_stop(&mut self, duration: Duration) -> Result<()> {
-		let motions = self.consume_motion_events()?;
-		let mut last_motion = motions.last().copied();
-		loop {
-			if let Some(MotionStatus::Stop(time)) = last_motion {
-				// In stop state
-				if duration.is_zero() || (Instant::now() - time) > duration {
-					return Ok(());
-				} else {
-					// Schedule a sleep or wait for motion to start.
-					// `saturating_sub` covers the TOCTOU between the
-					// check above and this subtraction — under heavy
-					// scheduler load `Instant::now() - time` can flip
-					// past `duration` and naive subtraction underflows.
-					let remaining_sleep = duration.saturating_sub(Instant::now() - time);
-					let result = tokio::select! {
-						_ = tokio::time::sleep(remaining_sleep) => {None},
-						v = async {
-							loop {
-								match self.next_motion().await {
-									n @ Ok(MotionStatus::Start(_)) => {return n;},
-									n @ Err(_) => {return n;},
-									_ => {continue;}
-								}
-							}
-						} => {Some(v)}
-					};
-					if let Some(v) = result {
-						v?;
-					} else {
-						return Ok(());
-					}
-				}
-			}
-			last_motion = Some(self.next_motion().await?);
-		}
-	}
-
-	/// Wait for the motion to start
-	///
-	/// The motion must have a minimum duration as given
-	pub async fn await_start(&mut self, duration: Duration) -> Result<()> {
-		let motions = self.consume_motion_events()?;
-		let mut last_motion = motions.last().copied();
-		loop {
-			if let Some(MotionStatus::Start(time)) = last_motion {
-				// In start state
-				if duration.is_zero() || (Instant::now() - time) > duration {
-					return Ok(());
-				} else {
-					// `saturating_sub` mirrors `await_stop` above:
-					// guards the TOCTOU on the duration computation.
-					let remaining_sleep = duration.saturating_sub(Instant::now() - time);
-					let result = tokio::select! {
-						_ = tokio::time::sleep(remaining_sleep) => {None},
-						v = async {
-							loop {
-								match self.next_motion().await {
-									n @ Ok(MotionStatus::Stop(_)) => {return n;},
-									n @ Err(_) => {return n;},
-									_ => {continue;}
-								}
-							}
-						} => {Some(v)}
-					};
-					if let Some(v) = result {
-						v?;
-					} else {
-						return Ok(());
-					}
-				}
-			}
-			last_motion = Some(self.next_motion().await?);
 		}
 	}
 }
@@ -245,14 +140,12 @@ impl BcCamera {
 						let status = match msg {
 							Ok(motion_msg) => {
 								if let BcBody::ModernMsg(ModernMsg {
-									payload:
-										Some(BcPayloads::BcXml(BcXml {
-											alarm_event_list: Some(alarm_event_list),
-											..
-										})),
+									payload: Some(BcPayloads::BcXml(xml)),
 									..
 								}) = motion_msg.body
 								{
+									let alarm_event_list =
+										xml.alarm_event_list.unwrap_or_default();
 									let mut result = MotionStatus::NoChange(Instant::now());
 									for alarm_event in &alarm_event_list.alarm_events {
 										if alarm_event.channel_id == channel_id {
@@ -337,6 +230,7 @@ impl Drop for MotionData {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::time::Duration;
 
 	#[tokio::test]
 	async fn listen_on_motion_happy_path_returns_handle() {
@@ -375,86 +269,6 @@ mod tests {
 	}
 
 	// ---- MotionData state-machine tests driven by `test_new` ----
-
-	#[tokio::test]
-	async fn motion_detected_none_until_event() {
-		let (_tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		// No events produced yet → `last_update` is NoChange → returns
-		// None.
-		assert_eq!(md.motion_detected().expect("ok"), None);
-	}
-
-	#[tokio::test]
-	async fn motion_detected_after_start_event_is_true() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(Instant::now())))
-			.await
-			.unwrap();
-		// Yield so the channel is drained on try_recv.
-		tokio::task::yield_now().await;
-		assert_eq!(md.motion_detected().expect("ok"), Some(true));
-	}
-
-	#[tokio::test]
-	async fn motion_detected_after_stop_event_is_false() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Stop(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		assert_eq!(md.motion_detected().expect("ok"), Some(false));
-	}
-
-	#[tokio::test]
-	async fn motion_detected_within_reports_based_on_stop_time() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		// Stop "1 hour ago": (now - stop_time) > 10ms → returns Some(false).
-		tx.send(Ok(MotionStatus::Stop(
-			Instant::now() - Duration::from_secs(3600),
-		)))
-		.await
-		.unwrap();
-		tokio::task::yield_now().await;
-		assert_eq!(
-			md.motion_detected_within(Duration::from_millis(10))
-				.expect("ok"),
-			Some(false)
-		);
-	}
-
-	#[tokio::test]
-	async fn motion_detected_within_returns_true_inside_window() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Stop(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		assert_eq!(
-			md.motion_detected_within(Duration::from_secs(60))
-				.expect("ok"),
-			Some(true)
-		);
-	}
-
-	#[tokio::test]
-	async fn motion_detected_within_start_is_some_true() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		assert_eq!(
-			md.motion_detected_within(Duration::from_secs(60))
-				.expect("ok"),
-			Some(true)
-		);
-	}
 
 	#[tokio::test]
 	async fn consume_motion_events_propagates_err() {
@@ -515,175 +329,6 @@ mod tests {
 			err,
 			Error::DroppedConnectionTry(_) | Error::Other(_)
 		));
-	}
-
-	#[tokio::test]
-	async fn await_stop_zero_duration_returns_immediately() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Stop(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		tokio::time::timeout(Duration::from_millis(200), md.await_stop(Duration::ZERO))
-			.await
-			.expect("did not hang")
-			.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_start_zero_duration_returns_immediately() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		tokio::time::timeout(Duration::from_millis(200), md.await_start(Duration::ZERO))
-			.await
-			.expect("did not hang")
-			.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_stop_waits_then_returns() {
-		// Start stopped-long-enough: (now - stop_time) > duration triggers
-		// the fast-path "already satisfied" exit through the `else` arm.
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Stop(
-			Instant::now() - Duration::from_secs(3600),
-		)))
-		.await
-		.unwrap();
-		tokio::task::yield_now().await;
-		tokio::time::timeout(
-			Duration::from_millis(200),
-			md.await_stop(Duration::from_millis(10)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_start_waits_then_returns() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(
-			Instant::now() - Duration::from_secs(3600),
-		)))
-		.await
-		.unwrap();
-		tokio::task::yield_now().await;
-		tokio::time::timeout(
-			Duration::from_millis(200),
-			md.await_start(Duration::from_millis(10)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_stop_sleep_satisfies_after_recent_stop() {
-		// Stop is "now" → (now - now) < duration → schedules sleep for
-		// the remaining window. Sleep wins the select since no Start
-		// event arrives; loop returns Ok.
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Stop(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		tokio::time::timeout(
-			Duration::from_millis(200),
-			md.await_stop(Duration::from_millis(20)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_start_sleep_satisfies_after_recent_start() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(Instant::now())))
-			.await
-			.unwrap();
-		tokio::task::yield_now().await;
-		tokio::time::timeout(
-			Duration::from_millis(200),
-			md.await_start(Duration::from_millis(20)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_stop_transitions_from_nochange() {
-		// Initial NoChange → falls through to `next_motion().await` and
-		// loops until a Stop arrives with enough age.
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tokio::spawn(async move {
-			tx.send(Ok(MotionStatus::Stop(
-				Instant::now() - Duration::from_secs(3600),
-			)))
-			.await
-			.unwrap();
-		});
-		tokio::time::timeout(Duration::from_millis(300), md.await_stop(Duration::ZERO))
-			.await
-			.expect("did not hang")
-			.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_stop_does_not_panic_on_aged_stop_within_duration() {
-		// Regression: `duration - (Instant::now() - time)` panicked
-		// on Duration underflow if `Instant::now() - time` flipped past
-		// `duration` between the if-check and the subtraction.
-		// `saturating_sub` returns ZERO and the sleep arm fires instantly.
-		// Build the setup: stop ~5 ms ago, request a 4 ms window — the
-		// inner check `(now - time) > duration` may be false at first but
-		// flip true between the check and the sub on a busy scheduler.
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Stop(
-			Instant::now() - Duration::from_millis(5),
-		)))
-		.await
-		.unwrap();
-		tokio::task::yield_now().await;
-		// Whether the if-arm or the else-with-saturating-sub fires, the
-		// call must complete without panic.
-		tokio::time::timeout(
-			Duration::from_millis(200),
-			md.await_stop(Duration::from_millis(4)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	#[tokio::test]
-	async fn await_start_transitions_from_nochange() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tokio::spawn(async move {
-			tx.send(Ok(MotionStatus::Start(
-				Instant::now() - Duration::from_secs(3600),
-			)))
-			.await
-			.unwrap();
-		});
-		tokio::time::timeout(Duration::from_millis(300), md.await_start(Duration::ZERO))
-			.await
-			.expect("did not hang")
-			.expect("ok");
 	}
 
 	// ---- Inner listen_on_motion task body tests ----
@@ -951,120 +596,5 @@ mod tests {
 			.expect("did not hang")
 			.expect_err("should fail");
 		assert!(matches!(err, Error::Other("Motion dropped")));
-	}
-
-	/// `await_stop` schedules the sleep for a recent stop, but a Start
-	/// arrives before the sleep elapses → the select's async branch
-	/// wins, propagating the Start back into the outer loop. The next
-	/// iteration re-enters `next_motion` for a fresh stop.
-	#[tokio::test]
-	async fn await_stop_resets_when_motion_starts_during_sleep() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(8);
-		let mut md = MotionData::test_new(rx);
-		// Initial Stop just now → schedules a 50 ms sleep.
-		tx.send(Ok(MotionStatus::Stop(Instant::now())))
-			.await
-			.unwrap();
-		let tx_c = tx.clone();
-		tokio::spawn(async move {
-			// Start arrives 10 ms in → wins the select; outer loop loops.
-			tokio::time::sleep(Duration::from_millis(10)).await;
-			tx_c.send(Ok(MotionStatus::Start(Instant::now())))
-				.await
-				.unwrap();
-			// Then Stop "long ago" → second iteration's sleep is ZERO so
-			// fast-path returns Ok immediately.
-			tokio::time::sleep(Duration::from_millis(10)).await;
-			tx_c.send(Ok(MotionStatus::Stop(
-				Instant::now() - Duration::from_secs(60),
-			)))
-			.await
-			.unwrap();
-		});
-		tokio::time::timeout(
-			Duration::from_millis(500),
-			md.await_stop(Duration::from_millis(50)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	/// Inverse: `await_start` schedules a sleep for a recent Start, but
-	/// a Stop arrives → loop continues and a subsequent Start with
-	/// enough age completes via the fast-path.
-	#[tokio::test]
-	async fn await_start_resets_when_motion_stops_during_sleep() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(8);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(Instant::now())))
-			.await
-			.unwrap();
-		let tx_c = tx.clone();
-		tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(10)).await;
-			tx_c.send(Ok(MotionStatus::Stop(Instant::now())))
-				.await
-				.unwrap();
-			tokio::time::sleep(Duration::from_millis(10)).await;
-			tx_c.send(Ok(MotionStatus::Start(
-				Instant::now() - Duration::from_secs(60),
-			)))
-			.await
-			.unwrap();
-		});
-		tokio::time::timeout(
-			Duration::from_millis(500),
-			md.await_start(Duration::from_millis(50)),
-		)
-		.await
-		.expect("did not hang")
-		.expect("ok");
-	}
-
-	/// `await_stop` propagates an error returned by the inner
-	/// `next_motion()` call when the channel disconnects mid-wait.
-	#[tokio::test]
-	async fn await_stop_propagates_inner_err() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		// Recent Stop → enters sleep branch, then we push an Err which
-		// the inner loop only rejects on Start/Err — it returns Err.
-		tx.send(Ok(MotionStatus::Stop(Instant::now())))
-			.await
-			.unwrap();
-		tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(10)).await;
-			tx.send(Err(Error::Other("boom"))).await.unwrap();
-		});
-		let err = tokio::time::timeout(
-			Duration::from_millis(500),
-			md.await_stop(Duration::from_millis(200)),
-		)
-		.await
-		.expect("did not hang")
-		.expect_err("should fail");
-		assert!(matches!(err, Error::Other(_)));
-	}
-
-	#[tokio::test]
-	async fn await_start_propagates_inner_err() {
-		let (tx, rx) = channel::<Result<MotionStatus>>(4);
-		let mut md = MotionData::test_new(rx);
-		tx.send(Ok(MotionStatus::Start(Instant::now())))
-			.await
-			.unwrap();
-		tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(10)).await;
-			tx.send(Err(Error::Other("boom"))).await.unwrap();
-		});
-		let err = tokio::time::timeout(
-			Duration::from_millis(500),
-			md.await_start(Duration::from_millis(200)),
-		)
-		.await
-		.expect("did not hang")
-		.expect_err("should fail");
-		assert!(matches!(err, Error::Other(_)));
 	}
 }

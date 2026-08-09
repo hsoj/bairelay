@@ -396,7 +396,7 @@ mod tests {
 		// Video + InfoV1/V2 + AAC all round-trip cleanly through
 		// serialize → deserialize. ADPCM does NOT (see the separate
 		// `dump_frame_handles_audio_packets_without_panicking` test and
-		// `crates/core/src/bcmedia/ser.rs:27-36` for the asymmetry).
+		// `src/baichuan/bcmedia/ser.rs:27-36` for the asymmetry).
 		let frames = vec![
 			sample_info_v1(),
 			sample_info_v2(),
@@ -410,7 +410,7 @@ mod tests {
 			dump_frame(&mut buf, f, &mut scratch).expect("serialize ok");
 		}
 
-		// Now parse them back in a loop — matches how Task 3 will replay.
+		// Now parse them back in a loop — matches how fixture replay reads them.
 		let mut bytes = bytes::BytesMut::from(buf.as_slice());
 		let mut recovered = Vec::new();
 		while !bytes.is_empty() {
@@ -468,7 +468,7 @@ mod tests {
 		// serializer pads on `data.len() % 8` while the deserializer
 		// pads on `(data.len() + 4) % 8` (the 4-byte sub-header is
 		// counted in the wire `payload_size`). See
-		// `crates/core/src/bcmedia/ser.rs:27-36` for the full note.
+		// `src/baichuan/bcmedia/ser.rs:27-36` for the full note.
 		//
 		// Until the upstream wire-format alignment lands we only
 		// assert that the serialize + write path succeeds and that the

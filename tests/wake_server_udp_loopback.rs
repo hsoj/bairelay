@@ -1026,7 +1026,7 @@ async fn c2r_c_for_unknown_uid_does_not_leak_other_uids_address() {
 /// Bad-CRC regression: a hostile UDP packet whose CRC doesn't match
 /// the payload bytes must not panic the listener. Pre-fix,
 /// `assert_eq!(checksum, actual_checksum)` in
-/// `crates/core/src/bcudp/de.rs:75` killed the spawned task on any
+/// `src/baichuan/bcudp/de.rs:75` killed the spawned task on any
 /// crafted packet, taking both wake-server listeners with it via the
 /// JoinHandle race in `run_with_sockets`. Single packet → service
 /// dead.

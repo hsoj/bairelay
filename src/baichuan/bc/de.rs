@@ -242,7 +242,7 @@ fn bc_modern_msg<'a>(
 					ErrorKind::MapRes,
 				))
 			})?;
-			payload = Some(BcPayloads::BcXml(xml));
+			payload = Some(BcPayloads::BcXml(Box::new(xml)));
 		}
 	} else {
 		payload = None;
@@ -320,13 +320,12 @@ mod tests {
 		assert_eq!(header.class, 0x6614);
 		match body {
 			BcBody::ModernMsg(ModernMsg {
-				payload:
-					Some(BcPayloads::BcXml(BcXml {
-						encryption: Some(encryption),
-						..
-					})),
+				payload: Some(BcPayloads::BcXml(xml)),
 				..
-			}) => assert_eq!(encryption.nonce, "9E6D1FCB9E69846D"),
+			}) => assert_eq!(
+				xml.encryption.expect("encryption xml").nonce,
+				"9E6D1FCB9E69846D"
+			),
 			_ => panic!(),
 		}
 	}
@@ -349,13 +348,12 @@ mod tests {
 		assert_eq!(header.class, 0x6614);
 		match body {
 			BcBody::ModernMsg(ModernMsg {
-				payload:
-					Some(BcPayloads::BcXml(BcXml {
-						encryption: Some(encryption),
-						..
-					})),
+				payload: Some(BcPayloads::BcXml(xml)),
 				..
-			}) => assert_eq!(encryption.nonce, "0-AhnEZyUg6eKrJFIWgXPF"),
+			}) => assert_eq!(
+				xml.encryption.expect("encryption xml").nonce,
+				"0-AhnEZyUg6eKrJFIWgXPF"
+			),
 			_ => panic!(),
 		}
 	}
@@ -495,19 +493,17 @@ mod tests {
 				body:
 					BcBody::ModernMsg(ModernMsg {
 						extension: None,
-						payload:
-							Some(BcPayloads::BcXml(BcXml {
-								preview:
-									Some(Preview {
-										version,
-										channel_id: 0,
-										handle: 1024,
-										stream_type,
-									}),
-								..
-							})),
+						payload: Some(BcPayloads::BcXml(xml)),
 					}),
-			}) if version == "1.1" && stream_type == Some("externStream".to_string())
+			}) if matches!(
+				&xml.preview,
+				Some(Preview {
+					version,
+					channel_id: 0,
+					handle: 1024,
+					stream_type,
+				}) if version == "1.1" && stream_type.as_deref() == Some("externStream")
+			)
 		);
 	}
 
@@ -537,19 +533,17 @@ mod tests {
 				body:
 					BcBody::ModernMsg(ModernMsg {
 						extension: None,
-						payload:
-							Some(BcPayloads::BcXml(BcXml {
-								preview:
-									Some(Preview {
-										version,
-										channel_id: 0,
-										handle: 256,
-										stream_type,
-									}),
-								..
-							})),
+						payload: Some(BcPayloads::BcXml(xml)),
 					}),
-			}) if version == "1.1" && stream_type == Some("subStream".to_string())
+			}) if matches!(
+				&xml.preview,
+				Some(Preview {
+					version,
+					channel_id: 0,
+					handle: 256,
+					stream_type,
+				}) if version == "1.1" && stream_type.as_deref() == Some("subStream")
+			)
 		);
 	}
 
@@ -579,19 +573,17 @@ mod tests {
 				body:
 					BcBody::ModernMsg(ModernMsg {
 						extension: None,
-						payload:
-							Some(BcPayloads::BcXml(BcXml {
-								preview:
-									Some(Preview {
-										version,
-										channel_id: 0,
-										handle: 0,
-										stream_type,
-									}),
-								..
-							})),
+						payload: Some(BcPayloads::BcXml(xml)),
 					}),
-			}) if version == "1.1" && stream_type == Some("mainStream".to_string())
+			}) if matches!(
+				&xml.preview,
+				Some(Preview {
+					version,
+					channel_id: 0,
+					handle: 0,
+					stream_type,
+				}) if version == "1.1" && stream_type.as_deref() == Some("mainStream")
+			)
 		);
 	}
 

@@ -161,7 +161,7 @@ async fn warm_one(
 	);
 
 	// 4) Request a JPEG snapshot from the camera and stash it.
-	if let Some(camera) = handle.bc_camera() {
+	if let Some(camera) = handle.camera() {
 		tokio::select! {
 			_ = cancel.cancelled() => return Ok(()),
 			_ = capture_snapshot_into_buffer(&camera, name, &last_frame) => {}

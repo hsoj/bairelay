@@ -1,8 +1,18 @@
+//! # Stability
+//!
+//! The binary CLI and its TOML config are bairelay's stable interface.
+//! This library surface exists so `tests/*.rs` can drive the binary's
+//! modules directly; it carries **no semver guarantee** and may change
+//! shape in any release. Depend on the binary, not the library.
+
 // A panic in this daemon is an unrecoverable failure: it kills a task
 // that other holders depend on (and before the poison sweep, cascaded
 // through shared locks). Production code returns errors or degrades;
 // `clippy.toml` exempts test code, where a panic IS the failure signal.
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+// An oversized future is copied in full on every poll once it crosses
+// an .await; clippy.toml's future-size-threshold sets the budget.
+#![warn(clippy::large_futures)]
 
 // ── Vendored Baichuan protocol ────────────────────────────────────────
 // Derived from neolink_core by thirtythreeforty + QuantumEntangledAndy

@@ -34,7 +34,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					audio_play_info: Some(AudioPlayInfo {
 						channel_id: self.channel_id,
 						play_mode: 0,
@@ -43,7 +43,7 @@ impl BcCamera {
 						on_off: 0,
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 

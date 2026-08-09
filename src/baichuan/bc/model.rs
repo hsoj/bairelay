@@ -249,7 +249,7 @@ pub(crate) struct BcContext {
 impl Bc {
 	/// Constructs a xml payload only Bc message
 	pub fn new_from_xml(meta: BcMeta, xml: BcXml) -> Bc {
-		Self::new(meta, None, Some(BcPayloads::BcXml(xml)))
+		Self::new(meta, None, Some(BcPayloads::BcXml(Box::new(xml))))
 	}
 
 	/// Constructs an Extension only Bc message
@@ -264,7 +264,7 @@ impl Bc {
 
 	/// Constructs a message with both extension and xml payload
 	pub fn new_from_ext_xml(meta: BcMeta, ext: Extension, xml: BcXml) -> Bc {
-		Self::new(meta, Some(ext), Some(BcPayloads::BcXml(xml)))
+		Self::new(meta, Some(ext), Some(BcPayloads::BcXml(Box::new(xml))))
 	}
 
 	/// General method to constructs a Bc message

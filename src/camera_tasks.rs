@@ -27,7 +27,7 @@ use crate::wake_lock::{WakeLockCounter, WakeLockGuard};
 
 pub async fn motion_listener(
 	camera_name: String,
-	bc_camera: Arc<dyn Events>,
+	camera: Arc<dyn Events>,
 	reporter: Arc<dyn StatusReporter>,
 	wake_lock: WakeLockCounter,
 	cancel: CancellationToken,
@@ -41,7 +41,7 @@ pub async fn motion_listener(
 	let mut backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(60));
 
 	loop {
-		let mut motion_data = match bc_camera.listen_on_motion().await {
+		let mut motion_data = match camera.listen_on_motion().await {
 			Ok(md) => md,
 			Err(e) => {
 				tracing::warn!(camera = %camera_name, error = %e, "Failed to start motion listener");
@@ -93,11 +93,15 @@ pub async fn motion_listener(
 							if wake_guard.is_none() {
 								wake_guard = Some(wake_lock.acquire());
 							}
-							let _ = reporter.report(CameraEvent::Motion(true)).await;
+							if let Err(e) = reporter.report(CameraEvent::Motion(true)).await {
+								tracing::warn!(camera = %camera_name, error = %e, "Motion status report failed");
+							}
 						}
 						Ok(MotionStatus::Stop(_)) => {
 							tracing::info!(camera = %camera_name, "Motion stopped");
-							let _ = reporter.report(CameraEvent::Motion(false)).await;
+							if let Err(e) = reporter.report(CameraEvent::Motion(false)).await {
+								tracing::warn!(camera = %camera_name, error = %e, "Motion status report failed");
+							}
 							if wake_guard.is_some() {
 								release_at = Some(
 									tokio::time::Instant::now() + motion_wake_hold,
@@ -134,6 +138,12 @@ pub async fn motion_listener(
 /// conclusive. Three in a row, spaced a full `battery_update` apart, with
 /// any success or transport blip resetting the streak, is.
 pub(crate) const BATTERY_MAX_UNSUPPORTED: u32 = 3;
+
+/// Per-probe budget for the pollers' camera round-trips (battery,
+/// floodlight-tasks, PIR). Matches `preview_poller`'s
+/// `SNAPSHOT_TIMEOUT` scale: long enough for a just-woken Argus to
+/// answer, short enough that a wedged session can't stall a ticker.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shorthand for one `timeout(..., battery_status()).await` outcome.
 pub(crate) type TickResult<T> =
@@ -206,18 +216,18 @@ pub(crate) fn advance_battery_counter(
 /// never silence a real battery.
 pub async fn battery_poller(
 	camera_name: String,
-	bc_camera: Arc<dyn Power>,
+	camera: Arc<dyn Power>,
 	reporter: Arc<dyn StatusReporter>,
-	interval_ms: u64,
+	interval: Duration,
 	cancel: CancellationToken,
 	battery_unsupported: Arc<AtomicBool>,
 ) {
-	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+	let mut ticker = tokio::time::interval(interval);
 	// Delay, not the default Burst: a poll that stalls to the 10 s timeout
 	// leaves several deadlines overdue, and Burst would fire them
 	// back-to-back with no spacing — collapsing the refusal streak's
 	// evidence window to milliseconds. Delay keeps every probe a full
-	// `interval_ms` apart.
+	// `interval` apart.
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 	// Drop the immediate first tick: it lands the instant the session
 	// establishes, when a just-woken camera is least likely to answer.
@@ -231,8 +241,8 @@ pub async fn battery_poller(
 			_ = cancel.cancelled() => break,
 			_ = ticker.tick() => {
 				let tick = tokio::time::timeout(
-					Duration::from_secs(10),
-					bc_camera.battery_status(),
+					PROBE_TIMEOUT,
+					camera.battery_status(),
 				).await;
 
 				let outcome = classify_battery_tick(&tick);
@@ -248,7 +258,9 @@ pub async fn battery_poller(
 						ever_succeeded = true;
 						let level = status.percent;
 						tracing::debug!(camera = %camera_name, battery = level, "Battery level");
-						let _ = reporter.report(CameraEvent::BatteryLevel(level)).await;
+						if let Err(e) = reporter.report(CameraEvent::BatteryLevel(level)).await {
+							tracing::warn!(camera = %camera_name, error = %e, "Battery status report failed");
+						}
 					}
 					Ok(Err(e)) => {
 						tracing::debug!(camera = %camera_name, error = %e, "Battery poll failed");
@@ -291,16 +303,24 @@ pub async fn battery_poller(
 /// `query/preview` command and the RTSP placeholder path both see up-to-
 /// date content.
 ///
-/// Oversized JPEGs (>32 KiB raw) are skipped with a one-shot warn so the
-/// poller doesn't kick tight brokers (some mosquitto configs reject
-/// payloads larger than ~10 KiB; 4K snapshots are 1–2 MiB).
+/// What [`preview_poller`] needs from the camera side: a [`Stills`]
+/// handle **iff the camera is currently connected**, `None` otherwise.
+/// Skipping the snapshot while asleep is load-bearing — a live probe
+/// would wake the camera and defeat `idle_disconnect`.
+pub trait ConnectedStills: Send + Sync {
+	fn connected_stills(&self) -> Option<Arc<dyn crate::camera::Stills>>;
+}
+
+/// There is no size cap: every snapshot is published as-is, and a
+/// broker that rejects the payload (MaxPacketSize) surfaces as a
+/// warn-logged publish failure with the byte count.
 #[allow(clippy::too_many_arguments)]
 pub async fn preview_poller(
 	camera_name: String,
-	camera: Arc<crate::camera::CameraHandle>,
+	camera: Arc<dyn ConnectedStills>,
 	last_frame: Arc<LastFrameBuffer>,
 	reporter: Arc<dyn StatusReporter>,
-	interval_ms: u64,
+	interval: Duration,
 	mut preview_state_rx: watch::Receiver<PreviewState>,
 	preview_overlay_enabled: bool,
 	cancel: CancellationToken,
@@ -308,7 +328,7 @@ pub async fn preview_poller(
 	const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 
 	let overlay_cache = OverlayCache::new();
-	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+	let mut ticker = tokio::time::interval(interval);
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 	// Drop the immediate first tick to avoid an unexpected burst on connect.
 	ticker.tick().await;
@@ -325,18 +345,16 @@ pub async fn preview_poller(
 				// the whole point of the overlay: HA dashboards
 				// should see SLEEPING / CONNECTING on stale frames so
 				// users can tell live from stale.
-				if camera.state().is_connected() {
-					if let Some(bc) = camera.bc_camera() {
-						match tokio::time::timeout(SNAPSHOT_TIMEOUT, bc.snapshot()).await {
-							Ok(Ok(bytes)) => {
-								last_frame.set_jpeg(bytes::Bytes::from(bytes));
-							}
-							Ok(Err(e)) => {
-								tracing::debug!(camera = %camera_name, error = %e, "preview snapshot failed");
-							}
-							Err(_) => {
-								tracing::debug!(camera = %camera_name, "preview snapshot timed out");
-							}
+				if let Some(bc) = camera.connected_stills() {
+					match tokio::time::timeout(SNAPSHOT_TIMEOUT, bc.snapshot()).await {
+						Ok(Ok(bytes)) => {
+							last_frame.set_jpeg(bytes::Bytes::from(bytes));
+						}
+						Ok(Err(e)) => {
+							tracing::debug!(camera = %camera_name, error = %e, "preview snapshot failed");
+						}
+						Err(_) => {
+							tracing::debug!(camera = %camera_name, "preview snapshot timed out");
 						}
 					}
 				}
@@ -385,21 +403,23 @@ pub async fn preview_poller(
 
 pub async fn floodlight_poller(
 	camera_name: String,
-	bc_camera: Arc<dyn Lighting>,
+	camera: Arc<dyn Lighting>,
 	reporter: Arc<dyn StatusReporter>,
-	interval_ms: u64,
+	interval: Duration,
 	cancel: CancellationToken,
 ) {
-	let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+	let mut ticker = tokio::time::interval(interval);
 
 	loop {
 		tokio::select! {
 			_ = cancel.cancelled() => break,
 			_ = ticker.tick() => {
-				match tokio::time::timeout(Duration::from_secs(10), bc_camera.is_floodlight_tasks_enabled()).await {
+				match tokio::time::timeout(PROBE_TIMEOUT, camera.is_floodlight_tasks_enabled()).await {
 					Ok(Ok(enabled)) => {
 						tracing::debug!(camera = %camera_name, enabled, "Floodlight tasks");
-						let _ = reporter.report(CameraEvent::FloodlightTasks(enabled)).await;
+						if let Err(e) = reporter.report(CameraEvent::FloodlightTasks(enabled)).await {
+							tracing::warn!(camera = %camera_name, error = %e, "Floodlight status report failed");
+						}
 					}
 					Ok(Err(e)) => {
 						tracing::debug!(camera = %camera_name, error = %e, "Floodlight poll failed");
@@ -417,11 +437,11 @@ pub async fn floodlight_poller(
 
 pub async fn floodlight_listener(
 	camera_name: String,
-	bc_camera: Arc<dyn Events>,
+	camera: Arc<dyn Events>,
 	reporter: Arc<dyn StatusReporter>,
 	cancel: CancellationToken,
 ) {
-	let mut rx = match bc_camera.listen_on_floodlight().await {
+	let mut rx = match camera.listen_on_floodlight().await {
 		Ok(rx) => rx,
 		Err(e) => {
 			tracing::debug!(camera = %camera_name, error = %e, "Floodlight listener not supported");
@@ -438,7 +458,9 @@ pub async fn floodlight_listener(
 						for flight in status_list.floodlight_status_list.iter() {
 							let on = flight.status != 0;
 							tracing::debug!(camera = %camera_name, on, "Floodlight state changed");
-							let _ = reporter.report(CameraEvent::Floodlight(on)).await;
+							if let Err(e) = reporter.report(CameraEvent::Floodlight(on)).await {
+								tracing::warn!(camera = %camera_name, error = %e, "Floodlight status report failed");
+							}
 						}
 					}
 					None => break, // Channel closed
@@ -454,14 +476,16 @@ pub async fn floodlight_listener(
 /// only changes via `control/pir` commands (handled in mqtt_dispatch).
 pub async fn publish_pir_state(
 	camera_name: String,
-	bc_camera: Arc<dyn Power>,
+	camera: Arc<dyn Power>,
 	reporter: Arc<dyn StatusReporter>,
 ) {
-	match tokio::time::timeout(Duration::from_secs(10), bc_camera.pir_config()).await {
+	match tokio::time::timeout(PROBE_TIMEOUT, camera.pir_config()).await {
 		Ok(Ok(pir_state)) => {
 			let enabled = pir_state.enable == 1;
 			tracing::debug!(camera = %camera_name, enabled, "PIR state");
-			let _ = reporter.report(CameraEvent::Pir(enabled)).await;
+			if let Err(e) = reporter.report(CameraEvent::Pir(enabled)).await {
+				tracing::warn!(camera = %camera_name, error = %e, "PIR status report failed");
+			}
 		}
 		Ok(Err(e)) => {
 			tracing::debug!(camera = %camera_name, error = %e, "PIR state query failed");
@@ -610,7 +634,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 			Arc::new(AtomicBool::new(false)),
 		));
@@ -666,7 +690,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 			Arc::new(AtomicBool::new(false)),
 		));
@@ -789,7 +813,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 			Arc::clone(&unsupported),
 		));
@@ -849,7 +873,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 			Arc::clone(&unsupported),
 		));
@@ -908,7 +932,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 			Arc::clone(&unsupported),
 		));
@@ -997,7 +1021,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 		));
 
@@ -1089,7 +1113,7 @@ mod tests {
 	/// `CameraHandle` whose `LastFrameBuffer` holds a cached JPEG — the
 	/// disconnected branch must skip the snapshot call but still
 	/// publish the cached bytes with the current overlay caption.
-	/// Covers the post-Phase-2H camera-lifetime-spawned preview loop.
+	/// Covers the camera-lifetime-spawned preview loop.
 	#[tokio::test]
 	async fn preview_poller_publishes_cached_jpeg_while_disconnected() {
 		use crate::camera::CameraHandle;
@@ -1121,10 +1145,10 @@ mod tests {
 
 		preview_poller(
 			"cam-preview-test".to_string(),
-			Arc::clone(&handle),
+			Arc::clone(&handle) as Arc<dyn ConnectedStills>,
 			Arc::clone(&last_frame),
 			reporter_named(mqtt, "cam-preview-test"),
-			10, // 10 ms — fast tick for the test
+			Duration::from_millis(10), // fast tick for the test
 			rx,
 			true,
 			cancel,
@@ -1173,10 +1197,10 @@ mod tests {
 
 		preview_poller(
 			"cam-preview-noovl".to_string(),
-			Arc::clone(&handle),
+			Arc::clone(&handle) as Arc<dyn ConnectedStills>,
 			Arc::clone(&last_frame),
 			reporter_named(mqtt, "cam-preview-noovl"),
-			10,
+			Duration::from_millis(10),
 			rx,
 			false, // disable overlay
 			cancel,
@@ -1241,9 +1265,8 @@ mod tests {
 	/// Wake-lock hold-down: Start acquires the lock; Stop schedules an
 	/// inline release after `motion_wake_hold`; the lock remains held
 	/// across the window and is dropped exactly once when the timer
-	/// expires. Pins the post-Phase-3D refactor that replaced the
-	/// detached `tokio::spawn` release with a `select!` arm.
-	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	/// expires.
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn motion_listener_holds_wake_lock_through_hold_down() {
 		type MotionItem = std::result::Result<
 			crate::baichuan::bc_protocol::MotionStatus,
@@ -1259,8 +1282,8 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
 		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
-		// 500 ms hold-down absorbs tarpaulin instrumentation slop on
-		// the timer; smaller windows have flaked under coverage.
+		// Paused clock: every sleep below is a deterministic advance,
+		// so the window size carries no flake risk under coverage.
 		let hold = Duration::from_millis(500);
 
 		let task = tokio::spawn(motion_listener(
@@ -1312,7 +1335,7 @@ mod tests {
 	/// release and keeps holding the existing wake-lock guard. Critical
 	/// invariant: each listener holds **at most one** guard, regardless
 	/// of motion-event flap rate.
-	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
 	async fn motion_listener_start_during_hold_down_cancels_release() {
 		type MotionItem = std::result::Result<
 			crate::baichuan::bc_protocol::MotionStatus,
@@ -1328,7 +1351,8 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let wl = crate::wake_lock::WakeLockCounter::new();
 		let (mqtt, _mock) = crate::mqtt::test_support::mock_client();
-		// 500 ms hold-down absorbs tarpaulin instrumentation slop.
+		// Paused clock: sleeps are deterministic advances (no coverage
+		// flake risk).
 		let hold = Duration::from_millis(500);
 
 		let task = tokio::spawn(motion_listener(
@@ -1472,17 +1496,12 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
 	}
 
-	/// `floodlight_listener` returns quietly when `listen_on_floodlight`
-	/// errors — e.g. the camera doesn't support floodlight. The task
-	/// joins without panicking and no publishes are emitted.
+	/// `floodlight_listener` returns quietly when the status channel is
+	/// already closed: `rx.recv()` yields `None` immediately, the loop
+	/// breaks, and no publishes are emitted. (The subscribe-error path
+	/// has its own test: `floodlight_listener_returns_on_subscribe_error`.)
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-	async fn floodlight_listener_exits_cleanly_on_subscribe_error() {
-		// Build without calling `.with_floodlight_stream(...)` → the
-		// fake's `listen_on_floodlight` returns Err (via `unset()`
-		// actually panics — but we need a real error. Provide a
-		// drained channel instead so the `listen_on_floodlight` call
-		// succeeds and `rx.recv()` returns None immediately — matches
-		// the "None → break" path on line 300.)
+	async fn floodlight_listener_exits_cleanly_on_closed_channel() {
 		let (tx, rx) =
 			tokio::sync::mpsc::channel::<crate::baichuan::bc::xml::FloodlightStatusList>(1);
 		drop(tx); // close the sender so rx.recv() returns None.
@@ -1534,7 +1553,7 @@ mod tests {
 			"cam1".to_string(),
 			driver,
 			reporter_named(mqtt, "cam1"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 		));
 		// Let at least one tick fire + settle.
@@ -1552,7 +1571,7 @@ mod tests {
 
 	/// `preview_poller` while connected refreshes the cached JPEG via
 	/// the driver's `get_snapshot()` and publishes the result. Covers
-	/// the `state().is_connected() && bc_camera().is_some()` arm +
+	/// the `state().is_connected() && camera().is_some()` arm +
 	/// the `Ok(bytes)` → `set_jpeg` branch in the poller body.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn preview_poller_refreshes_jpeg_while_connected() {
@@ -1589,10 +1608,10 @@ mod tests {
 
 		preview_poller(
 			"cam-conn".to_string(),
-			Arc::clone(&handle),
+			Arc::clone(&handle) as Arc<dyn ConnectedStills>,
 			Arc::clone(&last_frame),
 			reporter_named(mqtt, "cam-conn"),
-			10,
+			Duration::from_millis(10),
 			rx,
 			false,
 			cancel,
@@ -1642,10 +1661,10 @@ mod tests {
 
 		preview_poller(
 			"cam-snap-err".to_string(),
-			Arc::clone(&handle),
+			Arc::clone(&handle) as Arc<dyn ConnectedStills>,
 			Arc::clone(&last_frame),
 			reporter_named(mqtt, "cam-snap-err"),
-			10,
+			Duration::from_millis(10),
 			rx,
 			false,
 			cancel,
@@ -1681,10 +1700,10 @@ mod tests {
 
 		preview_poller(
 			"cam-preview-empty".to_string(),
-			Arc::clone(&handle),
+			Arc::clone(&handle) as Arc<dyn ConnectedStills>,
 			Arc::clone(&last_frame),
 			reporter_named(mqtt, "cam-preview-empty"),
-			10,
+			Duration::from_millis(10),
 			rx,
 			true,
 			cancel,
@@ -1782,7 +1801,7 @@ mod tests {
 			"cam-bt".to_string(),
 			driver,
 			reporter_named(mqtt, "cam-bt"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 			Arc::new(AtomicBool::new(false)),
 		));
@@ -1812,7 +1831,7 @@ mod tests {
 			"cam-ft".to_string(),
 			driver,
 			reporter_named(mqtt, "cam-ft"),
-			20,
+			Duration::from_millis(20),
 			cancel.clone(),
 		));
 		// Advance past the first tick (20 ms) plus the 10 s per-tick timeout.

@@ -57,7 +57,7 @@ fn cache() -> &'static Mutex<HashMap<(IpAddr, IpAddr), IpAddr>> {
 /// The fallback path emits a `tracing::warn!` so a misconfigured
 /// host (no route to peer, IPv6-only host receiving IPv4 packet,
 /// ENETUNREACH, etc.) doesn't silently advertise loopback to a real
-/// LAN camera — pre-fix this was diagnosable only by packet capture.
+/// LAN camera — without it this was diagnosable only by packet capture.
 pub fn advertise_ip(bind: IpAddr, peer: SocketAddr) -> IpAddr {
 	if !bind.is_unspecified() {
 		return bind;

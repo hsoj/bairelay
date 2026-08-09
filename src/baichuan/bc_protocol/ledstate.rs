@@ -32,7 +32,7 @@ impl BcCamera {
 		};
 
 		sub_get.send(get).await?;
-		let msg = sub_get.recv().await?;
+		let mut msg = sub_get.recv().await?;
 		if msg.meta.response_code != 200 {
 			return Err(Error::CameraServiceUnavailable {
 				id: msg.meta.msg_id,
@@ -41,20 +41,18 @@ impl BcCamera {
 		}
 
 		if let BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				led_state: Some(ledstate),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) = msg.body
+		}) = &mut msg.body
 		{
-			Ok(ledstate)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "Expected LEDState xml but it was not received",
-			})
+			if let Some(ledstate) = xml.led_state.take() {
+				return Ok(ledstate);
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "Expected LEDState xml but it was not received",
+		})
 	}
 
 	/// Set the led lights using the [LedState] xml
@@ -82,10 +80,10 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					led_state: Some(led_state),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 

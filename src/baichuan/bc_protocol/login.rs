@@ -160,15 +160,15 @@ impl BcCamera {
 			// `sigV3` / `authLogin` / `getAccesskey`). Empty on older
 			// firmware. Drives the camera-local authLogin branch below.
 			let auth_types: Vec<String>;
-			match &legacy_reply.body {
+			let encryption_offer = match &legacy_reply.body {
 				BcBody::ModernMsg(ModernMsg {
-					payload:
-						Some(BcPayloads::BcXml(BcXml {
-							encryption: Some(encryption),
-							..
-						})),
+					payload: Some(BcPayloads::BcXml(xml)),
 					..
-				}) => {
+				}) => xml.encryption.as_ref(),
+				_ => None,
+			};
+			match encryption_offer {
+				Some(encryption) => {
 					nonce = encryption.nonce.clone();
 					auth_types = encryption
 						.auth_type_list
@@ -190,7 +190,7 @@ impl BcCamera {
 						_ => None,
 					};
 				}
-				_ => {
+				None => {
 					return Err(Error::UnintelligibleReply {
 						reply: std::sync::Arc::new(legacy_reply),
 						why: "Expected an Encryption message back",
@@ -304,7 +304,7 @@ impl BcCamera {
 					);
 				}
 				sub_login.send(modern_login).await?;
-				let modern_reply = sub_login.recv().await?;
+				let mut modern_reply = sub_login.recv().await?;
 				if modern_reply.meta.response_code != 200 {
 					tracing::warn!(
 						"login rejected: camera replied response_code={} to the modern login",
@@ -320,19 +320,11 @@ impl BcCamera {
 					return Err(Error::CameraLoginFail);
 				}
 
-				match modern_reply.body {
+				let taken_info = match &mut modern_reply.body {
 					BcBody::ModernMsg(ModernMsg {
-						payload:
-							Some(BcPayloads::BcXml(BcXml {
-								device_info: Some(info),
-								..
-							})),
+						payload: Some(BcPayloads::BcXml(xml)),
 						..
-					}) => {
-						// Login succeeded!
-						self.logged_in.store(true, Ordering::Relaxed);
-						device_info = info;
-					}
+					}) => xml.device_info.take(),
 					BcBody::ModernMsg(ModernMsg {
 						extension: None,
 						payload: None,
@@ -342,12 +334,17 @@ impl BcCamera {
 						);
 						return Err(Error::AuthFailed);
 					}
-					other => {
+					_ => None,
+				};
+				match taken_info {
+					Some(info) => {
+						// Login succeeded!
+						self.logged_in.store(true, Ordering::Relaxed);
+						device_info = info;
+					}
+					None => {
 						return Err(Error::UnintelligibleReply {
-							reply: std::sync::Arc::new(Bc {
-								meta: modern_reply.meta,
-								body: other,
-							}),
+							reply: std::sync::Arc::new(modern_reply),
 							why: "Expected a DeviceInfo message back from login",
 						})
 					}
@@ -479,7 +476,7 @@ impl BcCamera {
 		tracing::info!("sigV3 login: sending (nonce={nonce}, iterations={iters})");
 		tracing::debug!("sigV3 login body: {:?}", modern_login.body);
 		sub.send(modern_login).await?;
-		let reply = sub.recv().await?;
+		let mut reply = sub.recv().await?;
 		tracing::info!(
 			"sigV3 login: camera replied response_code={}",
 			reply.meta.response_code
@@ -488,27 +485,21 @@ impl BcCamera {
 			tracing::warn!("sigV3 login reject body: {:?}", reply.body);
 			return Err(Error::CameraLoginFail);
 		}
-		match reply.body {
-			BcBody::ModernMsg(ModernMsg {
-				payload:
-					Some(BcPayloads::BcXml(BcXml {
-						device_info: Some(info),
-						..
-					})),
-				..
-			}) => {
+		if let BcBody::ModernMsg(ModernMsg {
+			payload: Some(BcPayloads::BcXml(xml)),
+			..
+		}) = &mut reply.body
+		{
+			if let Some(info) = xml.device_info.take() {
 				tracing::info!("sigV3 login accepted by camera (response_code=200)");
 				self.logged_in.store(true, Ordering::Relaxed);
-				Ok(info)
+				return Ok(info);
 			}
-			other => Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(Bc {
-					meta: reply.meta,
-					body: other,
-				}),
-				why: "Expected a DeviceInfo message back from sigV3 login",
-			}),
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(reply),
+			why: "Expected a DeviceInfo message back from sigV3 login",
+		})
 	}
 
 	/// Camera-local `getAccesskey` + `authLogin` login for new-firmware
@@ -638,7 +629,7 @@ impl BcCamera {
 		tracing::info!("authLogin: sending final authLogin login");
 		tracing::debug!("authLogin: final LoginUser: {:?}", authlogin.body);
 		sub_login.send(authlogin).await?;
-		let final_reply = sub_login.recv().await?;
+		let mut final_reply = sub_login.recv().await?;
 		tracing::info!(
 			"authLogin: final reply response_code={}",
 			final_reply.meta.response_code
@@ -650,27 +641,21 @@ impl BcCamera {
 			);
 			return Err(Error::CameraLoginFail);
 		}
-		match final_reply.body {
-			BcBody::ModernMsg(ModernMsg {
-				payload:
-					Some(BcPayloads::BcXml(BcXml {
-						device_info: Some(info),
-						..
-					})),
-				..
-			}) => {
+		if let BcBody::ModernMsg(ModernMsg {
+			payload: Some(BcPayloads::BcXml(xml)),
+			..
+		}) = &mut final_reply.body
+		{
+			if let Some(info) = xml.device_info.take() {
 				tracing::info!("authLogin: login accepted by camera (response_code=200)");
 				self.logged_in.store(true, Ordering::Relaxed);
-				Ok(info)
+				return Ok(info);
 			}
-			other => Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(Bc {
-					meta: final_reply.meta,
-					body: other,
-				}),
-				why: "Expected a DeviceInfo message back from authLogin",
-			}),
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(final_reply),
+			why: "Expected a DeviceInfo message back from authLogin",
+		})
 	}
 }
 

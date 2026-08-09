@@ -80,6 +80,7 @@ impl AudioPayload {
 /// Returned by [`StreamProvider::subscribe`]. The caller drops this when
 /// the RTSP session ends — doing so drops the guard (releases the wake
 /// lock).
+#[must_use = "dropping the handle ends the subscription and releases the wake lock"]
 pub struct SubscriptionHandle {
 	/// Receiver for the fan-out broadcast of encoded frames.
 	pub frames: broadcast::Receiver<Frame>,

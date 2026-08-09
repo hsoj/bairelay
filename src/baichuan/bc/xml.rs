@@ -8,10 +8,12 @@ use indoc::indoc;
 
 /// There are two types of payloads xml and binary
 #[derive(PartialEq, Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum BcPayloads {
-	/// XML payloads are the more common ones and include payloads for camera controls
-	BcXml(BcXml),
+	/// XML payloads are the more common ones and include payloads for camera controls.
+	/// Boxed because `BcXml` is a ~4 KiB struct of every known message
+	/// field: held inline it dominates `Bc`, and every future that owns
+	/// a `Bc` across an .await blows clippy's large_futures budget.
+	BcXml(Box<BcXml>),
 	/// Binary payloads are received from the camera for streams and sent to the camera
 	/// for talk-back and firmware updates
 	Binary(Vec<u8>),
@@ -232,8 +234,8 @@ pub struct BcXml {
 impl BcXml {
 	/// Parse a BcXml payload from an arbitrary reader.
 	///
-	/// `quick_xml::de` does not expose a configurable depth cap in the
-	/// 0.36 series, but bairelay clips depth-bomb risk *upstream* via
+	/// `quick_xml::de` does not expose a configurable depth cap as of
+	/// the 0.41 series, but bairelay clips depth-bomb risk *upstream* via
 	/// `bc::de::MAX_BC_BODY_LEN` (8 MiB) — the body length is verified
 	/// in `bc_header` before the XML payload reaches this parser, so a
 	/// pathological deeply-nested input is bounded by the same byte
@@ -243,18 +245,18 @@ impl BcXml {
 	pub(crate) fn try_parse(s: impl BufRead) -> Result<Self, quick_xml::de::DeError> {
 		quick_xml::de::from_reader(s)
 	}
-	pub(crate) fn serialize<W: Write>(&self, mut w: W) -> Result<W, quick_xml::de::DeError> {
+	pub(crate) fn serialize<W: Write>(&self, mut w: W) -> Result<W, quick_xml::SeError> {
 		let mut buf: Vec<u8> = Vec::new();
 		{
 			let mut writer = quick_xml::writer::Writer::new(&mut buf);
 			// Bubble the (in practice unreachable, since the inputs are
 			// fixed string literals) error rather than `expect`ing —
-			// keeps a public serializer in `crates/core/` panic-free.
+			// keeps a public serializer panic-free.
 			writer
 				.write_event(quick_xml::events::Event::Decl(
 					quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None),
 				))
-				.map_err(quick_xml::de::DeError::from)?;
+				.map_err(quick_xml::SeError::from)?;
 			writer.write_serializable("body", &self)?;
 		}
 		// The camera firmware's TiXml parser condenses raw whitespace inside
@@ -265,7 +267,7 @@ impl BcXml {
 		// that. quick-xml emits compact XML, so the only raw newlines in `buf`
 		// are inside text values, where this re-encoding is value-preserving.
 		w.write_all(&encode_certchain_newlines(&buf))
-			.map_err(|e| quick_xml::de::DeError::Custom(e.to_string()))?;
+			.map_err(quick_xml::SeError::from)?;
 		Ok(w)
 	}
 }
@@ -304,16 +306,16 @@ impl Extension {
 	pub(crate) fn try_parse(s: impl BufRead) -> Result<Self, quick_xml::de::DeError> {
 		quick_xml::de::from_reader(s)
 	}
-	pub(crate) fn serialize<W: Write>(&self, mut w: W) -> Result<W, quick_xml::de::DeError> {
+	pub(crate) fn serialize<W: Write>(&self, mut w: W) -> Result<W, quick_xml::SeError> {
 		let mut writer = quick_xml::writer::Writer::new(&mut w);
 		// Bubble the (in practice unreachable, since the inputs are
 		// fixed string literals) error rather than `expect`ing —
-		// keeps a public serializer in `crates/core/` panic-free.
+		// keeps a public serializer panic-free.
 		writer
 			.write_event(quick_xml::events::Event::Decl(
 				quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None),
 			))
-			.map_err(quick_xml::de::DeError::from)?;
+			.map_err(quick_xml::SeError::from)?;
 		writer.write_serializable("Extension", &self)?;
 		Ok(w)
 	}
@@ -2556,7 +2558,7 @@ fn test_binary_deser() {
 #[test]
 fn test_enc3_extension() {
 	let sample = indoc!(
-		r#"<?xml version="1.0\" encoding="UTF-8" ?>
+		r#"<?xml version="1.0" encoding="UTF-8" ?>
         <Extension version="1.1">
         <encryptLen>1024</encryptLen>
         <binaryData>1</binaryData>

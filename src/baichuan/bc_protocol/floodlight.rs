@@ -25,17 +25,15 @@ impl BcCamera {
 							},
 						body:
 							BcBody::ModernMsg(ModernMsg {
-								payload:
-									Some(BcPayloads::BcXml(BcXml {
-										floodlight_status_list: Some(list),
-										..
-									})),
+								payload: Some(BcPayloads::BcXml(xml)),
 								..
 							}),
 					} = bc
 					{
-						let send_this: FloodlightStatusList = list.clone();
-						let _ = tx.send(send_this).await;
+						if let Some(list) = &xml.floodlight_status_list {
+							let send_this: FloodlightStatusList = list.clone();
+							let _ = tx.send(send_this).await;
+						}
 					}
 					None
 				})
@@ -68,7 +66,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					floodlight_manual: Some(FloodlightManual {
 						version: "1".to_string(),
 						channel_id: self.channel_id,
@@ -79,7 +77,7 @@ impl BcCamera {
 						duration,
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 
@@ -117,7 +115,7 @@ impl BcCamera {
 		};
 
 		sub_get.send(get).await?;
-		let msg = sub_get.recv().await?;
+		let mut msg = sub_get.recv().await?;
 		if msg.meta.response_code != 200 {
 			return Err(Error::CameraServiceUnavailable {
 				id: msg.meta.msg_id,
@@ -126,20 +124,18 @@ impl BcCamera {
 		}
 
 		if let BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				floodlight_task: Some(xml),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) = msg.body
+		}) = &mut msg.body
 		{
-			Ok(xml)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "Expected FloodlightTask xml but it was not received",
-			})
+			if let Some(xml) = xml.floodlight_task.take() {
+				return Ok(xml);
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "Expected FloodlightTask xml but it was not received",
+		})
 	}
 
 	/// Set the Flood Light tasks XML
@@ -163,10 +159,10 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					floodlight_task: Some(new_xml),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 

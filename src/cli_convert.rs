@@ -22,12 +22,17 @@ pub fn should_emit_ansi(stderr_is_tty: bool, no_color_set: bool) -> bool {
 	stderr_is_tty && !no_color_set
 }
 
-/// Translate a `-v` count into a `RUST_LOG` directive. `RUST_LOG`
-/// always wins if set in the environment (explicit beats implicit —
-/// operator-visible).
-pub fn verbosity_env_filter(verbose: u8) -> EnvFilter {
-	if let Ok(explicit) = EnvFilter::try_from_default_env() {
-		return explicit;
+/// Translate a `-v` count into a `RUST_LOG` directive. An explicit
+/// `RUST_LOG` value always wins if it parses (explicit beats implicit —
+/// operator-visible). Takes the value as a parameter rather than
+/// reading the environment so tests never mutate process-global env
+/// (`set_var` is UB under parallel test threads); `main.rs` supplies
+/// the live `RUST_LOG`.
+pub fn verbosity_env_filter(verbose: u8, rust_log: Option<&str>) -> EnvFilter {
+	if let Some(explicit) = rust_log {
+		if let Ok(filter) = EnvFilter::try_new(explicit) {
+			return filter;
+		}
 	}
 	let directive = match verbose {
 		0 => "warn,bairelay=info,rumqttc=warn",
@@ -348,23 +353,24 @@ mod tests {
 
 	#[test]
 	fn verbosity_env_filter_maps_each_level() {
-		// Make sure RUST_LOG isn't set in the test env so the
-		// implicit mapping path runs (don't touch global env here —
-		// we just verify the fn doesn't panic and builds an EnvFilter
-		// for each level).
-		// SAFETY (single-threaded test, scoped flip): ensure the
-		// explicit env-var branch is not taken.
-		let previous = std::env::var("RUST_LOG").ok();
-		unsafe {
-			std::env::remove_var("RUST_LOG");
-		}
-		for v in [0u8, 1, 2, 3, 255] {
-			let _f = verbosity_env_filter(v);
-		}
-		if let Some(v) = previous {
-			unsafe {
-				std::env::set_var("RUST_LOG", v);
-			}
+		// No explicit RUST_LOG → the implicit mapping runs. The filter
+		// has no readable directive list, so assert via its Display,
+		// which orders per-target directives first and the default
+		// level last.
+		assert_eq!(
+			verbosity_env_filter(0, None).to_string(),
+			"bairelay=info,rumqttc=warn,warn"
+		);
+		assert_eq!(
+			verbosity_env_filter(1, None).to_string(),
+			"bairelay=debug,info"
+		);
+		assert_eq!(
+			verbosity_env_filter(2, None).to_string(),
+			"bairelay=trace,baichuan=debug,debug"
+		);
+		for v in [3u8, 255] {
+			assert_eq!(verbosity_env_filter(v, None).to_string(), "trace");
 		}
 	}
 
@@ -1011,21 +1017,15 @@ mod tests {
 
 	#[test]
 	fn verbosity_honours_explicit_rust_log() {
-		// Force the explicit branch by setting RUST_LOG.
-		let previous = std::env::var("RUST_LOG").ok();
-		unsafe {
-			std::env::set_var("RUST_LOG", "warn");
-		}
-		let _ = verbosity_env_filter(0);
-		if let Some(v) = previous {
-			unsafe {
-				std::env::set_var("RUST_LOG", v);
-			}
-		} else {
-			unsafe {
-				std::env::remove_var("RUST_LOG");
-			}
-		}
+		assert_eq!(verbosity_env_filter(0, Some("warn")).to_string(), "warn");
+	}
+
+	#[test]
+	fn verbosity_falls_back_when_explicit_rust_log_is_invalid() {
+		assert_eq!(
+			verbosity_env_filter(0, Some("not[a directive")).to_string(),
+			"bairelay=info,rumqttc=warn,warn"
+		);
 	}
 
 	#[test]

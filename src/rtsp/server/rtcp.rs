@@ -2,7 +2,7 @@
 //!
 //! Sender Reports carry an NTP timestamp + RTP timestamp correspondence
 //! that lets receivers synchronise media and compute drift. **Periodic
-//! SR is intentionally disabled in production** (Phase 3D — every SR
+//! SR is intentionally disabled in production** (every SR
 //! receipt re-anchored mpv/ffmpeg's decode clock and surfaced as a
 //! brief A-V hitch every `SR_INTERVAL`). Receivers fall back to
 //! RTP-arrival-time sync, which at our sub-second live-camera latency
@@ -24,7 +24,7 @@
 //! one frame period (≤ 64 ms for AAC-LC at 16 kHz). ffmpeg uses the
 //! SR's (NTP, RTP) pair to calibrate its decode clock; inconsistent
 //! pairs surface as `non monotonically increasing dts` warnings every SR
-//! interval. The post-Phase-2E fix takes a different tack: the session
+//! interval. The fix here takes a different tack: the session
 //! task records `last_rtp_ts` alongside a monotonic `Instant`, and at
 //! SR fire time extrapolates forward to "now" using the track's clock
 //! rate — so the SR reports the (NTP, RTP) pair that would correspond

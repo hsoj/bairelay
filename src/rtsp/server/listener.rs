@@ -245,6 +245,7 @@ mod tests {
 	async fn serve_with_listener_accepts_prebound_socket() {
 		// Pre-bind on an ephemeral port — exactly the pattern the binary
 		// uses to surface bind errors synchronously at startup.
+		crate::log_capture::install();
 		let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
 		let addr = listener.local_addr().unwrap();
 		let cfg = ServerConfig {
@@ -276,6 +277,9 @@ mod tests {
 			.expect("task joined within deadline")
 			.expect("task panic-free");
 		assert!(res.is_ok(), "graceful cancel must return Ok, got {res:?}");
+		// Live-verify marker: manual-verify.sh blocks on this exact
+		// string before starting its RTSP stages.
+		crate::log_capture::assert_marker("RTSP server listening", &addr.to_string());
 	}
 
 	#[tokio::test]

@@ -33,7 +33,7 @@ impl BcCamera {
 					channel_id: Some(self.channel_id),
 					..Default::default()
 				}),
-				payload: Some(BcPayloads::BcXml(BcXml {
+				payload: Some(BcPayloads::BcXml(Box::new(BcXml {
 					snap: Some(Snap {
 						version: "1.1".to_string(),
 						channel_id: self.channel_id,
@@ -44,12 +44,12 @@ impl BcCamera {
 						..Default::default()
 					}),
 					..Default::default()
-				})),
+				}))),
 			}),
 		};
 
 		sub_get.send(get).await?;
-		let msg = sub_get.recv().await?;
+		let mut msg = sub_get.recv().await?;
 		if msg.meta.response_code != 200 {
 			return Err(Error::CameraServiceUnavailable {
 				id: msg.meta.msg_id,
@@ -57,20 +57,21 @@ impl BcCamera {
 			});
 		}
 
-		if let BcBody::ModernMsg(ModernMsg {
-			payload:
-				Some(BcPayloads::BcXml(BcXml {
-					snap:
-						Some(Snap {
-							file_name: Some(filename),
-							picture_size: Some(expected_size),
-							..
-						}),
+		let snap_reply = match &mut msg.body {
+			BcBody::ModernMsg(ModernMsg {
+				payload: Some(BcPayloads::BcXml(xml)),
+				..
+			}) => match xml.snap.take() {
+				Some(Snap {
+					file_name: Some(filename),
+					picture_size: Some(expected_size),
 					..
-				})),
-			..
-		}) = msg.body
-		{
+				}) => Some((filename, expected_size)),
+				_ => None,
+			},
+			_ => None,
+		};
+		if let Some((filename, expected_size)) = snap_reply {
 			tracing::trace!("Got snap XML {} with size {}", filename, expected_size);
 			// Messages are now sent on ID 109 but not with the same message ID
 			// preumably because the camera considers it to be a new message rather

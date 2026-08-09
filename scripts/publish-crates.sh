@@ -75,9 +75,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	fi
 fi
 
-# Version derived from the workspace manifest. All five crates inherit
-# from [workspace.package].version via `version.workspace = true`, so a
-# single read suffices.
+# Version read from [package].version in the single-crate manifest.
 read_package_version() {
 	awk '
 		/^\[package\]/ { in_section = 1; next }

@@ -2,7 +2,7 @@
 //!
 //! //!
 //! Drives `BcMedia::deserialize` against every `.raw` capture under
-//! `crates/core/src/bcmedia/samples/` (left in place for test-only
+//! `src/baichuan/bcmedia/samples/` (left in place for test-only
 //! use, not a pub re-export), asserts:
 //!   - The parser consumes every byte (or returns a stable incomplete
 //!     tail — empty input after the last recognised frame).

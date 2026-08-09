@@ -6,7 +6,7 @@
 //! separate pair of async tests drive `publish` / `unpublish` to
 //! confirm the same topic set lands on an MQTT client. The
 //! `compute_payloads` seam is deliberately public to keep the test
-//! path allocation-free — see Task 11.
+//! path allocation-free.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -353,7 +353,7 @@ mod tests {
 		// non-functional clone from the broker-less test harness
 		// would be wasteful. Instead, wrap a throwaway rumqttc
 		// AsyncClient that we never drive: `compute_payloads` is
-		// pure so this never gets hit. See Task 11 design notes.
+		// pure so this never gets hit.
 		let (client, _event_loop) = rumqttc::AsyncClient::new(
 			rumqttc::MqttOptions::new("discovery-unit-test", "127.0.0.1", 1883),
 			16,

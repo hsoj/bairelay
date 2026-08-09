@@ -1563,7 +1563,7 @@ mod tests {
 		// Regression for the udp_flow_state fuzz target's first crash
 		// (OOM): a hostile peer sends one Data packet with packet_id ≫
 		// packets_want (e.g. 0xCA01_0000) after a normal in-order
-		// drain. The pre-fix `build_send_ack` looped from packets_want
+		// drain. An earlier `build_send_ack` looped from packets_want
 		// to that id allocating one byte per index — multi-GiB bitmap.
 		// The cap bounds it at 4× REORDER_CAP regardless of how far
 		// the max is from packets_want.

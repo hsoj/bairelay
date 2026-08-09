@@ -1328,10 +1328,10 @@ fn validate_rejects_nan_pause_timeout() {
 	assert!(err.contains("pause.timeout"), "error: {err}");
 }
 
-// ── warn_idle_timeout_below_prune_floor runs without panicking ──────
+// ── warn_idle_timeout_below_prune_floor returns the clamp warning ───
 
 #[test]
-fn warn_idle_timeout_below_prune_floor_runs_for_clamped_camera() {
+fn warn_idle_timeout_below_prune_floor_reports_clamped_camera() {
 	use bairelay::config::warn_idle_timeout_below_prune_floor;
 	let mut cfg = Config {
 		stream_prune_grace_secs: 30,
@@ -1339,9 +1339,10 @@ fn warn_idle_timeout_below_prune_floor_runs_for_clamped_camera() {
 		..Default::default()
 	};
 	cfg.cameras[0].idle_disconnect_timeout_secs = Some(5.0);
-	// Branch where a warning is emitted: configured < prune_grace.
-	// Output isn't captured here; we just exercise the path.
-	warn_idle_timeout_below_prune_floor(&cfg);
+	let warnings = warn_idle_timeout_below_prune_floor(&cfg);
+	assert_eq!(warnings.len(), 1);
+	assert_eq!(warnings[0].camera.as_deref(), Some("cam-clamp"));
+	assert!(warnings[0].message.contains("clamped at runtime to 45s"));
 }
 
 #[test]
@@ -1352,8 +1353,8 @@ fn warn_idle_timeout_below_prune_floor_silent_when_above_prune() {
 		cameras: vec![test_helpers::minimal_camera_config("cam-ok")],
 		..Default::default()
 	};
-	// Default cam → 45 s timeout > 30 s prune. No-op branch.
-	warn_idle_timeout_below_prune_floor(&cfg);
+	// Default cam → 45 s timeout > 30 s prune.
+	assert!(warn_idle_timeout_below_prune_floor(&cfg).is_empty());
 }
 
 // ── warn_users_without_tls covers both branches ─────────────────────
@@ -1370,7 +1371,10 @@ fn warn_users_without_tls_fires_for_plaintext_users() {
 		..Default::default()
 	};
 	// Warning branch: users configured, no TLS listener.
-	warn_users_without_tls(&cfg);
+	let warnings = warn_users_without_tls(&cfg);
+	assert_eq!(warnings.len(), 1);
+	assert!(warnings[0].camera.is_none());
+	assert!(warnings[0].message.contains("Digest (MD5)"));
 }
 
 #[test]
@@ -1384,12 +1388,12 @@ fn warn_users_without_tls_silent_with_certificate_or_no_users() {
 		certificate: Some("/tmp/cert.pem".into()),
 		..Default::default()
 	};
-	warn_users_without_tls(&with_tls);
+	assert!(warn_users_without_tls(&with_tls).is_empty());
 	let no_users = Config::default();
-	warn_users_without_tls(&no_users);
+	assert!(warn_users_without_tls(&no_users).is_empty());
 }
 
-// ── warn_deprecated_pause_fields runs without panicking ────
+// ── warn_deprecated_pause_fields returns one warning per field ────
 
 #[test]
 fn warn_deprecated_pause_fields_exercises_every_compat_field() {
@@ -1405,9 +1409,17 @@ fn warn_deprecated_pause_fields_exercises_every_compat_field() {
 	p.motion_timeout = Some(2.5);
 	p.mode = Some("still".into());
 	p.timeout = Some(45.0);
-	// Runs without panicking; tracing output isn't captured here but the
-	// function executes every branch when all fields are set.
-	warn_deprecated_pause_fields(&cfg);
+	let warnings = warn_deprecated_pause_fields(&cfg);
+	assert_eq!(
+		warnings.len(),
+		6,
+		"one warning per deprecated field: {warnings:#?}"
+	);
+	assert!(warnings.iter().all(|w| w.camera.as_deref() == Some("cam1")));
+	// The unshadowed timeout maps to idle_disconnect_timeout_secs.
+	assert!(warnings
+		.iter()
+		.any(|w| w.message.contains("mapped to idle_disconnect_timeout_secs")));
 }
 
 #[test]
@@ -1420,7 +1432,11 @@ fn warn_deprecated_pause_fields_flags_shadowed_timeout() {
 	// Both set: the warn path reports the shadow-by-override case.
 	cfg.cameras[0].idle_disconnect_timeout_secs = Some(60.0);
 	cfg.cameras[0].pause.timeout = Some(10.0);
-	warn_deprecated_pause_fields(&cfg);
+	let warnings = warn_deprecated_pause_fields(&cfg);
+	assert_eq!(warnings.len(), 1);
+	assert!(warnings[0]
+		.message
+		.contains("overridden by idle_disconnect_timeout_secs"));
 }
 
 #[test]
@@ -1430,8 +1446,8 @@ fn warn_deprecated_pause_fields_noop_when_clean() {
 		cameras: vec![test_helpers::minimal_camera_config("cam1")],
 		..Default::default()
 	};
-	// No compat fields set → function iterates and does nothing.
-	warn_deprecated_pause_fields(&cfg);
+	// No compat fields set → no warnings.
+	assert!(warn_deprecated_pause_fields(&cfg).is_empty());
 }
 
 // ── Layer 2: TOML top-level key placement scan ───────────────────────

@@ -23,22 +23,23 @@ That's it for the read-only contributor experience. No GStreamer, no OpenSSL, no
 
 Linux and macOS are first-class platforms; both are exercised in CI on every push. Windows is build-only — no CI, no live-verify, at least at the moment; contributions welcome.
 
-## Workspace shape
+## Repository shape
+
+One crate — no workspace. Modules are grouped by subject under `src/`:
 
 ```
 bairelay/
-├── src/                # binary: CLI, config, orchestrator, lifecycle
-├── crates/
-│   ├── core/           # bairelay_neolink_core: Baichuan protocol (vendored)
-│   ├── rtsp/           # bairelay_rtsp: pure-Rust RTSP server + RTP packetisers
-│   ├── mqtt/           # bairelay_mqtt: MQTT bridge + HA discovery
-│   └── wake-server/    # bairelay_wake_server: local BcUdp wake server
-├── fuzz/               # cargo-fuzz harness (excluded from the workspace)
+├── src/                # binary + library: CLI, config, orchestrator, lifecycle
+│   ├── baichuan/       # vendored Baichuan protocol (derived from neolink_core)
+│   ├── rtsp/           # pure-Rust RTSP server + RTP packetisers
+│   ├── mqtt/           # MQTT bridge + HA discovery
+│   └── wake_server/    # local BcUdp wake server
+├── fuzz/               # cargo-fuzz harness (separate out-of-tree project)
 ├── docs/               # specification, architecture, build history, etc.
 └── tests/              # integration tests, fixtures, scripts
 ```
 
-`docs/architecture.md` has the full crate-responsibility breakdown and the runtime patterns (per-camera task tree, wake lock, watchdog, per-kind RTSP dispatch).
+`docs/architecture.md` has the full module-responsibility breakdown and the runtime patterns (per-camera task tree, wake lock, watchdog, per-kind RTSP dispatch).
 
 ## What has to pass before a PR merges
 

@@ -14,7 +14,7 @@ impl BcCamera {
 	/// gating once gates the whole module. Captured Argus XML
 	/// (`tests/fixtures/<cam>.xml`) advertises `network/port_rw`,
 	/// which is the unified key all six service-port flavours share.
-	async fn set_services(&self, bcxml: BcXml) -> Result<()> {
+	async fn set_services(&self, bcxml: Box<BcXml>) -> Result<()> {
 		self.has_ability_rw("port").await?;
 		let connection = self.get_connection();
 		let msg_num = self.new_message_num();
@@ -51,7 +51,7 @@ impl BcCamera {
 	/// all six service-port flavours share. Note: `set_*` paths call
 	/// `get_services` first to read-modify-write — they trigger this
 	/// `_ro` gate before the stricter `_rw` gate in `set_services`.
-	async fn get_services(&self) -> Result<BcXml> {
+	async fn get_services(&self) -> Result<Box<BcXml>> {
 		self.has_ability_ro("port").await?;
 		let connection = self.get_connection();
 		let mut reties: usize = 0;
@@ -119,12 +119,12 @@ impl BcCamera {
 		if let BcXml {
 			server_port: Some(xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			Ok(xml)
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected ServerPort xml but it was not received",
 			})
 		}
@@ -136,7 +136,7 @@ impl BcCamera {
 		if let BcXml {
 			server_port: Some(mut xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			if let Some(enabled) = set_on {
 				xml.enable = Some({
@@ -150,14 +150,14 @@ impl BcCamera {
 			if let Some(port) = set_port {
 				xml.port = port;
 			}
-			self.set_services(BcXml {
+			self.set_services(Box::new(BcXml {
 				server_port: Some(xml),
 				..Default::default()
-			})
+			}))
 			.await
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected ServerPort xml but it was not received",
 			})
 		}
@@ -169,12 +169,12 @@ impl BcCamera {
 		if let BcXml {
 			http_port: Some(xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			Ok(xml)
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected HttpPort xml but it was not received",
 			})
 		}
@@ -186,7 +186,7 @@ impl BcCamera {
 		if let BcXml {
 			http_port: Some(mut xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			if let Some(enabled) = set_on {
 				xml.enable = Some({
@@ -200,14 +200,14 @@ impl BcCamera {
 			if let Some(port) = set_port {
 				xml.port = port;
 			}
-			self.set_services(BcXml {
+			self.set_services(Box::new(BcXml {
 				http_port: Some(xml),
 				..Default::default()
-			})
+			}))
 			.await
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected HttpPort xml but it was not received",
 			})
 		}
@@ -219,12 +219,12 @@ impl BcCamera {
 		if let BcXml {
 			https_port: Some(xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			Ok(xml)
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected HttpsPort xml but it was not received",
 			})
 		}
@@ -236,7 +236,7 @@ impl BcCamera {
 		if let BcXml {
 			https_port: Some(mut xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			if let Some(enabled) = set_on {
 				xml.enable = Some({
@@ -250,14 +250,14 @@ impl BcCamera {
 			if let Some(port) = set_port {
 				xml.port = port;
 			}
-			self.set_services(BcXml {
+			self.set_services(Box::new(BcXml {
 				https_port: Some(xml),
 				..Default::default()
-			})
+			}))
 			.await
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected HttpsPort xml but it was not received",
 			})
 		}
@@ -269,12 +269,12 @@ impl BcCamera {
 		if let BcXml {
 			rtsp_port: Some(xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			Ok(xml)
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected RtspPort xml but it was not received",
 			})
 		}
@@ -286,7 +286,7 @@ impl BcCamera {
 		if let BcXml {
 			rtsp_port: Some(mut xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			if let Some(enabled) = set_on {
 				xml.enable = Some({
@@ -300,14 +300,14 @@ impl BcCamera {
 			if let Some(port) = set_port {
 				xml.port = port;
 			}
-			self.set_services(BcXml {
+			self.set_services(Box::new(BcXml {
 				rtsp_port: Some(xml),
 				..Default::default()
-			})
+			}))
 			.await
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected RtspPort xml but it was not received",
 			})
 		}
@@ -319,12 +319,12 @@ impl BcCamera {
 		if let BcXml {
 			rtmp_port: Some(xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			Ok(xml)
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected RtmpPort xml but it was not received",
 			})
 		}
@@ -336,7 +336,7 @@ impl BcCamera {
 		if let BcXml {
 			rtmp_port: Some(mut xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			if let Some(enabled) = set_on {
 				xml.enable = Some({
@@ -350,14 +350,14 @@ impl BcCamera {
 			if let Some(port) = set_port {
 				xml.port = port;
 			}
-			self.set_services(BcXml {
+			self.set_services(Box::new(BcXml {
 				rtmp_port: Some(xml),
 				..Default::default()
-			})
+			}))
 			.await
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected RtmpPort xml but it was not received",
 			})
 		}
@@ -369,12 +369,12 @@ impl BcCamera {
 		if let BcXml {
 			onvif_port: Some(xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			Ok(xml)
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected OnvifPort xml but it was not received",
 			})
 		}
@@ -386,7 +386,7 @@ impl BcCamera {
 		if let BcXml {
 			onvif_port: Some(mut xml),
 			..
-		} = bcxml
+		} = *bcxml
 		{
 			if let Some(enabled) = set_on {
 				xml.enable = Some({
@@ -400,14 +400,14 @@ impl BcCamera {
 			if let Some(port) = set_port {
 				xml.port = port;
 			}
-			self.set_services(BcXml {
+			self.set_services(Box::new(BcXml {
 				onvif_port: Some(xml),
 				..Default::default()
-			})
+			}))
 			.await
 		} else {
 			Err(Error::UnintelligibleXml {
-				reply: std::sync::Arc::new(bcxml),
+				reply: std::sync::Arc::new(*bcxml),
 				why: "Expected OnvifPort xml but it was not received",
 			})
 		}

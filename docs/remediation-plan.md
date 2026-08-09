@@ -212,16 +212,14 @@ inverting the stated layering rule and making `Other(&'static str)` a
 stringly-typed escape hatch. A binary-local `DispatchError` wrapping
 `core::Error` restores the seam.
 
-### P3-3. `CameraDriver` is a 40-method trait · L
+### P3-3. Camera trait width · L — **RESOLVED by S4-2**
 
-`src/baichuan/bc_protocol/camera_driver.rs:28`. Deliberate — it mirrors
-`BcCamera` so the forwarding blanket impl reads one line per method, and it does
-buy the test seam. But no consumer needs all 40, and every fake pays for all of
-them.
-
-Splitting along axes the pollers already imply (`MotionSource`, `BatterySource`,
-`PtzControl`, `LightControl`) would shrink `FakeCameraBuilder` and let each
-poller declare what it touches.
+Historical finding: the camera seam (then `CameraDriver`, later a 33-method
+`trait Camera`) was too wide for any single consumer. Resolved by the
+eight-flat-role-trait split in `src/camera.rs` (`Session`, `Video`,
+`Stills`, `Events`, `Power`, `Lighting`, `Ptz`, `DeviceAdmin`);
+consumers now take the narrowest role, per-role fakes exist in
+`src/fake_camera/roles.rs`.
 
 **Wants an explicit decision either way, recorded in
 `docs/implementation.md`.** Keeping the fat trait is a defensible answer;

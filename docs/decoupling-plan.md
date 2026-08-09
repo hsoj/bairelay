@@ -43,7 +43,7 @@ The port *direction* was corrected; the port *width* was carried over. Both sour
 
 # Tier 1 — reshapes a boundary
 
-## D1. `trait Camera` is 33 methods; no consumer needs more than 15
+## D1. `trait Camera` width — **RESOLVED by S4-2** (eight flat role traits; kept for the measurement record)
 
 `src/camera.rs:63`. Measured usage of distinct `Camera` methods per consumer:
 
@@ -260,7 +260,7 @@ For any PR touching the camera port, the stream path, or the protocol crate:
 
 ## Doc maintenance riding along
 
-- `docs/remediation-plan.md` P3-3: strike the `CameraDriver` naming, keep the width complaint, re-point at `trait Camera` (33 methods), link D1.
-- `docs/remediation-plan.md` P3-6: `stream_source.rs` is 5220 lines (2382 production), `camera.rs` 3245 (1561 production) — figures are stale.
-- `docs/code-paths.md` §12: the seam diagram still shows `CameraDriver` in red as "the one seam under active question." Replace with the role traits once D1 lands; until then, rename and keep the red.
-- Both docs still use `crates/core`, `crates/rtsp` paths from before the single-crate merge.
+Done: P3-3 and §12 now describe the shipped role-trait seam, and the
+`crates/` paths were rewritten for the single-crate tree. File sizes
+quoted anywhere in these docs are point-in-time measurements — re-measure
+before relying on them.

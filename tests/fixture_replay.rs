@@ -959,7 +959,7 @@ async fn fake_provider_replays_real_fixtures_if_present() {
 // what makes these regressions unit-testable.
 
 /// Duplicated (with a small signature tweak) from
-/// `crates/rtsp/tests/rtsp_integration_test.rs`. Integration-test crates
+/// `the RTSP integration tests`. Integration-test crates
 /// cannot share helpers across binaries, so the helper travels with the
 /// test. See the source docstring there for the bind-then-drop-then-rebind
 /// retry rationale.
@@ -1234,7 +1234,7 @@ impl WireReader {
 /// Hand-rolled RTP header decoder. Extracts just the fields these tests
 /// need — RFC 3550 §5.1 packet format, first 12 bytes are the fixed
 /// header. Intentionally skips CSRC and extension handling; the server
-/// never emits either (see `crates/rtsp/src/rtp.rs`).
+/// never emits either (see `src/rtsp/rtp.rs`).
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // `ssrc` is decoded for completeness / future-proofing
 					// even though the current assertions don't inspect it.
@@ -1295,7 +1295,7 @@ fn decode_rtp_header(pkt: &[u8]) -> Option<RtpHeader> {
 ///   `Start` + middles + `End` to get the full Annex-B NAL.
 ///
 /// AP mode (type 48) is not emitted by the current server (see
-/// `crates/rtsp/src/server/packetizer.rs`), so we don't handle it.
+/// `src/rtsp/server/packetizer.rs`), so we don't handle it.
 #[derive(Debug)]
 #[allow(dead_code)] // Body bytes are parsed for completeness; the assertions
 					// in this file only inspect NAL types, not bodies.
@@ -1552,7 +1552,7 @@ async fn fixture_replay_tcp_interleaved_e2e_synthetic_h265() {
 
 	// ── Collect interleaved RTP/RTCP ─────────────────────────────
 	// Budget 7 seconds to observe at least one RTCP SR (SR_INTERVAL
-	// is 5 s per crates/rtsp/src/server/rtcp.rs; we add slack for the
+	// is 5 s per src/rtsp/server/rtcp.rs; we add slack for the
 	// first-tick delay after SETUP). The fixture plays back in
 	// real time for 8 s so the session is still active when the tick
 	// fires.
@@ -1706,7 +1706,7 @@ async fn fixture_replay_tcp_interleaved_e2e_synthetic_h265() {
 	);
 
 	// RTCP SR is intentionally NOT sent by the server (see the SR-fire
-	// arm in `crates/rtsp/src/server/session_task.rs::run` for the
+	// arm in `src/rtsp/server/session_task.rs::run` for the
 	// reasoning). Assert that no RTCP traffic is interleaved on
 	// channel 1 within the 6 s budget.
 	let rtcp_frames: Vec<&Interleaved> = frames.iter().filter(|f| f.channel == 1).collect();
@@ -1792,7 +1792,7 @@ async fn multi_track_replay_aac_on_hallway_sub_fixture() {
 	// Real-time pacing (speed_factor=1.0) keeps the broadcast channel
 	// from overflowing and gives the server a natural 10 s of steady
 	// audio + video flow — plenty of wall time to observe both the
-	// ≥5 s RTCP SR tick (per crates/rtsp/src/server/rtcp.rs) and
+	// ≥5 s RTCP SR tick (per src/rtsp/server/rtcp.rs) and
 	// enough RTP packets to validate sequence monotonicity on each
 	// channel. A 10x replay would starve the first SR — the send loop
 	// would drain the replay before the timer fires.
@@ -2059,7 +2059,7 @@ async fn multi_track_replay_aac_on_hallway_sub_fixture() {
 	}
 
 	// RTCP SR is intentionally NOT sent — see the SR-fire arm in
-	// `crates/rtsp/src/server/session_task.rs::run`. mpv / ffmpeg
+	// `src/rtsp/server/session_task.rs::run`. mpv / ffmpeg
 	// re-anchor on every SR receipt, which surfaced as recurring A-V
 	// hitches every SR_INTERVAL on real hardware. Live playback now
 	// uses RTP arrival time for A-V sync.

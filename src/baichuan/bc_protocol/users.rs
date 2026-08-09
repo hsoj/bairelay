@@ -40,7 +40,7 @@ impl BcCamera {
 		};
 
 		sub_get.send(get).await?;
-		let msg = sub_get.recv().await?;
+		let mut msg = sub_get.recv().await?;
 		if msg.meta.response_code != 200 {
 			return Err(Error::CameraServiceUnavailable {
 				id: msg.meta.msg_id,
@@ -50,20 +50,18 @@ impl BcCamera {
 
 		// Valid message with response_code == 200
 		if let BcBody::ModernMsg(ModernMsg {
-			payload: Some(BcPayloads::BcXml(BcXml {
-				user_list: Some(user_list),
-				..
-			})),
+			payload: Some(BcPayloads::BcXml(xml)),
 			..
-		}) = msg.body
+		}) = &mut msg.body
 		{
-			Ok(user_list)
-		} else {
-			Err(Error::UnintelligibleReply {
-				reply: std::sync::Arc::new(msg),
-				why: "Expected ModernMsg payload with a user_list but it was not received",
-			})
+			if let Some(user_list) = xml.user_list.take() {
+				return Ok(user_list);
+			}
 		}
+		Err(Error::UnintelligibleReply {
+			reply: std::sync::Arc::new(msg),
+			why: "Expected ModernMsg payload with a user_list but it was not received",
+		})
 	}
 
 	/// Add a new user.
@@ -159,7 +157,7 @@ impl BcCamera {
 			},
 			body: BcBody::ModernMsg(ModernMsg {
 				extension: None,
-				payload: Some(BcPayloads::BcXml(bcxml)),
+				payload: Some(BcPayloads::BcXml(Box::new(bcxml))),
 			}),
 		};
 

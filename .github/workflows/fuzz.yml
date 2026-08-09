@@ -1,0 +1,47 @@
+name: fuzz smoke
+
+# 10 s/target is a smoke pass, not a campaign: it catches parser
+# regressions that panic on the first corpus-adjacent input, which is
+# exactly the failure class the eight targets guard (untrusted bytes
+# from cameras and the LAN). Scheduled rather than per-PR because the
+# nightly toolchain float is a flake source we keep off the merge gate.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-smoke:
+    name: fuzz smoke (10s/target)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      # fuzz/rust-toolchain.toml pins nightly for the sanitizer flags;
+      # rustup picks it up on cd, same no-toolchain-action rule as ci.yml.
+      - run: rustup toolchain install nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Run all targets 10s each
+        run: scripts/fuzz.sh
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: |
+            fuzz/logs/
+            fuzz/artifacts/
+          if-no-files-found: warn

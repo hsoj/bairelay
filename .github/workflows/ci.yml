@@ -64,6 +64,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup show
+      # A pinned Cargo.lock with every invocation --locked keeps a
+      # known-vulnerable version in the binary indefinitely unless an
+      # advisory feed says otherwise — this job is that feed. Pinned
+      # like tarpaulin: an unpinned tool floats and can turn CI red
+      # with no code change.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny check
+
+  msrv:
+    name: msrv (1.93)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # rust-version = "1.93" in Cargo.toml is a published claim; build it
+    # or delete it. RUSTFLAGS is cleared because -D warnings on an older
+    # compiler fails on lints that differ across releases — this job
+    # verifies "compiles on MSRV", nothing more.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install 1.93 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo +1.93 check --locked --all-targets
+
   hassio-lint:
     name: hassio lint
     runs-on: ubuntu-latest
