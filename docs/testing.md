@@ -110,11 +110,22 @@ Captures real-camera `BcMedia` streams into files the test harness can replay la
 - A working `config.toml`.
 - Disk space: ~10 MB per minute of 4K HEVC main-stream capture, less for sub or extern.
 
-### Capturing
+### Capturing with the `capture` subcommand (preferred)
 
-Pass `--dump-bcmedia <dir>` on the `rtsp` or `mqtt-rtsp` subcommand. Every `BcMedia` packet pulled by the reader task gets mirrored to `<dir>/<camera>-<stream>.bcmedia`. With the flag absent, the hot path is a single `Option::is_some()` branch and no files are touched.
+The `capture` one-shot connects to one camera, pulls its stream for a bounded window, and writes the same `<dir>/<camera>-<stream>.bcmedia` + `.meta.json` pair the daemon flag produces — no RTSP server, no MQTT, no second terminal. It exists to make reverse-engineering samples cheap: point it at a camera, get a replayable wire capture.
 
-There is **no per-capture duration flag.** Capture runs as long as the process; stop with Ctrl+C.
+```
+cargo run -- -c config.toml capture front_door \
+    --output tests/fixtures --duration 30 --stream main
+```
+
+`--stream sub|extern` selects the other streams; `--duration` caps at 600 s (a fixture is a sample, not surveillance footage). Zero packets in the window is reported as an error, never an empty file. A stream error mid-window keeps the partial fixture — a truncated sample is still a sample.
+
+### Capturing with the daemon flag
+
+Pass `--dump-bcmedia <dir>` on the `rtsp` or `mqtt-rtsp` subcommand. Every `BcMedia` packet pulled by the reader task gets mirrored to `<dir>/<camera>-<stream>.bcmedia`. With the flag absent, the hot path is a single `Option::is_some()` branch and no files are touched. Use this instead of `capture` when you need packets produced **under real RTSP-client load** — client-driven start/stop, gap-bridging transitions, multi-subscriber fan-out — which a bare camera pull cannot reproduce.
+
+There is **no per-capture duration flag** on the daemon. Capture runs as long as the process; stop with Ctrl+C.
 
 ```
 RUST_LOG=bairelay=info cargo run -- mqtt-rtsp \

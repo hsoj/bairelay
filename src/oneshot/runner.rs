@@ -21,14 +21,20 @@ use crate::oneshot::errors::InterruptedError;
 // hang in the non-retry discovery / socket-setup paths.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(100);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
-const OP_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Connect, run `op`, log out. Honours Ctrl+C via `cancel`; on cancel
-/// we skip logout, short-circuit with `InterruptedError`, and rely on
-/// the camera to park itself via its own idle timeout once our TCP
-/// session drops.
-pub async fn run<F, T>(cfg: &CameraConfig, cancel: CancellationToken, op: F) -> Result<T>
+/// Connect, run `op` under `op_timeout`, log out. Honours Ctrl+C via
+/// `cancel`; on cancel we skip logout, short-circuit with
+/// `InterruptedError`, and rely on the camera to park itself via its
+/// own idle timeout once our TCP session drops. The budget comes from
+/// `run_support::op_budget_for` — 30 s for every command except
+/// `capture`, whose op is an operator-chosen recording window.
+pub async fn run_with_op_budget<F, T>(
+	cfg: &CameraConfig,
+	cancel: CancellationToken,
+	op_timeout: Duration,
+	op: F,
+) -> Result<T>
 where
 	F: for<'a> FnOnce(&'a dyn Camera) -> BoxFuture<'a, Result<T>>,
 {
@@ -48,7 +54,7 @@ where
 			// instead of releasing immediately on `end_session()`.
 			// Battery cams park on TCP-drop either way, but explicit
 			// logout is faster and matches the comment's intent.
-			let op_result: Result<T> = match timeout(OP_TIMEOUT, op(camera.as_ref())).await {
+			let op_result: Result<T> = match timeout(op_timeout, op(camera.as_ref())).await {
 				Ok(inner) => inner,
 				Err(_) => Err(anyhow!("operation timed out")),
 			};
@@ -66,7 +72,7 @@ mod tests {
 	/// A pre-cancelled token resolves the `cancel.cancelled()` arm
 	/// before the body ever attempts a socket connect.
 	/// Verifies the cancel branch surfaces `InterruptedError` and skips
-	/// the op/logout. This is the only run() path reachable without a
+	/// the op/logout. This is the only runner path reachable without a
 	/// real socket — the rest of `runner::run` is covered by `manual-
 	/// verify.sh` against live cameras (see `docs/testing.md`).
 	#[tokio::test]
@@ -80,14 +86,15 @@ mod tests {
 		let op_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let op_ran_inner = op_ran.clone();
 
-		let result: Result<()> = run(&cfg, cancel, move |_cam| {
-			let op_ran_inner = op_ran_inner.clone();
-			Box::pin(async move {
-				op_ran_inner.store(true, std::sync::atomic::Ordering::Relaxed);
-				Ok(())
+		let result: Result<()> =
+			run_with_op_budget(&cfg, cancel, Duration::from_secs(30), move |_cam| {
+				let op_ran_inner = op_ran_inner.clone();
+				Box::pin(async move {
+					op_ran_inner.store(true, std::sync::atomic::Ordering::Relaxed);
+					Ok(())
+				})
 			})
-		})
-		.await;
+			.await;
 
 		let err = result.expect_err("pre-cancel must error");
 		assert!(

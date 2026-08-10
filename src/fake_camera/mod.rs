@@ -598,6 +598,61 @@ impl FakeCameraBuilder {
 	}
 }
 
+/// Scripted [`crate::camera::VideoStream`] implementation shared by the
+/// stream-pulling one-shots (`snapshot --use-stream-raw`, `capture`).
+/// Feeds a fixed sequence of packets (or errors), then blocks forever —
+/// mirroring a real camera's "no more frames yet" idle state so
+/// deadline paths exercise correctly.
+pub struct MockVideoStream {
+	steps: std::collections::VecDeque<MockStep>,
+	shutdown_called: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+pub enum MockStep {
+	/// Yield Ok(Ok(BcMedia)) immediately.
+	Frame(crate::baichuan::bcmedia::model::BcMedia),
+	/// Yield Ok(Err(..)) — camera-side parse error.
+	InnerErr(crate::baichuan::Error),
+	/// Yield Err(..) — outer mpsc error.
+	OuterErr(crate::baichuan::Error),
+	/// Block forever so the deadline timeout fires.
+	Hang,
+}
+
+impl MockVideoStream {
+	pub fn new(steps: Vec<MockStep>) -> Self {
+		Self {
+			steps: steps.into(),
+			shutdown_called: Default::default(),
+		}
+	}
+}
+
+#[async_trait::async_trait]
+impl crate::baichuan::bc_protocol::VideoStream for MockVideoStream {
+	async fn get_data(
+		&mut self,
+	) -> std::result::Result<
+		std::result::Result<crate::baichuan::bcmedia::model::BcMedia, crate::baichuan::Error>,
+		crate::baichuan::Error,
+	> {
+		match self.steps.pop_front() {
+			Some(MockStep::Frame(f)) => Ok(Ok(f)),
+			Some(MockStep::InnerErr(e)) => Ok(Err(e)),
+			Some(MockStep::OuterErr(e)) => Err(e),
+			Some(MockStep::Hang) | None => {
+				std::future::pending::<()>().await;
+				unreachable!()
+			}
+		}
+	}
+	async fn shutdown(&mut self) -> std::result::Result<(), crate::baichuan::Error> {
+		self.shutdown_called
+			.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+		Ok(())
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -71,6 +71,25 @@ pub fn clone_ptz_cmd(cmd: &Option<cli::PtzCommand>) -> cli::PtzCommand {
 	}
 }
 
+/// Map a CLI-level capture stream selector onto the pair of stream
+/// vocabularies the capture path spans: the baichuan `StreamKind` the
+/// camera is asked for, and the `rtsp::url::StreamKind` that names the
+/// fixture file (`<camera>-<stream>.bcmedia`) so replay finds it.
+pub fn capture_stream_to_kinds(
+	s: cli::CaptureStream,
+) -> (
+	crate::baichuan::bc_protocol::StreamKind,
+	crate::rtsp::url::StreamKind,
+) {
+	use crate::baichuan::bc_protocol::StreamKind as Bc;
+	use crate::rtsp::url::StreamKind as Rtsp;
+	match s {
+		cli::CaptureStream::Main => (Bc::Main, Rtsp::Main),
+		cli::CaptureStream::Sub => (Bc::Sub, Rtsp::Sub),
+		cli::CaptureStream::Extern => (Bc::Extern, Rtsp::Extern),
+	}
+}
+
 /// Map a CLI-level PTZ direction onto the baichuan value.
 pub fn ptz_direction_to_core(d: cli::PtzDirection) -> crate::baichuan::bc_protocol::Direction {
 	use crate::baichuan::bc_protocol::Direction;
@@ -176,6 +195,17 @@ pub fn clone_command(cmd: &cli::Command) -> cli::Command {
 		},
 		Command::MqttRtsp { dump_bcmedia } => Command::MqttRtsp {
 			dump_bcmedia: dump_bcmedia.clone(),
+		},
+		Command::Capture {
+			common,
+			output,
+			duration,
+			stream,
+		} => Command::Capture {
+			common: clone_oneshot_args(common),
+			output: output.clone(),
+			duration: *duration,
+			stream: *stream,
 		},
 		Command::Reboot(a) => Command::Reboot(clone_oneshot_args(a)),
 		Command::Battery(a) => Command::Battery(clone_oneshot_args(a)),

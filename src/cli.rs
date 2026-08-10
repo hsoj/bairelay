@@ -183,6 +183,19 @@ pub enum UserAction {
 	Delete { name: String },
 }
 
+/// Camera stream selector for `capture`. Mirrors
+/// `baichuan::bc_protocol::StreamKind`; a CLI-side enum keeps clap
+/// derive out of the protocol module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CaptureStream {
+	/// Primary high-definition stream.
+	Main,
+	/// Lower-resolution substream.
+	Sub,
+	/// Balanced stream; camera falls back to Sub if unsupported.
+	Extern,
+}
+
 /// Arguments common to every one-shot subcommand.
 #[derive(Debug, clap::Args)]
 pub struct OneShotArgs {
@@ -211,6 +224,28 @@ pub enum Command {
 		/// streaming. See docs/testing.md for the capture playbook.
 		#[arg(long = "dump-bcmedia", value_name = "DIR")]
 		dump_bcmedia: Option<PathBuf>,
+	},
+
+	/// Record raw BcMedia packets from one camera into a `.bcmedia`
+	/// fixture file — the protocol reverse-engineering companion to the
+	/// daemon's `--dump-bcmedia` flag, without starting the RTSP server.
+	/// Output feeds `tests/fixture_replay.rs` and offline protocol
+	/// analysis (`tests/scripts/decode-bc-pcap`). See docs/testing.md
+	/// § capture playbook.
+	Capture {
+		#[command(flatten)]
+		common: OneShotArgs,
+		/// Directory for `<camera>-<stream>.bcmedia` and its
+		/// `.meta.json` sidecar (created if missing).
+		#[arg(long, value_name = "DIR")]
+		output: PathBuf,
+		/// Seconds of stream to record. Capped at 600 — a fixture is a
+		/// sample, not surveillance footage.
+		#[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=600), value_name = "SECS")]
+		duration: u64,
+		/// Which camera stream to record.
+		#[arg(long, value_enum, default_value_t = CaptureStream::Main)]
+		stream: CaptureStream,
 	},
 
 	/// Reboot one camera.
@@ -372,6 +407,7 @@ impl Cli {
 			Command::MqttRtsp { dump_bcmedia, .. } => dump_bcmedia.as_deref(),
 			Command::Mqtt
 			| Command::Reboot(_)
+			| Command::Capture { .. }
 			| Command::Snapshot { .. }
 			| Command::Battery(_)
 			| Command::Floodlight { .. }
@@ -444,7 +480,8 @@ impl Cli {
 			| Command::Version(a)
 			| Command::Siren(a)
 			| Command::Abilities(a) => Some(&a.camera),
-			Command::Snapshot { common, .. }
+			Command::Capture { common, .. }
+			| Command::Snapshot { common, .. }
 			| Command::Floodlight { common, .. }
 			| Command::Pir { common, .. }
 			| Command::StatusLight { common, .. }

@@ -31,6 +31,18 @@ pub fn cli_output_mode(cli: &Cli) -> Mode {
 	}
 }
 
+/// Per-command op budget for the one-shot runner. Every command fits
+/// the default 30 s except `capture`, whose op *is* an operator-chosen
+/// recording window — budget is the window plus connect-side headroom.
+fn op_budget_for(cmd: &crate::cli::Command) -> Duration {
+	match cmd {
+		crate::cli::Command::Capture { duration, .. } => {
+			Duration::from_secs(duration.saturating_add(15))
+		}
+		_ => Duration::from_secs(30),
+	}
+}
+
 /// Sleep for `delay` or until `cancel` fires, whichever comes first.
 /// Returns `true` if the sleep completed normally and `false` if
 /// cancellation pre-empted it. Shared by every retry / backoff path
@@ -273,7 +285,8 @@ pub async fn run_oneshot_to<W1: std::io::Write, W2: std::io::Write>(
 		// stay testable via FakeCamera.
 		let cmd = crate::cli_convert::clone_command(&cli.command);
 		let json = cli.json;
-		runner::run(&cam_cfg, cancel, move |cam| {
+		let op_budget = op_budget_for(&cmd);
+		runner::run_with_op_budget(&cam_cfg, cancel, op_budget, move |cam| {
 			async move { dispatch_oneshot(cam, &cmd, json).await }.boxed()
 		})
 		.await

@@ -19,8 +19,8 @@ use crate::cli_convert::{
 	service_name_to_kind,
 };
 use crate::oneshot::{
-	abilities, battery, floodlight, output::Outcome, pir, presets, ptz, reboot, services, set_time,
-	siren, snapshot, status_light, users, version,
+	abilities, battery, capture, floodlight, output::Outcome, pir, presets, ptz, reboot, services,
+	set_time, siren, snapshot, status_light, users, version,
 };
 
 /// Pre-flight check for `snapshot --json`: the JSON status line and
@@ -75,6 +75,23 @@ pub fn find_camera_config(
 pub async fn dispatch_oneshot(cam: &dyn Camera, cmd: &Command, json: bool) -> Result<Outcome> {
 	match cmd {
 		Command::Reboot(_) => reboot::run(cam).await,
+		Command::Capture {
+			common,
+			output,
+			duration,
+			stream,
+		} => {
+			let (bc_kind, rtsp_kind) = crate::cli_convert::capture_stream_to_kinds(*stream);
+			capture::run(
+				cam,
+				&common.camera,
+				output,
+				bc_kind,
+				rtsp_kind,
+				std::time::Duration::from_secs(*duration),
+			)
+			.await
+		}
 		Command::Battery(_) => battery::run(cam).await,
 		Command::Version(_) => version::run(cam).await,
 		Command::Siren(_) => siren::run(cam).await,

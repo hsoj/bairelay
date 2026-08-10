@@ -1,5 +1,6 @@
 pub mod abilities;
 pub mod battery;
+pub mod capture;
 pub mod classify;
 pub mod cloud_authorise;
 pub mod dispatch;

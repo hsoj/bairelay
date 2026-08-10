@@ -10,6 +10,11 @@ pub enum Mode {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
 	Reboot,
+	Capture {
+		packets: u64,
+		bytes: u64,
+		path: String,
+	},
 	Snapshot {
 		bytes: usize,
 		path: Option<String>,
@@ -133,6 +138,14 @@ pub fn format_success(mode: Mode, outcome: &Outcome) -> (String, String) {
 fn format_human(outcome: &Outcome) -> (String, String) {
 	match outcome {
 		Outcome::Reboot => (String::new(), "ok (reboot sent)\n".into()),
+		Outcome::Capture {
+			packets,
+			bytes,
+			path,
+		} => (
+			String::new(),
+			format!("ok (captured {packets} BcMedia packets, {bytes} bytes, to {path})\n"),
+		),
 		Outcome::Siren => (String::new(), "ok (siren triggered)\n".into()),
 		Outcome::Snapshot {
 			bytes,

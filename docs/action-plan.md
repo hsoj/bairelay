@@ -80,6 +80,8 @@ pub fn translate(packet: &BcMedia, state: &mut StreamTranslatorState, bridging: 
 
 **Live-verify:** on the RTSP path — lands alone, gated by `tests/scripts/manual-verify.sh`. If hardware is unavailable, say so in the PR rather than implying verification.
 
+**Fixture path (added 2026-08-09):** the `bairelay capture <cam> --output <dir>` one-shot records `.bcmedia` fixtures directly from a camera — no RTSP server, no second terminal (`docs/testing.md` § capture playbook). Run it once per camera/stream before starting S4-1 so `tests/fixture_replay.rs` is a live regression net for the refactor; the capture command itself is fully mock-tested and carries no live-verify obligation.
+
 ---
 
 # Deferred, with triggers
