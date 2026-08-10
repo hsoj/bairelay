@@ -26,6 +26,14 @@ mkdir -p "$LOG_DIR"
 
 cd "$ROOT/fuzz"
 
+# Pass the real host triple explicitly. cargo-fuzz's default --target is
+# the triple cargo-fuzz ITSELF was compiled for — a prebuilt musl-static
+# cargo-fuzz (e.g. from taiki-e/install-action in CI) therefore defaults
+# to x86_64-unknown-linux-musl, where ASan is incompatible with the
+# statically linked libc and the build fails. rustc's own host triple is
+# authoritative on every machine regardless of how cargo-fuzz was built.
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+
 if [ "$#" -gt 0 ]; then
 	targets="$*"
 else
@@ -40,7 +48,7 @@ fi
 build_log="$LOG_DIR/build.log"
 printf 'building fuzz targets... '
 build_start=$SECONDS
-if ! cargo fuzz build >"$build_log" 2>&1; then
+if ! cargo fuzz build --target "$HOST_TARGET" >"$build_log" 2>&1; then
 	build_elapsed=$((SECONDS - build_start))
 	printf 'FAILED after %ds — see %s\n' "$build_elapsed" "$build_log" >&2
 	tail -30 "$build_log" >&2
@@ -53,7 +61,7 @@ failures=0
 for target in $targets; do
 	log="$LOG_DIR/$target.log"
 	printf '%-32s ' "$target"
-	if cargo fuzz run "$target" \
+	if cargo fuzz run --target "$HOST_TARGET" "$target" \
 			-- -max_total_time="$FUZZ_TIME" \
 			   -verbosity=0 \
 			   -print_final_stats=1 \
