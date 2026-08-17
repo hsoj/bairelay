@@ -220,7 +220,7 @@ Match neolink's wire behaviour exactly:
 
 ### HEVC NAL whitelist (`is_decodable_nal`)
 
-`src/rtsp/codec/nal.rs::is_decodable_nal` is the single point of truth for "what NAL units a standard receiver expects". Outbound `Frame::Video` is filtered through it in `handle_iframe`, `handle_pframe`, and the bridging-replay path.
+`src/rtsp/codec/nal.rs::is_decodable_nal` is the single point of truth for "what NAL units a standard receiver expects". Outbound `Frame::Video` is filtered through it in `stream_translate`'s I-frame/P-frame translators and the bridging-replay path.
 
 - **H.264**: `nal_unit_type` in `1..=13` (VCL slices 1..=5, SEI 6, SPS 7, PPS 8, AUD 9, EOS 10, EOB 11, FD 12, SPS-ext 13). Drops type 0 and 14..=31.
 - **H.265**: type in `{0..=9, 16..=21, 32..=40}` AND `nuh_layer_id == 0`. Keeps standard VCL (0..=9), IRAP keyframes (16..=21), VPS/SPS/PPS/AUD/EOS/EOB/FD/SEI (32..=40). Drops reserved 10..=15 and 22..=31, reserved non-VCL 41..=47, and unspecified 48..=63 — Reolink Argus emits `UNSPEC62` as proprietary metadata; ffmpeg's RTP-HEVC depacketizer rejects it. Drops anything with `nuh_layer_id != 0` (ffmpeg logs `Multi-layer HEVC coding is not implemented`).
@@ -229,7 +229,7 @@ In addition to the whitelist, outbound `Frame::Video` strips VPS / SPS / PPS (H.
 
 ### HE-AAC AOT branches
 
-`handle_aac` adds 1024 ticks for AAC-LC (AOT=2), 2048 for HE-AAC (AOT=5) and HE-AACv2 (AOT=29), drops + one-shot-warns for unsupported AOTs. The ADTS path can only yield AOT ∈ {1, 2, 3, 4} (2-bit profile field), so AOT=5 / AOT=29 branches are reachable only by direct `aac_samples_per_au` calls — kept defensively in case a non-ADTS carrier ever feeds `handle_aac`.
+`stream_translate`'s AAC translator adds 1024 ticks for AAC-LC (AOT=2), 2048 for HE-AAC (AOT=5) and HE-AACv2 (AOT=29), drops + one-shot-warns for unsupported AOTs. The ADTS path can only yield AOT ∈ {1, 2, 3, 4} (2-bit profile field), so AOT=5 / AOT=29 branches are reachable only by direct `aac_samples_per_au` calls — kept defensively in case a non-ADTS carrier ever feeds the AAC translator.
 
 ---
 
@@ -478,6 +478,11 @@ Per-file targets:
 Files at < 85 % with a documented reason:
 
 - `src/main.rs` — `#[tokio::main]` body, signal handlers, real socket binds. Fundamentally untestable at unit level.
+
+Known permanently-uncovered lines (not a floor breach; recorded so nobody chases them):
+
+- `src/stream_translate.rs` — the AAC ADTS length double-check and the ADPCM empty-decode/empty-decimate guards. Structurally unreachable through `parse_adts` / `decode_block` (both reject earlier), but load-bearing under the no-panic policy: they stand between validated-elsewhere input and a slice index / zero-length AU. Do not delete to chase coverage.
+- `src/stream_source.rs` — tarpaulin under-counts `tokio::select!` bodies in `drive_translator_loop`; those arms are exercised by the scripted `PacketSource` tests and the `reader_task` orchestration tests.
 - `src/oneshot/runner.rs` — wraps `BcCamera::new + login_with_maxenc + logout`. Real socket required.
 - `src/cli.rs` — `clap` derive macro output.
 - `src/baichuan/bc_protocol/connection/{discovery,udpsource}.rs` — UDP socket internals; the trait-level `CameraDiscoverer` fallback chain is fully covered, the per-method UDP frame parsing covered partially.

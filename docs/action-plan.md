@@ -2,7 +2,7 @@
 
 The single ordered plan. Consolidates `docs/remediation-plan.md` (defects), `docs/decoupling-plan.md` (testability), the open threads in `docs/hexagonal-refactor.md` (structure), and the 2026-08-05 full-codebase review.
 
-**Stages 0–3 landed 2026-08-08** (see the resolved table). The only open item is **S4-1** (needs live hardware for `manual-verify.sh`). File:line references in the S4-1 section predate the 2026-08-08 sweep — re-verify at PR time.
+**Stages 0–3 landed 2026-08-08; S4-1's code landed 2026-08-16** (see the resolved table). The only open item is the **S4-1 live-verify pass** — `tests/scripts/manual-verify.sh` (and ideally a `bairelay capture` fixture run) has NOT been executed against the refactor; it needs real hardware.
 
 Ordered by the project's stated priorities, in order: **stability → developer experience → design best practice → composition-based trait design**. Where an item serves several, it is placed by the highest one it serves.
 
@@ -40,6 +40,7 @@ Recorded so nobody re-litigates them. Deltas from the planned shape are noted; t
 | **S2-1 — dead protocol modules** (2026-08-08) | `talk` / `email` / `pushinfo` / `stream_info` / `uid` / `ping` deleted (~2 000 lines), `crossbeam-channel` dropped, `monitor_battery` + `MotionData::{motion_detected, motion_detected_within, await_start, await_stop}` trimmed. `fuzz/` + `decode-bc-pcap` still build; `MSG_ID_*` constants kept. | — |
 | **S2-2/S2-3/S2-4 — docs, dead code, comment rot** (2026-08-08) | Planning docs re-pointed at the role-trait seam; `gap_threshold` accessor+field, `emit_success_bytes`/`emit_failure_payload`, `drive_reconnect_with_backoff`+`ReconnectOutcome` deleted; `snapshot_json_preflight` now calls `check_json_output`. All 25 surviving phase/task comments scrubbed; CONTRIBUTING/README/publish-crates workspace-era text fixed; the 32-KiB-guard and 60-s-timeout lying comments corrected. | — |
 | **S2-5 — naming/lint hygiene** (2026-08-08) | `bc_camera` renamed to `camera` at every role-trait seam and on `CameraHandle` (field + accessor); poller `interval_ms: u64` → `Duration`; probe timeout named `PROBE_TIMEOUT`; three eligible `#[allow]`s → `#[expect(…, reason)]`. | — |
+| **S4-1 — sans-IO BcMedia→Frame translation** (2026-08-16, code only) | Pure `translate()` + closed `Emit` set in new `src/stream_translate.rs`; `apply_bcmedia_packet` reduced to the fan-out driver. Driver tests unchanged; emit-sequence table tests added. **Live-verify not run — see Stage 4.** | — |
 | **S3-1…S3-5 — pure-function extractions** (2026-08-08) | `next_target` (pacer re-anchor table, incl. `snap_on_past` asymmetry) + table test; `watchdog::should_disconnect` + decision-table test; config warnings as `Vec<ConfigWarning>` (`config_warnings`/`log_config_warnings`, tests now assert values); `preview_poller` takes `ConnectedStills` (consumer-declared two-method capability); all four live-verify markers pinned by `log_capture` tests ("RTSP server listening", "Disconnected", "Grace period expired, disconnecting", plus the existing startup-wake pair). | — |
 
 **S4-2 deltas worth knowing:** `trait Camera` composes the eight roles as a supertrait bound with a marker blanket impl (`camera.rs:190-192`) — a composition marker, not the forbidden `CameraDriver`-style forwarding impl. Wiring points (`mqtt_dispatch`, `startup_wake`, `CameraHandle`) hold full `Arc<dyn Camera>`; vendored BC types stay in role signatures per the header comment at `camera.rs:48-52` ("keep, re-measure later"). Two loose ends became their own items: `preview_poller` still takes the concrete handle (S3-4) and the parameters/fields are still *named* `bc_camera` (S2-5).
@@ -59,28 +60,18 @@ live-verify pass has not been run on them.
 
 # Stage 4 — Composition
 
-## S4-1. Sans-IO the BcMedia→Frame translation · L · highest value remaining
+## S4-1. Sans-IO the BcMedia→Frame translation · **code landed 2026-08-16, live-verify OPEN**
 
-Still open, with marginal progress to build on: mutable state is now consolidated in `StreamTranslatorState` (`stream_source.rs:307`), and the handlers have direct unit tests — but `apply_bcmedia_packet:1511` and its four handlers still take a `broadcast::Sender`, two `mpsc::Sender`s, and three `Arc<RwLock<…>>`s and perform side effects inline. `stream_source.rs` is 5,233 lines; A/V desync is the product's visible failure mode and this is where it lives.
+Implemented as `src/stream_translate.rs`: a pure `translate(packet, &mut StreamTranslatorState, now, bridging) -> (SmallVec<[Emit; 4]>, Option<u32>)` plus per-codec translators, with `apply_bcmedia_packet` in `stream_source.rs` reduced to a ~40-line fan-out driver that owns every channel/lock/buffer and applies the emits in order. `Emit` is a closed set → `enum` + exhaustive `match` (TY-5). All prior driver-level tests kept passing unchanged; the translator now also has direct emit-sequence table tests (codec detection, PTS continuity through Bridging, SDP one-shot latch, NAL filtering).
 
-**Target** unchanged — the shape `gap_bridging.rs` proves:
+Deltas from the planned sketch, all deliberate:
 
-```rust
-pub enum Emit {
-    Video(Frame), Audio(Frame),
-    PaceVideo(PacedFrame), PaceAudio(PacedFrame),
-    SdpParams(SdpParams), LastFrame(Vec<u8>), AudioSeen,
-}
+- **Own module, not more `stream_source.rs`.** `stream_source.rs` shrank ~5,233 → ~4,050 lines; the translation logic + its tests live beside `gap_bridging.rs` as a second pure policy module.
+- **`now: Instant` parameter** — the produced `VideoBurst.captured_at` needs a clock, and passing it in keeps `translate` clock-free (same discipline as `gap_bridging`).
+- **`Emit` variants differ:** `Video`/`Audio` carry `{frame, pace}` instead of split `Pace*` variants — pacer-vs-direct routing is the driver's wiring decision, not a translation decision. `SdpVideo`/`SdpAudio` are separate (video refreshes per keyframe, audio is one-shot); `ReplaceVideoBurst`/`AppendPframe` carry the full burst payloads; `AudioSeen(codec)` is emitted only after a produced audio frame.
+- **SDP-audio one-shot latch is state-local** (`sdp_audio_emitted`) rather than a shared `sdp.audio.is_none()` read — equivalent in production (state and SDP share one lifetime), and the driver still guards its write on `is_none()` so externally primed SDP is never clobbered.
 
-pub fn translate(packet: &BcMedia, state: &mut StreamTranslatorState, bridging: bool)
-    -> (SmallVec<[Emit; 4]>, Option<u32>);
-```
-
-`Emit` is a closed set → `enum` + exhaustive `match` (TY-5). Codec detection and PTS edges become table tests; wraparound becomes a property test.
-
-**Live-verify:** on the RTSP path — lands alone, gated by `tests/scripts/manual-verify.sh`. If hardware is unavailable, say so in the PR rather than implying verification.
-
-**Fixture path (added 2026-08-09):** the `bairelay capture <cam> --output <dir>` one-shot records `.bcmedia` fixtures directly from a camera — no RTSP server, no second terminal (`docs/testing.md` § capture playbook). Run it once per camera/stream before starting S4-1 so `tests/fixture_replay.rs` is a live regression net for the refactor; the capture command itself is fully mock-tested and carries no live-verify obligation.
+**Still open — live-verify:** this is on the RTSP path and `tests/scripts/manual-verify.sh` has **not** been run against it (no hardware in the landing environment). `tests/fixtures/` held no `.bcmedia` files either, so `tests/fixture_replay.rs` passed as a no-op. Before or with the next release: run `bairelay capture <cam> --output tests/fixtures` per camera/stream, re-run `cargo test --test fixture_replay`, then the full `manual-verify.sh` (and `ha-verify.sh` if HA is reachable).
 
 ---
 
@@ -105,7 +96,7 @@ Assessed 2026-08-08, post-sweep. Everything ranked above S4-1 in the previous re
 
 | # | Item | Likelihood | Impact | Failure scenario | Effort |
 |---|------|:---:|:---:|---|:---:|
-| 1 | **S4-1** translation still effectful | Med | **High** | A/V desync — the product's visible failure — lives in ~5,200 effectful lines where every change is under-tested and needs hardware to verify. Standing *change* risk: it fires whenever the stream path is next touched. | L |
+| 1 | **S4-1 live-verify not run** | Med | **High** | The translation refactor is behaviour-preserving by unit/driver tests, but the RTSP path has not been exercised against real cameras since it landed. A subtle A/V regression (the product's visible failure mode) would surface only on hardware. Mitigated by: unchanged driver test suite, new emit-sequence tables, no wire-format changes. | S (one verify session) |
 
 ---
 
@@ -117,7 +108,7 @@ Assessed 2026-08-08, post-sweep. Everything ranked above S4-1 in the previous re
 | **1** | S1-2 … S1-6 | `cargo test` + `clippy` + tarpaulin ×3 | **landed 2026-08-08** |
 | **2** | S2-1 … S2-5 | `cargo test` + tarpaulin non-decreasing + out-of-tree builds | **landed 2026-08-08** |
 | **3** | S3-1 … S3-5 | `cargo test` | **landed 2026-08-08** |
-| **4** | S4-1 | `manual-verify.sh` | open — **needs hardware** |
+| **4** | S4-1 | `manual-verify.sh` | code landed 2026-08-16 — **verify pass still needs hardware** |
 
 ---
 

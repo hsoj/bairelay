@@ -91,8 +91,8 @@ pub fn parse_adts(buf: &[u8]) -> Option<AdtsHeader> {
 	// frame_length carries header-included total length (ISO/IEC
 	// 13818-7 §6.2). A value < 7 means the encoder is claiming the
 	// header is shorter than the ADTS minimum — malformed input we
-	// can't safely strip-and-forward downstream. handle_aac has its
-	// own defensive check, but rejecting at parse time keeps every
+	// can't safely strip-and-forward downstream. The AAC translator has
+	// its own defensive check, but rejecting at parse time keeps every
 	// ADTS-bearing call site (test, fuzz, future consumers) honest.
 	if frame_length < ADTS_HEADER_LEN {
 		return None;

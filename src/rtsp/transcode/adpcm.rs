@@ -22,8 +22,8 @@ const INDEX_TABLE: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4
 /// Holds the running `predictor` sample and `step_index` across nibble
 /// calls within a single block. [`decode_block`] reseeds both fields
 /// from the 4-byte block header on entry, so the across-block state is
-/// not load-bearing — the production call site at
-/// `src/stream_source.rs::handle_adpcm` constructs a fresh decoder per
+/// not load-bearing — the production call site in
+/// `src/stream_translate.rs` constructs a fresh decoder per
 /// packet. [`decode_nibble`] is exposed for incremental decoding within
 /// a block; callers wanting cross-block continuity must avoid
 /// [`decode_block`] (which always resets) and feed nibbles directly.
@@ -128,7 +128,7 @@ impl AdpcmDecoder {
 
 	/// Reset decoder state (use on desync recovery). Test-only —
 	/// production decoders are constructed fresh per packet (see
-	/// `src/stream_source.rs::handle_adpcm`), so reset isn't invoked
+	/// the ADPCM translator in `src/stream_translate.rs`), so reset isn't invoked
 	/// outside the test suite. Promote to `pub(crate)` if a future
 	/// caller wants in-place reuse.
 	#[cfg(test)]

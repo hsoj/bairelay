@@ -64,6 +64,7 @@ pub mod run_support;
 pub mod startup_wake;
 pub mod status_cache;
 pub mod stream_source;
+pub mod stream_translate;
 pub mod supervisor;
 pub mod sync;
 pub mod tls_load;

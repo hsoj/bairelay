@@ -7,7 +7,7 @@
 //!
 //! Aggregation Packets (AP, type 48) are intentionally unused: outbound
 //! `Frame::Video` strips VPS/SPS/PPS at the translator boundary
-//! (`stream_source::handle_iframe`) and the SDP `sprop-vps/sps/pps`
+//! (`stream_translate`'s I-frame translator) and the SDP `sprop-vps/sps/pps`
 //! fmtp attribute carries them out-of-band. Emitting AP would re-aggregate
 //! through HA's `ffmpeg:` re-publish wrapper and exit go2rtc's frame.jpeg
 //! transcoder with status 183.

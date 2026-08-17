@@ -82,7 +82,7 @@ pub trait CameraAdmin: CameraSession { … }       // users, services, time, ver
 
 **Deliberately in scope, revisiting a deferral.** `hexagonal-refactor.md` § Deferred kept vendored BC types (`RfAlarmCfg`, `LedState`, `VersionInfo`, `UserList`, `AbilityInfo`, `MotionData`, `Direction`, `LightState`) in the port signatures, reasoning that local twins would be field-for-field mapping with no second implementation to justify it. That reasoning holds for *most* of them and is not reopened here. But it stops holding where a type forces a fake to construct BC XML: split the traits first, then re-measure which vendored types actually survive on a narrow role. Anything only reachable from `CameraAdmin` can keep its BC type indefinitely — that trait has one consumer and no second backend is plausible.
 
-## D2. BcMedia→Frame translation is the half of phase 2 that never landed
+## D2. BcMedia→Frame translation — **RESOLVED by S4-1** (pure `translate()` in `src/stream_translate.rs`; kept for the design record)
 
 `hexagonal-refactor.md` §2 named three altitudes tangled in `stream_source.rs`: bridging policy, tokio plumbing, and **BcMedia translation**. Phase 2 extracted the first — `gap_bridging.rs` is genuinely pure, takes `Instant` as a parameter, and tests in microseconds. The third is untouched.
 

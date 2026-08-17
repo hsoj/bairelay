@@ -22,7 +22,7 @@ pub struct SdpParams {
 }
 
 /// Video media parameters used to build an `m=video` section.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VideoParams {
 	/// Codec identifier (H.264 or H.265).
 	pub codec: VideoCodec,
@@ -39,7 +39,7 @@ pub struct VideoParams {
 }
 
 /// Audio media parameters used to build an `m=audio` section.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AudioParams {
 	/// Codec identifier (AAC or G.711 µ-law).
 	pub codec: AudioCodec,

@@ -8,8 +8,9 @@
 //! Responsibilities:
 //! 1. Spawn a tokio task that pulls `BcMedia` packets from
 //!    [`baichuan`].
-//! 2. Split Annex-B NAL streams, detect the video codec, and translate
-//!    each packet into [`crate::rtsp::provider::Frame`].
+//! 2. Translate each packet into [`crate::rtsp::provider::Frame`]s via
+//!    the sans-IO [`crate::stream_translate`] layer (NAL splitting,
+//!    codec detection, PTS synthesis), applying the returned emits.
 //! 3. Update the shared [`LastFrameBuffer`] on I-frames / P-frames.
 //! 4. Maintain the [`SdpParams`] needed to render the RTSP `DESCRIBE`
 //!    body for this source (codec, SPS/PPS/VPS).
@@ -35,21 +36,24 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::rtsp::buffer::{LastFrameBuffer, VideoBurst};
-use crate::rtsp::codec::nal::{
-	detect_codec, is_decodable_nal, split_annex_b, H264NalType, H265NalType,
-};
+use crate::rtsp::buffer::LastFrameBuffer;
+#[cfg(test)]
+use crate::rtsp::buffer::VideoBurst;
+use crate::rtsp::codec::nal::is_decodable_nal;
+#[cfg(test)]
 use crate::rtsp::codec::VideoCodec;
 use crate::rtsp::provider::Frame;
-use crate::rtsp::sdp::{SdpParams, VideoParams};
+use crate::rtsp::sdp::SdpParams;
 use crate::rtsp::url::StreamKind as RtspStreamKind;
 
 use crate::baichuan::bc_protocol::StreamKind as CoreStreamKind;
 
-use crate::baichuan::bcmedia::model::{BcMedia, BcMediaIframe, BcMediaPframe};
+use crate::baichuan::bcmedia::model::BcMedia;
 use crate::camera::Video;
 use crate::gap_bridging::BridgingPolicy;
 pub use crate::gap_bridging::GapState;
+pub use crate::stream_translate::StreamTranslatorState;
+use crate::stream_translate::{is_parameter_set_nal, translate, Emit};
 use crate::sync::{MutexPoisonRecover as _, RwLockPoisonRecover as _};
 
 use crate::bcmedia_dump::{BcMediaDumpConfig, FrameDumper};
@@ -220,38 +224,6 @@ struct ReaderTaskArgs {
 	audio_presence: Arc<RwLock<crate::audio_presence::AudioPresence>>,
 	translator_state: Arc<Mutex<StreamTranslatorState>>,
 	bridging: Arc<Mutex<BridgingPolicy>>,
-}
-
-/// Mutable state owned by the reader task's translator loop.
-///
-/// Bundles the four `&mut` fields that `apply_bcmedia_packet` previously
-/// took individually:
-///
-/// - `detected_codec` — H.264 vs H.265 verdict, latched on the first
-///   identifying NAL.
-/// - `aac_pts_next` — running 90 kHz-clock-independent AAC RTP timestamp
-///   counter; advances by 1024 per AAC-LC AU (2048 for HE-AAC / HE-AACv2).
-/// - `g711_pts_next` — running 8 kHz G.711 µ-law RTP timestamp counter;
-///   advances by output-sample count per transcoded frame.
-/// - `aac_aot` — last observed ADTS AudioObjectType. Gates the one-shot
-///   "unsupported AOT" warn in `handle_aac` so a latched-on-bad-AOT
-///   stream doesn't log per packet.
-///
-/// Held by `StreamSource` in an `Arc<Mutex<_>>` so a mid-probe Baichuan
-/// reconnect that re-spawns `reader_task` re-binds the same state — PTS
-/// counters survive, so the next audio RTP packet after reconnect is not
-/// a backward DTS jump (the 4K-Terrace tail-drain symptom from 2D.1
-/// live-verify, see `docs/implementation.md`).
-#[derive(Debug, Default)]
-pub struct StreamTranslatorState {
-	pub detected_codec: Option<VideoCodec>,
-	pub aac_pts_next: u32,
-	pub g711_pts_next: u32,
-	pub aac_aot: Option<u8>,
-	/// PTS (90 kHz) of the previous Video frame dispatched through the
-	/// pacer. Used by `video_frame_duration` to compute the next pacer
-	/// emission interval. `None` until the first video frame.
-	pub last_video_pts_90khz: Option<u32>,
 }
 
 impl StreamSource {
@@ -811,7 +783,7 @@ const VIDEO_PACER_INITIAL_LATENCY: Duration = Duration::from_millis(1500);
 ///
 /// Drains [`PacedFrame`] items from `rx` and forwards each item's
 /// `Frame` to `broadcast` at no faster than one item per `item.duration`.
-/// Producer (`handle_aac` / `handle_adpcm`) uses `try_send` and silently
+/// Producer (the driver applying audio emits) uses `try_send` and silently
 /// drops on a full mpsc — the bounded queue (`AUDIO_PACER_QUEUE`) caps
 /// memory and any drop logs as `audio-pacer-overflow` once.
 ///
@@ -986,12 +958,6 @@ const AUDIO_PACER_QUEUE: usize = 200;
 const VIDEO_PACER_QUEUE: usize = 300;
 
 // ── Reader task ──────────────────────────────────────────────────────
-
-/// Converts microseconds (from `BcMedia` packets) to a 90 kHz RTP clock
-/// via `µs * 9 / 100`. Wrapping arithmetic is the desired RTP behaviour.
-fn micros_to_90khz(micros: u32) -> u32 {
-	((micros as u64).wrapping_mul(9) / 100) as u32
-}
 
 /// Current time as the pure [`BridgingPolicy`] sees it.
 ///
@@ -1304,7 +1270,7 @@ async fn drive_translator_loop<S: PacketSource>(args: TranslatorLoopArgs, source
 ///   Log + break.
 #[expect(
 	clippy::too_many_arguments,
-	reason = "S4-1 target: the driver still threads every side-effect handle through; the arg list shrinks when translate() becomes sans-IO"
+	reason = "per-packet driver: threads every side-effect handle through to apply_bcmedia_packet; the decision logic itself is sans-IO in stream_translate"
 )]
 fn process_stream_result(
 	result: Result<std::result::Result<BcMedia, crate::baichuan::Error>, crate::baichuan::Error>,
@@ -1429,40 +1395,29 @@ fn maybe_capture_packet(
 	}
 }
 
-// ── Frame translators ────────────────────────────────────────────────
+// ── Translation driver ───────────────────────────────────────────────
 
-/// Apply a decoded `BcMedia` packet to the outbound channels, maintaining
-/// all translator state via `StreamTranslatorState`.
+/// Apply a decoded `BcMedia` packet to the outbound channels.
 ///
-/// See [`StreamTranslatorState`] for per-field semantics. Callers MUST
-/// reuse the same `&mut state` across every packet in a given stream —
-/// H.264/H.265 detection and monotonic audio PTS both depend on it.
+/// Thin fan-out driver over [`crate::stream_translate::translate`]:
+/// the decision logic (codec detection, NAL filtering, PTS synthesis,
+/// SDP derivation, the bridging audio gate) is pure and lives in
+/// [`crate::stream_translate`]; this function owns the channels, locks
+/// and buffers, and applies the returned [`Emit`]s in order.
+///
+/// Callers MUST reuse the same `&mut state` across every packet in a
+/// given stream — H.264/H.265 detection and monotonic audio PTS both
+/// depend on it.
 ///
 /// Shared between production (`reader_task`) and the fixture-replay
-/// harness in `tests/fixture_replay.rs`. Side effects: may update
-/// `sdp_params.video` / `sdp_params.audio`, may append to `last_frame`,
-/// may broadcast one `Frame::Video` or `Frame::Audio` on `tx`, and may
-/// upgrade `audio_presence` to `Present { codec }` on first audio
-/// observation.
-/// Returns `Some(pts_90khz)` iff this call broadcast a
-/// [`Frame::Video`] on `tx`; the value is that frame's 90 kHz RTP
-/// timestamp, used by the bridging replay-frame synth to seed the
-/// next `Bridging` PTS. Audio frames and info-variant drops always
-/// return `None` — they do not count as "upstream video frame
-/// arrived" for gap detection. Callers must gate
-/// `last_live_frame_at` / `gap_state` / `last_emitted_pts` updates
-/// on `Some(_)` so an early-return inside [`handle_iframe`] /
-/// [`handle_pframe`] (empty NAL list, P-frame before any I-frame,
-/// undetectable codec) does not spuriously mark the source as
-/// `Live` when subscribers saw nothing.
+/// harness in `tests/fixture_replay.rs`.
 ///
-/// `gap_state` is the source's current upstream-presence state —
-/// when `Bridging`, live audio frames are dropped silently (SDP
-/// population still happens, so DESCRIBE stays accurate). See the
-/// module-level notes.
+/// Returns `Some(pts_90khz)` iff this call broadcast a [`Frame::Video`]
+/// on `tx`; see [`crate::stream_translate::translate`] for the full
+/// contract (gap-marker gating on `Some(_)`, bridging semantics).
 #[expect(
 	clippy::too_many_arguments,
-	reason = "S4-1 target: the driver still threads every side-effect handle through; the arg list shrinks when translate() becomes sans-IO"
+	reason = "fan-out driver: threads every side-effect handle to the emit loop; the decision logic itself is sans-IO in stream_translate"
 )]
 pub fn apply_bcmedia_packet(
 	packet: &BcMedia,
@@ -1475,423 +1430,30 @@ pub fn apply_bcmedia_packet(
 	state: &mut StreamTranslatorState,
 	bridging: bool,
 ) -> Option<u32> {
-	match packet {
-		BcMedia::Iframe(iframe) => {
-			handle_iframe(iframe, tx, video_pace_tx, last_frame, sdp_params, state)
-		}
-		BcMedia::Pframe(pframe) => handle_pframe(pframe, tx, video_pace_tx, last_frame, state),
-		BcMedia::Aac(aac) => {
-			handle_aac(
-				aac,
-				tx,
-				audio_pace_tx,
-				sdp_params,
-				audio_presence,
-				state,
-				bridging,
-			);
-			None
-		}
-		BcMedia::Adpcm(adpcm) => {
-			handle_adpcm(
-				adpcm,
-				tx,
-				audio_pace_tx,
-				sdp_params,
-				audio_presence,
-				state,
-				bridging,
-			);
-			None
-		}
-		BcMedia::InfoV1(_) | BcMedia::InfoV2(_) => None,
-	}
-}
-
-/// Returns `Some(pts_90khz)` iff a [`Frame::Video`] keyframe was
-/// broadcast on `tx`. The two early-return paths (empty NAL list,
-/// undetectable codec) return `None` so the caller's gap marker does
-/// not flip to `Live` when subscribers saw nothing.
-fn handle_iframe(
-	iframe: &BcMediaIframe,
-	tx: &broadcast::Sender<Frame>,
-	video_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
-	last_frame: &Arc<LastFrameBuffer>,
-	sdp_params: &Arc<RwLock<SdpParams>>,
-	state: &mut StreamTranslatorState,
-) -> Option<u32> {
-	let nals = split_annex_b(&iframe.data);
-	if nals.is_empty() {
-		return None;
-	}
-
-	// Detect the codec from the first NAL that gives a verdict.
-	if state.detected_codec.is_none() {
-		for nal in &nals {
-			if let Some(c) = detect_codec(nal) {
-				state.detected_codec = Some(c);
-				break;
+	let (emits, video_pts) = translate(packet, state, Instant::now(), bridging);
+	for emit in emits {
+		match emit {
+			Emit::Video { frame, pace } => dispatch_paced_video(video_pace_tx, tx, frame, pace),
+			Emit::Audio { frame, pace } => dispatch_paced_audio(audio_pace_tx, tx, frame, pace),
+			Emit::SdpVideo(params) => sdp_params.write_recover().video = Some(params),
+			Emit::SdpAudio(params) => {
+				// Guarded write: the translator's one-shot latch is
+				// state-local, so never clobber an SDP audio entry that
+				// something else (a test constructor) already primed.
+				let mut w = sdp_params.write_recover();
+				if w.audio.is_none() {
+					w.audio = Some(params);
+				}
+			}
+			Emit::ReplaceVideoBurst(burst) => last_frame.replace_video(burst),
+			Emit::AppendPframe(nals) => last_frame.append_pframe(nals),
+			Emit::AudioSeen(codec) => {
+				let mut p = audio_presence.write_recover();
+				*p = p.observed(codec);
 			}
 		}
 	}
-	let codec = match state.detected_codec {
-		Some(c) => c,
-		None => {
-			tracing::warn!("I-frame with no detectable codec; dropping");
-			return None;
-		}
-	};
-
-	// Filter NALs to the standard single-layer whitelist. Reolink Argus
-	// firmware emits HEVC NAL type 62 (UNSPEC62) inside access units;
-	// ffmpeg's RTP-HEVC depacketizer rejects them with `Unsupported
-	// (HEVC) NAL type (62)` and the resulting decode disruption surfaces
-	// as `Could not find ref with POC N` / `Skipping invalid undecodable
-	// NALU` and visible spinning in mpv / HA. Multi-layer NALs (any
-	// `nuh_layer_id != 0`) trigger ffmpeg's `Multi-layer HEVC coding is
-	// not implemented` for the same reason. The official Reolink app's
-	// proprietary decoder ignores both classes; standard decoders need
-	// us to strip them. See `is_decodable_nal` for the whitelist.
-	let nals: Vec<&[u8]> = nals
-		.into_iter()
-		.filter(|n| is_decodable_nal(n, codec))
-		.collect();
-	if nals.is_empty() {
-		return None;
-	}
-
-	// Reorder NALs so non-slice NALs (parameter sets, SEI, AUD, prefix
-	// data) precede slice NALs. The RTP packetizer sets the marker bit on
-	// the last NAL of the access unit; if a camera emits SEI/AUD after
-	// the slice the marker would land on them instead of the slice,
-	// breaking the access-unit boundary signal for strict decoders.
-	let (mut non_slice, mut slice): (Vec<&[u8]>, Vec<&[u8]>) =
-		nals.iter().partition(|n| !is_slice_nal(n, codec));
-	non_slice.append(&mut slice);
-	let reordered: Vec<&[u8]> = non_slice;
-
-	// Extract parameter sets + IDR NALs per codec.
-	let (parameter_sets, iframe_nals, sps_bytes, pps_bytes, vps_bytes) =
-		extract_iframe_parts(codec, &reordered);
-
-	// Update SDP params (briefly hold write lock). Only do this if we
-	// have both SPS and PPS; otherwise wait for a future I-frame.
-	if let (Some(sps), Some(pps)) = (sps_bytes.as_ref(), pps_bytes.as_ref()) {
-		let profile_level_id = if sps.len() >= 4 {
-			[sps[1], sps[2], sps[3]]
-		} else {
-			[0u8; 3]
-		};
-		let video_params = VideoParams {
-			codec,
-			payload_type: 96,
-			sps: sps.clone(),
-			pps: pps.clone(),
-			vps: vps_bytes.clone(),
-			profile_level_id,
-		};
-		sdp_params.write_recover().video = Some(video_params);
-	}
-
-	// Update last-frame buffer with a fresh burst. We store the already
-	// reordered iframe_nals so that burst replay preserves the same
-	// non-slice-then-slice ordering that marker-bit placement depends on.
-	// captured_pts_90khz lets the session send loop replay with a
-	// timestamp continuous with the live stream — see buffer.rs.
-	let burst_pts = micros_to_90khz(iframe.microseconds);
-	let burst = VideoBurst {
-		codec,
-		parameter_sets: parameter_sets.clone(),
-		iframe_nals: iframe_nals.clone(),
-		pframe_nals: Vec::new(),
-		captured_at: Instant::now(),
-		captured_pts_90khz: burst_pts,
-	};
-	last_frame.replace_video(burst);
-
-	// Build outbound Frame::Video carrying only non-parameter-set NALs
-	// (the iframe slice[s], plus any SEI/AUD). The SDP `sprop-vps/sps/pps`
-	// fmtp attribute carries the parameter sets out-of-band — clients
-	// (VLC, ffmpeg, mpv, gstreamer, HA's stream: component) all consume
-	// those during DESCRIBE and initialize their decoders from them.
-	// Sending VPS/SPS/PPS in-band additionally makes a downstream
-	// `-c copy -f rtsp` re-packer (HA's go2rtc `ffmpeg:` wrap) combine
-	// the three small NALs at the same RTP timestamp into an HEVC RFC
-	// 7798 §4.4.2 AP (Aggregation Packet, NAL type 48). go2rtc's own
-	// RTPDepay does not de-aggregate AP; the raw AP header bytes then
-	// reach its `/api/frame.jpeg` transcoder and ffmpeg exits with
-	// status 183 (invalid input data). Stripping the in-band copies
-	// leaves only the IDR slice on the wire; ffmpeg has nothing to
-	// aggregate and the go2rtc pipeline succeeds.
-	let nals_bytes: Vec<Bytes> = reordered
-		.iter()
-		.filter(|n| !is_parameter_set_nal(n, codec))
-		.map(|n| Bytes::copy_from_slice(n))
-		.collect();
-	if nals_bytes.is_empty() {
-		// Access unit was made entirely of parameter sets (VPS/SPS/PPS,
-		// no slice). Stripping the parameter sets leaves nothing for
-		// downstream packetization; emitting a zero-NAL `Frame::Video`
-		// would yield a marker-bit-only RTP packet that strict
-		// receivers reject. SDP `sprop-*` fmtp attributes already
-		// carry the parameter sets out-of-band — no information is
-		// lost by dropping this access unit.
-		tracing::debug!(
-			"I-frame access unit had no slice NALs after parameter-set strip; dropping"
-		);
-		return None;
-	}
-
-	let pts_90khz = micros_to_90khz(iframe.microseconds);
-	let frame = Frame::Video {
-		codec,
-		nals: nals_bytes,
-		pts_90khz,
-		keyframe: true,
-		access_unit_end: true,
-	};
-	// Route through the per-source video pacer when one is wired in
-	// (production). The pacer holds each frame until its natural inter-
-	// PTS wallclock interval elapses since the previous emit, so the
-	// receiver sees a steady frame rate even when the camera bursts
-	// (Argus 4 K HEVC delivers a GOP in ~900 ms then idles ~1.1 s).
-	// Without pacing, mpv reports `(Buffering)` whenever the camera
-	// pauses transmission. See `dispatch_paced_video` for fallback.
-	let duration = video_frame_duration(state, pts_90khz);
-	dispatch_paced_video(video_pace_tx, tx, frame, duration);
-	Some(pts_90khz)
-}
-
-/// Returns true if `nal` is a codec parameter-set NAL (SPS/PPS for
-/// H.264, VPS/SPS/PPS for H.265). Used to strip parameter sets from
-/// the outbound live broadcast — SDP's `sprop-*` fmtp attributes
-/// already carry these out-of-band, and leaving them in-band lets
-/// downstream re-muxers (notably HA's go2rtc `ffmpeg:` wrap)
-/// aggregate them into an HEVC AP that go2rtc can't de-aggregate.
-/// See the call site in `apply_bcmedia_packet` for the full trace.
-fn is_parameter_set_nal(nal: &[u8], codec: VideoCodec) -> bool {
-	if nal.is_empty() {
-		return false;
-	}
-	match codec {
-		VideoCodec::H264 => {
-			let ty = H264NalType::from_header_byte(nal[0]);
-			matches!(ty, H264NalType::SPS | H264NalType::PPS)
-		}
-		VideoCodec::H265 => {
-			let ty = H265NalType::from_header_byte(nal[0]);
-			matches!(ty, H265NalType::VPS | H265NalType::SPS | H265NalType::PPS)
-		}
-	}
-}
-
-/// Returns true if `nal` is a video-coded slice NAL for the given codec.
-///
-/// Used by the packetizer-feeder so non-slice NALs (SPS/PPS/VPS/SEI/AUD/...)
-/// can be moved ahead of slice NALs, letting the marker bit land on the
-/// trailing slice packet.
-fn is_slice_nal(nal: &[u8], codec: VideoCodec) -> bool {
-	if nal.is_empty() {
-		return false;
-	}
-	match codec {
-		VideoCodec::H264 => {
-			let ty = H264NalType::from_header_byte(nal[0]);
-			// Non-IDR slice (1), IDR slice (5). Also types 2..=4 are
-			// data-partitioned slices (A/B/C); treat them as slice NALs
-			// for completeness, although Reolink doesn't emit them.
-			matches!(ty, 1..=5)
-		}
-		VideoCodec::H265 => {
-			let ty = H265NalType::from_header_byte(nal[0]);
-			// HEVC VCL NALs: 0..=9 (trailing/TSA/STSA/RADL/RASL),
-			// 16..=21 (BLA/IDR/CRA). Non-VCL starts at 32.
-			matches!(ty, 0..=9 | 16..=21)
-		}
-	}
-}
-
-/// Extract parameter sets (SPS/PPS for H.264, VPS/SPS/PPS for H.265) and
-/// IDR NALs from a split I-frame NAL sequence, for both
-/// [`LastFrameBuffer`] insertion and SDP generation.
-#[expect(
-	clippy::type_complexity,
-	reason = "one-caller tuple return; naming a struct for it would outweigh the tuple"
-)]
-fn extract_iframe_parts(
-	codec: VideoCodec,
-	nals: &[&[u8]],
-) -> (
-	Vec<Vec<u8>>,    // parameter_sets
-	Vec<Vec<u8>>,    // iframe_nals
-	Option<Vec<u8>>, // sps
-	Option<Vec<u8>>, // pps
-	Option<Vec<u8>>, // vps (H.265 only)
-) {
-	let mut parameter_sets: Vec<Vec<u8>> = Vec::new();
-	let mut iframe_nals: Vec<Vec<u8>> = Vec::new();
-	let mut sps: Option<Vec<u8>> = None;
-	let mut pps: Option<Vec<u8>> = None;
-	let mut vps: Option<Vec<u8>> = None;
-
-	for nal in nals {
-		if nal.is_empty() {
-			continue;
-		}
-		let owned: Vec<u8> = (*nal).to_vec();
-		match codec {
-			VideoCodec::H264 => {
-				let ty = H264NalType::from_header_byte(owned[0]);
-				match ty {
-					H264NalType::SPS => {
-						sps = Some(owned.clone());
-						parameter_sets.push(owned);
-					}
-					H264NalType::PPS => {
-						pps = Some(owned.clone());
-						parameter_sets.push(owned);
-					}
-					H264NalType::IDR_SLICE => {
-						iframe_nals.push(owned);
-					}
-					_ => {
-						// SEI/AUD/etc — skip for burst contents.
-					}
-				}
-			}
-			VideoCodec::H265 => {
-				if owned.is_empty() {
-					continue;
-				}
-				let ty = H265NalType::from_header_byte(owned[0]);
-				match ty {
-					H265NalType::VPS => {
-						vps = Some(owned.clone());
-						parameter_sets.push(owned);
-					}
-					H265NalType::SPS => {
-						sps = Some(owned.clone());
-						parameter_sets.push(owned);
-					}
-					H265NalType::PPS => {
-						pps = Some(owned.clone());
-						parameter_sets.push(owned);
-					}
-					H265NalType::IDR_W_RADL
-					| H265NalType::IDR_N_LP
-					| H265NalType::CRA
-					| H265NalType::BLA_W_LP => {
-						iframe_nals.push(owned);
-					}
-					_ => {}
-				}
-			}
-		}
-	}
-
-	(parameter_sets, iframe_nals, sps, pps, vps)
-}
-
-/// Returns `Some(pts_90khz)` iff a [`Frame::Video`] P-frame was
-/// broadcast on `tx`. Returns `None` when the P-frame arrives before
-/// any I-frame has been seen (codec undetected) or after NAL
-/// splitting produces an empty list. The gap marker must not
-/// flip to `Live` in those cases — subscribers saw nothing.
-fn handle_pframe(
-	pframe: &BcMediaPframe,
-	tx: &broadcast::Sender<Frame>,
-	video_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
-	last_frame: &Arc<LastFrameBuffer>,
-	state: &mut StreamTranslatorState,
-) -> Option<u32> {
-	let codec = match state.detected_codec {
-		Some(c) => c,
-		None => {
-			// Haven't seen an I-frame yet — drop this P-frame. Clients
-			// can't decode without the preceding keyframe anyway.
-			return None;
-		}
-	};
-	let nals = split_annex_b(&pframe.data);
-	if nals.is_empty() {
-		return None;
-	}
-
-	// Same NAL whitelist as handle_iframe — Reolink Argus emits proprietary
-	// HEVC NAL type 62 / multi-layer NALs inside P-frame access units
-	// too, and ffmpeg's RTP-HEVC depacketizer rejects them. See
-	// `is_decodable_nal` for the rationale.
-	let nals: Vec<&[u8]> = nals
-		.into_iter()
-		.filter(|n| is_decodable_nal(n, codec))
-		.collect();
-	if nals.is_empty() {
-		return None;
-	}
-
-	// Reorder: non-slice NALs first, slice NALs last — same reasoning as
-	// handle_iframe (marker bit must land on the trailing slice packet).
-	let (mut non_slice, mut slice): (Vec<&[u8]>, Vec<&[u8]>) =
-		nals.iter().partition(|n| !is_slice_nal(n, codec));
-	non_slice.append(&mut slice);
-	let reordered: Vec<&[u8]> = non_slice;
-
-	// Append to last-frame buffer so reconnecting clients can replay the
-	// recent burst (I-frame + trailing P-frames) while waiting for the
-	// next keyframe. Store the reordered sequence so burst replay keeps
-	// the marker-bit placement guarantee.
-	let nals_owned: Vec<Vec<u8>> = reordered.iter().map(|n| (*n).to_vec()).collect();
-	last_frame.append_pframe(nals_owned);
-
-	let nals_bytes: Vec<Bytes> = reordered
-		.iter()
-		.map(|n| Bytes::copy_from_slice(n))
-		.collect();
-	let pts_90khz = micros_to_90khz(pframe.microseconds);
-	let frame = Frame::Video {
-		codec,
-		nals: nals_bytes,
-		pts_90khz,
-		keyframe: false,
-		access_unit_end: true,
-	};
-	// See handle_iframe for why we route through the video pacer.
-	let duration = video_frame_duration(state, pts_90khz);
-	dispatch_paced_video(video_pace_tx, tx, frame, duration);
-	Some(pts_90khz)
-}
-
-/// Compute the wall-clock duration the video pacer should hold this
-/// frame for, based on the gap to the previously broadcast video PTS.
-/// First frame: 0 (emit immediately). Otherwise: `(pts - last_video_pts)
-/// / 90000` seconds. PTS is at 90 kHz; wrap-safe via `wrapping_sub`.
-///
-/// Anomaly cap: Argus default GOP is ≤2 s; a delta beyond ~5 s of video
-/// time signals one of (a) the camera's PTS clock reset, (b) we missed
-/// an entire GOP and `wrapping_sub` produced a near-`u32::MAX` value
-/// because the previous PTS was numerically larger, or (c) the source
-/// itself paused upstream (the gap-bridging path handles this; the
-/// pacer should not contribute additional delay). In all three cases
-/// "emit immediately" (duration 0) is correct — we don't want the
-/// pacer to stall for hours on a single anomalous frame, and we don't
-/// want to accept a near-full-u32 wait as a legitimate inter-frame
-/// interval.
-const PACER_ANOMALY_CAP_TICKS: u32 = 90_000 * 5;
-fn video_frame_duration(state: &mut StreamTranslatorState, pts_90khz: u32) -> Duration {
-	let dur = match state.last_video_pts_90khz {
-		Some(prev) => {
-			let delta = pts_90khz.wrapping_sub(prev);
-			let ticks = if delta > PACER_ANOMALY_CAP_TICKS {
-				0
-			} else {
-				delta
-			};
-			Duration::from_micros((ticks as u64 * 1_000_000) / 90_000)
-		}
-		None => Duration::ZERO,
-	};
-	state.last_video_pts_90khz = Some(pts_90khz);
-	dur
+	video_pts
 }
 
 /// Window-deduped warn for pacer-queue overflows. The first overflow
@@ -1959,260 +1521,9 @@ fn dispatch_paced_video(
 	let _ = tx.send(frame);
 }
 
-/// Sample count per AAC access unit, keyed on ADTS AudioObjectType.
-///
-/// AAC-LC (AOT=2) is 1024 samples/AU (RFC 3640 / ISO 14496-3). HE-AAC
-/// (AOT=5) and HE-AACv2 (AOT=29) carry 2048 samples/AU because of the
-/// SBR doubling. Any other AOT is unsupported by this translator —
-/// callers MUST drop the frame rather than guess a step, otherwise the
-/// AAC RTP timestamp counter drifts and downstream muxers reject the
-/// stream with "DTS N >= N" style errors.
-///
-/// Pure helper so the branch is unit-testable without ADTS synthesis
-/// (ADTS only encodes the lower 2 bits of `aot - 1`, i.e. AOT values
-/// 1..=4, so AOT=5/29 can't be reached via `parse_adts` in production).
-pub(crate) fn aac_samples_per_au(aot: u8) -> Option<u32> {
-	match aot {
-		2 => Some(1024),
-		5 | 29 => Some(2048),
-		_ => None,
-	}
-}
-
-/// Translate a `BcMedia::Aac` packet to a `Frame::Audio { Aac { .. } }`
-/// and populate `SdpParams.audio` on first observation.
-///
-/// The packet carries ADTS-framed AAC audio (sync 0xFFF, profile,
-/// sr_idx, channels, frame_length, body). We parse the ADTS header
-/// via `crate::rtsp::codec::aac::parse_adts` and strip it before
-/// broadcasting — the RTP packetizer wraps raw AU data in the RFC 3640
-/// AU-hbr payload itself. SDP population is one-shot: subsequent
-/// packets skip the SDP write because `sdp_params.audio` is already
-/// `Some`.
-///
-/// Also upgrades `audio_presence` from `Unknown`/`Absent` to
-/// `Present { codec: Aac }` via `AudioPresence::observed`.
-///
-/// Silently drops the packet when `gap_state` reads `Bridging`; see body for
-/// invariant details (SDP populates first, `audio_presence` untouched, PTS
-/// counter held so Live resume continues cleanly).
-fn handle_aac(
-	aac: &crate::baichuan::bcmedia::model::BcMediaAac,
-	tx: &broadcast::Sender<Frame>,
-	audio_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
-	sdp_params: &Arc<RwLock<SdpParams>>,
-	audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
-	state: &mut StreamTranslatorState,
-	bridging: bool,
-) {
-	use crate::rtsp::codec::aac::{
-		build_audio_specific_config_hex, parse_adts, AAC_PAYLOAD_TYPE, ADTS_HEADER_LEN,
-	};
-	use crate::rtsp::codec::AudioCodec;
-	use crate::rtsp::provider::AudioPayload;
-	use crate::rtsp::sdp::AudioParams;
-
-	let Some(header) = parse_adts(&aac.data) else {
-		tracing::debug!("ADTS header parse failed; dropping AAC packet");
-		return;
-	};
-
-	// `channels == 0` means the channel configuration is carried in
-	// the program config element inside the AAC body (MPEG-4 §1.6.1.1).
-	// Bairelay's SDP / packetizer pipeline can't parse the PCE, so the
-	// downstream RTP players would render "0 channels" — silence. Drop
-	// rather than emit a no-audio Frame::Audio that confuses receivers.
-	// One-shot warn keyed on `state.aac_aot` to match the unsupported-
-	// AOT branch's chatter discipline.
-	if header.channels == 0 {
-		if state.aac_aot != Some(header.aot) {
-			tracing::warn!(
-				aot = header.aot,
-				"handle_aac: PCE-specified channel config (channels=0); dropping AAC packet"
-			);
-			state.aac_aot = Some(header.aot);
-		}
-		return;
-	}
-
-	// Small helpers so the three sdp-lock sites read uniformly. Use
-	// poison-recovering accessors so a panic elsewhere holding the
-	// SDP lock doesn't cascade through the audio handler.
-	let read_sdp = || sdp_params.read_recover();
-	let write_sdp = || sdp_params.write_recover();
-
-	// Populate SDP audio on first observation. Read-check first so the
-	// hot path doesn't grab the write lock on every packet.
-	let needs_sdp_write = read_sdp().audio.is_none();
-	if needs_sdp_write {
-		if let Some(asc) =
-			build_audio_specific_config_hex(header.aot, header.sample_rate, header.channels)
-		{
-			let mut w = write_sdp();
-			if w.audio.is_none() {
-				w.audio = Some(AudioParams {
-					codec: AudioCodec::Aac,
-					payload_type: AAC_PAYLOAD_TYPE,
-					sample_rate: header.sample_rate,
-					channels: header.channels,
-					asc_hex: Some(asc),
-				});
-			}
-		} else {
-			tracing::warn!(
-				sample_rate = header.sample_rate,
-				channels = header.channels,
-				"AAC sample_rate/channels unsupported for AudioSpecificConfig"
-			);
-		}
-	}
-
-	// Strip ADTS header; body is what the AU-hbr packetizer expects.
-	// parse_adts accepts any frame_length ≥ some minimum, so defend
-	// against a malformed frame_length that's still < header length.
-	if aac.data.len() < ADTS_HEADER_LEN || header.frame_length < ADTS_HEADER_LEN {
-		tracing::debug!(
-			frame_length = header.frame_length,
-			data_len = aac.data.len(),
-			"AAC frame_length/data too small for ADTS header; dropping"
-		);
-		return;
-	}
-	let payload = &aac.data[ADTS_HEADER_LEN..];
-	// Clamp to the ADTS header's declared frame_length — trailing
-	// bytes beyond it can appear on some firmwares.
-	let au_bytes_len = header
-		.frame_length
-		.saturating_sub(ADTS_HEADER_LEN)
-		.min(payload.len());
-	if au_bytes_len == 0 {
-		// Empty AAC body (truncated packet, or frame_length exactly
-		// equal to ADTS_HEADER_LEN). Dropping is preferable to emitting
-		// a zero-length AU that would become a malformed RTP packet
-		// downstream (build_au_hbr_payload on an empty slice would
-		// produce a header with size=0 and no body).
-		//
-		// We also do NOT upgrade audio_presence here: a subscriber
-		// waiting for Frame::Audio on the broadcast would observe
-		// nothing, so "Present" would lie. Treat this as if we hadn't
-		// seen a usable AAC packet yet. SDP audio may already be
-		// populated by the code above (the write happens before this
-		// guard) — that's fine, DESCRIBE advertising audio before any
-		// audio reaches the broadcast is already the pre-SETUP reality.
-		tracing::debug!("AAC packet with empty body; dropping");
-		return;
-	}
-	let au_data = bytes::Bytes::copy_from_slice(&payload[..au_bytes_len]);
-
-	// Monotonic RTP timestamp. AAC-LC carries 1024 samples per access
-	// unit (RFC 3640 / ISO 14496-3); HE-AAC / HE-AACv2 carry 2048. The
-	// RTP clock rate equals the audio sample rate, so each emitted AU
-	// advances the counter by the per-AU sample count. The packetizer
-	// forwards this `pts` verbatim into the RTP header (see
-	// src/rtsp/server/packetizer.rs dispatch_audio). Zero-PTS
-	// audio caused ffmpeg/mpv/gst-launch to reject streams with
-	// "DTS N >= N" on the 4K HEVC camera; monotonic increments fix the
-	// root cause. Wrap with `wrapping_add` — RTP timestamps intentionally
-	// wrap at 2^32.
-	//
-	// Unsupported AOTs (1/3/4/...) have no confirmed per-AU sample count,
-	// so we drop the frame rather than guess a step and drift. Warn
-	// once per new AOT via `state.aac_aot` so a latched-on-bad-AOT
-	// stream doesn't log per packet.
-	let samples_per_au = match aac_samples_per_au(header.aot) {
-		Some(n) => n,
-		None => {
-			if state.aac_aot != Some(header.aot) {
-				tracing::warn!(
-					aot = header.aot,
-					"handle_aac: unsupported AudioObjectType; dropping AAC packet"
-				);
-				state.aac_aot = Some(header.aot);
-			}
-			return;
-		}
-	};
-	if state.aac_aot != Some(header.aot) {
-		// One-shot per-AOT trace so operators can see the cadence
-		// parameters bairelay is using for this stream when debugging.
-		// Kept at debug level — every camera connect logs once per
-		// stream, which is too chatty for INFO.
-		tracing::debug!(
-			aot = header.aot,
-			sample_rate = header.sample_rate,
-			channels = header.channels,
-			samples_per_au,
-			aac_frames = header.aac_frames,
-			"AAC stream parameters"
-		);
-		state.aac_aot = Some(header.aot);
-	}
-	// ADTS may pack 1..=4 AAC frames per packet (RFC 7798 / ISO 13818-7
-	// §6.2 `number_of_raw_data_blocks_in_frame`). The RTP timestamp must
-	// advance by every contained frame, not just one. Argus firmwares
-	// observed in the field have packed audio across packets, so this
-	// matters: a fixed-1024 step against a multi-frame packet leaves the
-	// PTS-vs-NTP slope below clock_rate and surfaces as `Invalid audio
-	// PTS` jumps in mpv every few seconds.
-	let pts_step = samples_per_au.saturating_mul(header.aac_frames as u32);
-
-	// Advance the PTS counter BEFORE the Bridging gate. The camera's
-	// audio cadence is the only wallclock proxy we have during a gap.
-	let pts = state.aac_pts_next;
-	state.aac_pts_next = state.aac_pts_next.wrapping_add(pts_step);
-
-	// drop live audio while `Bridging`. Video is frozen
-	// (replay frames only), so forwarding audio would produce
-	// nonsensical A/V correlation downstream. Keep the drop silent —
-	// it fires on every audio packet during a gap, so a log line
-	// would spam. SDP and presence state are untouched: we already
-	// did the SDP write above (DESCRIBE stays accurate), and presence
-	// should reflect frames that actually reached subscribers.
-	if bridging {
-		return;
-	}
-
-	let frame = Frame::Audio {
-		payload: AudioPayload::Aac {
-			au_data,
-			sample_rate: header.sample_rate,
-			channels: header.channels,
-		},
-		pts,
-	};
-
-	// Route through the audio pacer when one is wired in (production).
-	// The pacer holds each frame until the codec-natural slot
-	// (`pts_step / sample_rate`) elapses, capping accumulated lead time
-	// at AUDIO_PACER_MAX_LEAD. When the pacer is absent (test paths
-	// calling `apply_bcmedia_packet` directly), broadcast immediately so
-	// per-packet unit tests stay synchronous.
-	let duration = paced_audio_duration(pts_step, header.sample_rate);
-	dispatch_paced_audio(audio_pace_tx, tx, frame, duration);
-
-	// Upgrade audio_presence regardless of the dispatch outcome.
-	// SendError just means no subscribers (or pacer back-pressure); the
-	// frame was still "emitted" from the translator's perspective and
-	// presence reflects what we produced, not what anyone read. The
-	// empty-body drop above is the one case where we skip the upgrade.
-	let mut p = audio_presence.write_recover();
-	*p = p.observed(AudioCodec::Aac);
-}
-
-/// Convert a per-AU sample count + sample rate to the corresponding
-/// wall-clock duration. Used by the audio pacer to schedule the next
-/// emission slot.
-fn paced_audio_duration(samples: u32, sample_rate: u32) -> Duration {
-	if sample_rate == 0 {
-		return Duration::ZERO;
-	}
-	let micros = (samples as u64).saturating_mul(1_000_000) / sample_rate as u64;
-	Duration::from_micros(micros)
-}
-
 /// Send `frame` via the audio pacer when present, otherwise via the
 /// broadcast directly. Centralises the production-vs-test choice so
-/// `handle_aac` and `handle_adpcm` can't drift on it. Pacer-queue
+/// the AAC and ADPCM emit paths can't drift on it. Pacer-queue
 /// overflow goes through `record_pacer_overflow` so at most one warn
 /// per 60 s lands per process — sustained back-pressure surfaces the
 /// suppressed-count on the next emitted line.
@@ -2241,113 +1552,6 @@ fn dispatch_paced_audio(
 		return;
 	}
 	let _ = tx.send(frame);
-}
-
-/// Translate a `BcMedia::Adpcm` packet to a `Frame::Audio { G711Ulaw }`
-/// by decoding ADPCM → PCM16 (16 kHz) → PCM16 (8 kHz) → µ-law.
-///
-/// Populates `SdpParams.audio` with G.711 µ-law params (static RTP PT 0
-/// per RFC 3551, 8 kHz mono) on first observation. Subsequent packets
-/// skip the SDP write via the same read-check-then-write-lock pattern
-/// `handle_aac` uses.
-///
-/// Also upgrades `audio_presence` from `Unknown`/`Absent` to
-/// `Present { codec: G711Ulaw }` via `AudioPresence::observed`, but
-/// only after a frame actually reaches the broadcast channel — dropped
-/// packets (decode failures, empty blocks) leave presence untouched.
-///
-/// Reolink ADPCM packets carry the full predictor+step header at the
-/// start of every block, so a per-packet decoder with fresh state is
-/// correct — no cross-packet continuation is needed.
-///
-/// Silently drops the packet when `gap_state` reads `Bridging`; see body for
-/// invariant details (SDP populates first, `audio_presence` untouched, PTS
-/// counter held so Live resume continues cleanly).
-fn handle_adpcm(
-	adpcm: &crate::baichuan::bcmedia::model::BcMediaAdpcm,
-	tx: &broadcast::Sender<Frame>,
-	audio_pace_tx: Option<&mpsc::Sender<PacedFrame>>,
-	sdp_params: &Arc<RwLock<SdpParams>>,
-	audio_presence: &Arc<RwLock<crate::audio_presence::AudioPresence>>,
-	state: &mut StreamTranslatorState,
-	bridging: bool,
-) {
-	use crate::rtsp::codec::g711::{encode as g711_encode, G711_PAYLOAD_TYPE};
-	use crate::rtsp::codec::AudioCodec;
-	use crate::rtsp::provider::AudioPayload;
-	use crate::rtsp::sdp::AudioParams;
-	use crate::rtsp::transcode::{adpcm::AdpcmDecoder, resample::decimate_16_to_8};
-
-	let mut dec = AdpcmDecoder::new();
-	let pcm_16k = match dec.decode_block(&adpcm.data) {
-		Ok(p) => p,
-		Err(e) => {
-			tracing::debug!(error = ?e, "ADPCM decode failed; dropping packet");
-			return;
-		}
-	};
-
-	if pcm_16k.is_empty() {
-		tracing::debug!("ADPCM block decoded to zero samples; dropping");
-		return;
-	}
-
-	let pcm_8k = decimate_16_to_8(&pcm_16k);
-	if pcm_8k.is_empty() {
-		tracing::debug!("ADPCM block too short after decimation; dropping");
-		return;
-	}
-
-	let ulaw = bytes::Bytes::from(g711_encode(&pcm_8k));
-
-	// Populate SDP audio on first observation (read-then-write-lock
-	// pattern matches handle_aac). Poison-recovering accessors so a
-	// panic elsewhere holding the SDP lock doesn't cascade.
-	let read_sdp = || sdp_params.read_recover();
-	let write_sdp = || sdp_params.write_recover();
-	if read_sdp().audio.is_none() {
-		let mut w = write_sdp();
-		if w.audio.is_none() {
-			w.audio = Some(AudioParams {
-				codec: AudioCodec::G711Ulaw,
-				payload_type: G711_PAYLOAD_TYPE,
-				sample_rate: 8_000,
-				channels: 1,
-				asc_hex: None,
-			});
-		}
-	}
-
-	// Advance the PTS counter BEFORE the Bridging gate — same rationale
-	// as handle_aac: the transcoded output sample count is the wallclock
-	// proxy we use to keep A/V aligned on Live resume. G.711 (µ-law,
-	// RFC 3551 PT 0) uses a static 8 kHz clock with one RTP tick per
-	// output sample, so `ulaw.len()` is the natural step.
-	let sample_count = ulaw.len() as u32;
-	let pts = state.g711_pts_next;
-	state.g711_pts_next = state.g711_pts_next.wrapping_add(sample_count);
-
-	// drop live audio while `Bridging`. See `handle_aac` for
-	// the full reasoning — same invariants apply (silent drop, SDP
-	// already populated, presence untouched).
-	if bridging {
-		return;
-	}
-
-	// Route through the audio pacer when present (production); fall back
-	// to direct broadcast in test paths. Same dispatch helper that
-	// `handle_aac` uses, so test setup stays consistent across codecs.
-	let frame = Frame::Audio {
-		payload: AudioPayload::G711Ulaw { samples: ulaw },
-		pts,
-	};
-	// G.711 µ-law is 1 byte per sample at 8 kHz, so the produced ulaw
-	// length is also the sample count for pacing purposes.
-	let duration = paced_audio_duration(sample_count, 8_000);
-	dispatch_paced_audio(audio_pace_tx, tx, frame, duration);
-
-	let mut p = audio_presence.write_recover();
-	*p = p.observed(AudioCodec::G711Ulaw);
 }
 
 #[cfg(test)]
@@ -2399,27 +1603,6 @@ mod tests {
 	fn arc_stream_source_is_send_sync() {
 		fn assert_send_sync<T: Send + Sync>() {}
 		assert_send_sync::<Arc<StreamSource>>();
-	}
-
-	#[test]
-	fn paced_audio_duration_aac_lc_at_16khz_is_64ms() {
-		assert_eq!(
-			paced_audio_duration(1024, 16_000),
-			Duration::from_micros(64_000)
-		);
-	}
-
-	#[test]
-	fn paced_audio_duration_g711_at_8khz_per_byte_is_125us() {
-		assert_eq!(
-			paced_audio_duration(160, 8_000),
-			Duration::from_micros(20_000)
-		);
-	}
-
-	#[test]
-	fn paced_audio_duration_zero_sample_rate_returns_zero() {
-		assert_eq!(paced_audio_duration(1024, 0), Duration::ZERO);
 	}
 
 	/// The pacer holds back queued frames until each item's `duration`
@@ -2719,13 +1902,13 @@ mod tests {
 		);
 	}
 
-	/// when in `Bridging`, [`handle_aac`] must drop
+	/// when in `Bridging`, the driver's AAC path must drop
 	/// the packet silently — no broadcast, no PTS advance, no
 	/// presence upgrade. SDP is allowed to populate on the first
 	/// observation so DESCRIBE stays accurate (the check happens
 	/// after the SDP write by design).
 	#[test]
-	fn handle_aac_drops_frame_during_bridging() {
+	fn apply_drops_aac_frame_during_bridging() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAac;
 
@@ -2774,10 +1957,10 @@ mod tests {
 		assert_eq!(*presence.read().unwrap(), AudioPresence::Unknown);
 	}
 
-	/// mirror: [`handle_adpcm`] must honour the same
-	/// Bridging drop contract as [`handle_aac`].
+	/// mirror: the driver's ADPCM path must honour the same
+	/// Bridging drop contract as the driver's AAC path.
 	#[test]
-	fn handle_adpcm_drops_frame_during_bridging() {
+	fn apply_drops_adpcm_frame_during_bridging() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 
@@ -2832,7 +2015,7 @@ mod tests {
 	/// timestamp consistent with video (which advanced via synth replay
 	/// during the gap).
 	#[test]
-	fn handle_aac_pts_advances_through_bridging_and_resumes_in_live() {
+	fn apply_aac_pts_advances_through_bridging_and_resumes_in_live() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAac;
 
@@ -2927,14 +2110,6 @@ mod tests {
 		assert_eq!(state.aac_pts_next, 6 * 1024);
 	}
 
-	#[test]
-	fn micros_to_90khz_matches_reference() {
-		// 1 second = 1_000_000 µs → 90_000 ticks.
-		assert_eq!(micros_to_90khz(1_000_000), 90_000);
-		// 0 stays 0.
-		assert_eq!(micros_to_90khz(0), 0);
-	}
-
 	/// Build a minimal H.265 Annex-B access unit containing VPS + SPS +
 	/// PPS + IDR NALs. NAL header bytes are the two-byte HEVC form — the
 	/// first byte carries the NAL type in bits 1..=6 and the second byte
@@ -2966,7 +2141,7 @@ mod tests {
 
 	/// follow-up: a P-frame that arrives before any
 	/// I-frame has set the detected codec must early-return inside
-	/// `handle_pframe` and report `false` from `apply_bcmedia_packet`
+	/// the P-frame translator and report `None` from `apply_bcmedia_packet`
 	/// so `reader_task` does NOT flip `gap_state` to `Live`.
 	/// Subscribers saw nothing; the source must stay `Bridging`.
 	#[test]
@@ -3473,7 +2648,7 @@ mod tests {
 
 	#[test]
 	fn apply_bcmedia_packet_assigns_monotonic_aac_pts() {
-		// Regression: handle_aac previously emitted `pts: 0` on every
+		// Regression: the AAC path previously emitted `pts: 0` on every
 		// frame, which the packetizer forwarded verbatim into the RTP
 		// header. ffmpeg/mpv/gst-launch rejected the resulting stream on
 		// the 4K HEVC camera with "DTS N >= N" errors. Fix: AAC-LC
@@ -3529,7 +2704,7 @@ mod tests {
 
 	#[test]
 	fn apply_bcmedia_packet_assigns_monotonic_g711_pts() {
-		// Regression (see twin AAC test): handle_adpcm previously emitted
+		// Regression (see twin AAC test): the ADPCM path previously emitted
 		// `pts: 0` on every frame. G.711 uses a static 8 kHz RTP clock
 		// (RFC 3551 PT 0) and encodes one tick per output sample, so the
 		// counter must advance by the per-frame sample count.
@@ -3798,25 +2973,9 @@ mod tests {
 	}
 
 	#[test]
-	fn aac_samples_per_au_branches_on_aot() {
-		// AAC-LC → 1024 samples/AU.
-		assert_eq!(aac_samples_per_au(2), Some(1024));
-		// HE-AAC (SBR) and HE-AACv2 (PS) both double to 2048/AU.
-		assert_eq!(aac_samples_per_au(5), Some(2048));
-		assert_eq!(aac_samples_per_au(29), Some(2048));
-		// Unsupported AOTs: we have no confirmed sample count, so the
-		// helper reports None and the caller drops the frame.
-		assert_eq!(aac_samples_per_au(1), None);
-		assert_eq!(aac_samples_per_au(3), None);
-		assert_eq!(aac_samples_per_au(4), None);
-		assert_eq!(aac_samples_per_au(0), None);
-		assert_eq!(aac_samples_per_au(255), None);
-	}
-
-	#[test]
-	fn handle_aac_drops_unsupported_aot_and_leaves_pts() {
+	fn apply_drops_unsupported_aac_aot_and_leaves_pts() {
 		// AOT=1 (AAC Main) — unsupported on Reolink and we have no
-		// confirmed sample-per-AU count, so handle_aac must drop the
+		// confirmed sample-per-AU count, so the AAC path must drop the
 		// frame rather than advance the PTS counter by a guessed step.
 		//
 		// ADTS profile field is 2 bits (byte[2] bits 6..7) encoding
@@ -3903,10 +3062,10 @@ mod tests {
 		);
 	}
 
-	// ── Edge-case drops: handle_aac / handle_adpcm reject paths ──────
+	// ── Edge-case drops: AAC / ADPCM reject paths via the driver ─────
 
 	#[test]
-	fn handle_aac_drops_on_malformed_adts_header() {
+	fn apply_drops_aac_on_malformed_adts_header() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAac;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
@@ -3941,7 +3100,7 @@ mod tests {
 	}
 
 	#[test]
-	fn handle_adpcm_drops_on_empty_data() {
+	fn apply_drops_adpcm_on_empty_data() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
@@ -3988,18 +3147,6 @@ mod tests {
 			map_stream_kind(RtspStreamKind::Extern),
 			CoreStreamKind::Extern
 		));
-	}
-
-	#[test]
-	fn micros_to_90khz_edge_cases() {
-		assert_eq!(micros_to_90khz(0), 0);
-		assert_eq!(micros_to_90khz(1_000_000), 90_000);
-		// 100 µs = 9 ticks.
-		assert_eq!(micros_to_90khz(100), 9);
-		// Large-but-representable value wraps cleanly inside u32.
-		let big = u32::MAX / 10;
-		// Must not panic (wrapping arithmetic).
-		let _ = micros_to_90khz(big);
 	}
 
 	#[tokio::test]
@@ -4115,345 +3262,8 @@ mod tests {
 		assert_eq!(src.gap_state(), GapState::Live);
 	}
 
-	// ── NAL classification helpers ───────────────────────────────────
-
 	#[test]
-	fn is_parameter_set_nal_empty_returns_false() {
-		assert!(!is_parameter_set_nal(&[], VideoCodec::H264));
-		assert!(!is_parameter_set_nal(&[], VideoCodec::H265));
-	}
-
-	#[test]
-	fn is_parameter_set_nal_h264_sps_and_pps_match() {
-		// 0x67 = nal_ref_idc=3, type=7 (SPS). 0x68 = type=8 (PPS).
-		assert!(is_parameter_set_nal(&[0x67, 0x00], VideoCodec::H264));
-		assert!(is_parameter_set_nal(&[0x68, 0x00], VideoCodec::H264));
-		// 0x65 = IDR slice — not a parameter set.
-		assert!(!is_parameter_set_nal(&[0x65, 0x00], VideoCodec::H264));
-	}
-
-	#[test]
-	fn is_parameter_set_nal_h265_vps_sps_pps_match() {
-		assert!(is_parameter_set_nal(&[0x40, 0x01], VideoCodec::H265));
-		assert!(is_parameter_set_nal(&[0x42, 0x01], VideoCodec::H265));
-		assert!(is_parameter_set_nal(&[0x44, 0x01], VideoCodec::H265));
-		assert!(!is_parameter_set_nal(&[0x26, 0x01], VideoCodec::H265));
-	}
-
-	#[test]
-	fn is_slice_nal_empty_returns_false() {
-		assert!(!is_slice_nal(&[], VideoCodec::H264));
-		assert!(!is_slice_nal(&[], VideoCodec::H265));
-	}
-
-	#[test]
-	fn is_slice_nal_recognises_h264_vcl_types() {
-		assert!(is_slice_nal(&[0x41, 0x00], VideoCodec::H264));
-		assert!(is_slice_nal(&[0x65, 0x00], VideoCodec::H264));
-		assert!(!is_slice_nal(&[0x67, 0x00], VideoCodec::H264));
-		assert!(!is_slice_nal(&[0x68, 0x00], VideoCodec::H264));
-	}
-
-	#[test]
-	fn is_slice_nal_recognises_h265_vcl_types() {
-		assert!(is_slice_nal(&[0x02, 0x01], VideoCodec::H265));
-		assert!(is_slice_nal(&[0x26, 0x01], VideoCodec::H265));
-		assert!(!is_slice_nal(&[0x40, 0x01], VideoCodec::H265));
-	}
-
-	#[test]
-	fn extract_iframe_parts_h264_splits_sps_pps_idr_and_skips_sei() {
-		let sps = [0x67u8, 0x42, 0x00, 0x1F];
-		let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-		let sei = [0x06u8, 0x00];
-		let idr = [0x65u8, 0xAA, 0xBB];
-		let nals: Vec<&[u8]> = vec![&sps, &pps, &sei, &idr];
-		let (params, iframes, out_sps, out_pps, out_vps) =
-			extract_iframe_parts(VideoCodec::H264, &nals);
-		assert_eq!(params.len(), 2);
-		assert_eq!(iframes.len(), 1);
-		assert!(out_sps.is_some() && out_pps.is_some() && out_vps.is_none());
-	}
-
-	#[test]
-	fn extract_iframe_parts_h265_collects_vps_sps_pps_and_idr() {
-		let vps = [0x40u8, 0x01, 0x0C, 0x01];
-		let sps = [0x42u8, 0x01, 0x02];
-		let pps = [0x44u8, 0x01, 0xC0];
-		let idr = [0x26u8, 0x01, 0xAF];
-		let nals: Vec<&[u8]> = vec![&vps, &sps, &pps, &idr];
-		let (params, iframes, out_sps, out_pps, out_vps) =
-			extract_iframe_parts(VideoCodec::H265, &nals);
-		assert_eq!(params.len(), 3);
-		assert_eq!(iframes.len(), 1);
-		assert!(out_vps.is_some() && out_sps.is_some() && out_pps.is_some());
-	}
-
-	#[test]
-	fn extract_iframe_parts_skips_empty_nals() {
-		let empty: &[u8] = &[];
-		let sps = [0x67u8, 0x42];
-		let idr = [0x65u8, 0xAA];
-		let (_, iframes, _, _, _) = extract_iframe_parts(VideoCodec::H264, &[empty, &sps, &idr]);
-		assert_eq!(iframes.len(), 1);
-	}
-
-	#[test]
-	fn handle_pframe_returns_none_before_first_iframe() {
-		let (tx, _rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
-			microseconds: 0,
-			data: vec![0x00, 0x00, 0x01, 0x41, 0xAA],
-		};
-		let mut s = StreamTranslatorState::default();
-		let result = handle_pframe(&pframe, &tx, None, &last_frame, &mut s);
-		assert_eq!(result, None);
-	}
-
-	#[test]
-	fn handle_pframe_returns_none_on_empty_nal_split() {
-		let (tx, _rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
-			microseconds: 0,
-			data: vec![],
-		};
-		let mut s = StreamTranslatorState {
-			detected_codec: Some(VideoCodec::H264),
-			..Default::default()
-		};
-		let result = handle_pframe(&pframe, &tx, None, &last_frame, &mut s);
-		assert_eq!(result, None);
-	}
-
-	#[test]
-	fn handle_iframe_returns_none_on_empty_nal_split() {
-		let (tx, _rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let sdp_params = Arc::new(RwLock::new(SdpParams {
-			server_ip: "0.0.0.0".to_string(),
-			session_id: "0".to_string(),
-			session_name: "unit".to_string(),
-			video: None,
-			audio: None,
-		}));
-		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
-			microseconds: 0,
-			data: vec![],
-			time: None,
-		};
-		let mut s = StreamTranslatorState::default();
-		let result = handle_iframe(&iframe, &tx, None, &last_frame, &sdp_params, &mut s);
-		assert_eq!(result, None);
-	}
-
-	#[test]
-	fn handle_iframe_returns_none_when_codec_undetectable() {
-		// An Annex-B stream with a single NAL whose forbidden_zero_bit is
-		// set: detect_codec returns None → the match arm None returns None.
-		let (tx, _rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let sdp_params = Arc::new(RwLock::new(SdpParams {
-			server_ip: "0.0.0.0".to_string(),
-			session_id: "0".to_string(),
-			session_name: "unit".to_string(),
-			video: None,
-			audio: None,
-		}));
-		// 0x80: forbidden_zero_bit set → detect_codec returns None.
-		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
-			microseconds: 0,
-			data: vec![0x00, 0x00, 0x01, 0x80, 0x00],
-			time: None,
-		};
-		let mut s = StreamTranslatorState::default();
-		let result = handle_iframe(&iframe, &tx, None, &last_frame, &sdp_params, &mut s);
-		assert_eq!(result, None);
-	}
-
-	#[test]
-	fn handle_iframe_drops_h265_unspec62_and_multilayer_nals() {
-		// Argus emits HEVC NAL type 62 (UNSPEC62) inside its access units
-		// and ffmpeg's RTP-HEVC depacketizer rejects them. Verify both
-		// type-62 and a synthetic multi-layer NAL are stripped before
-		// the outbound `Frame::Video` is built. Parameter sets (VPS, SPS,
-		// PPS) and the IDR slice survive; the IDR is the only NAL on the
-		// wire after the in-band parameter-set strip.
-		let (tx, mut rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let sdp_params = Arc::new(RwLock::new(SdpParams {
-			server_ip: "0.0.0.0".to_string(),
-			session_id: "0".to_string(),
-			session_name: "unit".to_string(),
-			video: None,
-			audio: None,
-		}));
-		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H265,
-			microseconds: 0,
-			data: vec![
-				// VPS (type 32, byte 0x40, byte 1 0x01)
-				0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01, // SPS (type 33, byte 0x42)
-				0x00, 0x00, 0x01, 0x42, 0x01, 0x02, 0x03, 0x04,
-				// PPS (type 34, byte 0x44)
-				0x00, 0x00, 0x01, 0x44, 0x01, 0xC0,
-				// UNSPEC62 (byte 0x7C, byte 1 0x01) — Reolink proprietary metadata.
-				0x00, 0x00, 0x01, 0x7C, 0x01, 0xDE, 0xAD, 0xBE, 0xEF,
-				// IDR_W_RADL (type 19, byte 0x26) with multi-layer
-				// nuh_layer_id == 1 (byte0 0x27, byte1 0x09) — must be
-				// dropped by the layer-id check.
-				0x00, 0x00, 0x01, 0x27, 0x09, 0xCA, 0xFE,
-				// Standard IDR_W_RADL (byte 0x26, byte 1 0x01) — survives.
-				0x00, 0x00, 0x01, 0x26, 0x01, 0xAA, 0xBB,
-			],
-			time: None,
-		};
-		let mut s = StreamTranslatorState::default();
-		let pts =
-			handle_iframe(&iframe, &tx, None, &last_frame, &sdp_params, &mut s).expect("Some");
-		assert_eq!(s.detected_codec, Some(VideoCodec::H265));
-		let frame = rx.try_recv().expect("frame broadcast");
-		match frame {
-			Frame::Video {
-				codec,
-				nals,
-				keyframe,
-				pts_90khz,
-				..
-			} => {
-				assert_eq!(codec, VideoCodec::H265);
-				assert!(keyframe);
-				assert_eq!(pts_90khz, pts);
-				// Exactly one NAL on the wire: the standard IDR. Both
-				// the UNSPEC62 NAL and the multi-layer IDR were dropped.
-				assert_eq!(
-					nals.len(),
-					1,
-					"expected single IDR after filter, got {nals:?}"
-				);
-				let only = &nals[0];
-				assert_eq!(
-					only[0], 0x26,
-					"first byte should be standard IDR_W_RADL header"
-				);
-				assert_eq!(only[1], 0x01, "second byte should be layer_id=0, tid+1=1");
-			}
-			Frame::Audio { .. } => panic!("expected video frame, got audio"),
-		}
-	}
-
-	#[test]
-	fn handle_pframe_drops_h265_unspec62_nals() {
-		let (tx, mut rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H265,
-			microseconds: 0,
-			data: vec![
-				// UNSPEC62 (Reolink proprietary) — must be dropped.
-				0x00, 0x00, 0x01, 0x7C, 0x01, 0xDE, 0xAD,
-				// Standard TRAIL_R slice (type 1, byte 0x02) — survives.
-				0x00, 0x00, 0x01, 0x02, 0x01, 0x11, 0x22,
-			],
-		};
-		let mut s = StreamTranslatorState {
-			detected_codec: Some(VideoCodec::H265),
-			..Default::default()
-		};
-		let pts = handle_pframe(&pframe, &tx, None, &last_frame, &mut s).expect("Some");
-		let frame = rx.try_recv().expect("frame broadcast");
-		match frame {
-			Frame::Video {
-				codec,
-				nals,
-				keyframe,
-				pts_90khz,
-				..
-			} => {
-				assert_eq!(codec, VideoCodec::H265);
-				assert!(!keyframe);
-				assert_eq!(pts_90khz, pts);
-				assert_eq!(nals.len(), 1, "only standard slice should remain");
-				assert_eq!(nals[0][0], 0x02);
-			}
-			Frame::Audio { .. } => panic!("expected video frame"),
-		}
-	}
-
-	#[test]
-	fn handle_pframe_returns_none_when_only_nonstandard_nals() {
-		// A P-frame containing exclusively non-decodable NALs is
-		// dropped (no broadcast, no `last_live_frame_at` update upstream).
-		let (tx, mut rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let pframe = crate::baichuan::bcmedia::model::BcMediaPframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H265,
-			microseconds: 0,
-			data: vec![0x00, 0x00, 0x01, 0x7C, 0x01, 0xAB, 0xCD],
-		};
-		let mut s = StreamTranslatorState {
-			detected_codec: Some(VideoCodec::H265),
-			..Default::default()
-		};
-		let result = handle_pframe(&pframe, &tx, None, &last_frame, &mut s);
-		assert_eq!(result, None);
-		assert!(rx.try_recv().is_err(), "no frame should have broadcast");
-	}
-
-	#[test]
-	fn handle_iframe_short_sps_populates_zero_profile_level_id() {
-		// SPS with len < 4 → profile_level_id falls back to [0u8; 3].
-		let (tx, _rx) = broadcast::channel::<Frame>(4);
-		let last_frame = Arc::new(LastFrameBuffer::new());
-		let sdp_params = Arc::new(RwLock::new(SdpParams {
-			server_ip: "0.0.0.0".to_string(),
-			session_id: "0".to_string(),
-			session_name: "unit".to_string(),
-			video: None,
-			audio: None,
-		}));
-		// SPS NAL (type 7) 2 bytes + PPS NAL (type 8) 2 bytes + IDR slice.
-		// 0x67 = SPS; only 2 bytes (short). 0x68 = PPS; 0x65 = IDR.
-		let iframe = crate::baichuan::bcmedia::model::BcMediaIframe {
-			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
-			microseconds: 0,
-			data: vec![
-				0x00, 0x00, 0x01, 0x67, 0x42, // SPS only 2 bytes
-				0x00, 0x00, 0x01, 0x68, 0xce, // PPS
-				0x00, 0x00, 0x01, 0x65, 0xaa, // IDR
-			],
-			time: None,
-		};
-		let mut s = StreamTranslatorState::default();
-		handle_iframe(&iframe, &tx, None, &last_frame, &sdp_params, &mut s).unwrap();
-		let guard = sdp_params.read().unwrap();
-		let v = guard.video.as_ref().expect("video populated");
-		assert_eq!(v.profile_level_id, [0u8; 3]);
-	}
-
-	#[test]
-	fn extract_iframe_parts_h265_skips_empty_nal_and_non_parameter() {
-		// Empty NAL in H.265 hits the `continue` at line 1336.
-		// A TRAIL (type 1 = H.265 non-VCL non-parameter) slice hits the
-		// default `_ => {}` at line 1358.
-		let empty: &[u8] = &[];
-		let trail = [0x02u8, 0x01, 0x00]; // type=1 (TRAIL_N)
-		let vps = [0x40u8, 0x01, 0xaa];
-		let idr = [0x26u8, 0x01, 0xbb]; // IDR_W_RADL
-		let (params, iframes, _, _, out_vps) =
-			extract_iframe_parts(VideoCodec::H265, &[empty, &trail, &vps, &idr]);
-		assert_eq!(params.len(), 1);
-		assert_eq!(iframes.len(), 1);
-		assert!(out_vps.is_some());
-	}
-
-	#[test]
-	fn handle_aac_warns_on_unsupported_channel_config() {
+	fn apply_aac_unsupported_channel_config_fixture_boundary() {
 		// Drive build_audio_specific_config_hex into the None branch
 		// (line 1539). Channels > 7 → None. ADTS packs channels as
 		// ch_high (1 bit) | ch_low (2 bits) → max 7 through normal
@@ -4509,7 +3319,7 @@ mod tests {
 	}
 
 	#[test]
-	fn handle_aac_warns_on_unsupported_sample_rate_but_still_drops_body() {
+	fn apply_aac_unsupported_sample_rate_still_processes_body() {
 		// Drive build_audio_specific_config_hex into the None branch
 		// (line 1501). `parse_adts` gets a valid header but an unsupported
 		// sample rate index should yield None on ASC build. Sample-rate
@@ -4557,7 +3367,7 @@ mod tests {
 	}
 
 	#[test]
-	fn handle_aac_drops_when_frame_length_below_adts_header() {
+	fn apply_drops_aac_when_frame_length_below_adts_header() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAac;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
@@ -4689,7 +3499,7 @@ mod tests {
 		let mut dumper: Option<FrameDumper> = None;
 		let mut dumper_init_failed = false;
 		let cancel = CancellationToken::new();
-		// Empty ADPCM (handle_adpcm returns None) — state stays Bridging.
+		// Empty ADPCM (the ADPCM path emits nothing) — state stays Bridging.
 		let packet = BcMedia::Adpcm(BcMediaAdpcm { data: vec![] });
 		let result: Result<
 			std::result::Result<BcMedia, crate::baichuan::Error>,
@@ -4853,7 +3663,7 @@ mod tests {
 	}
 
 	#[test]
-	fn handle_adpcm_drops_on_short_block_after_decimation() {
+	fn apply_drops_adpcm_on_short_block_after_decimation() {
 		use crate::audio_presence::AudioPresence;
 		use crate::baichuan::bcmedia::model::BcMediaAdpcm;
 		let (tx, mut rx) = broadcast::channel::<Frame>(4);
@@ -5217,5 +4027,335 @@ mod tests {
 		let (broadcast_tx, mut broadcast_rx) = broadcast::channel::<Frame>(4);
 		dispatch_paced_audio(None, &broadcast_tx, dummy_audio_frame(), Duration::ZERO);
 		assert!(matches!(broadcast_rx.try_recv(), Ok(Frame::Audio { .. })));
+	}
+
+	// ── reader_task orchestration ─────────────────────────────────────
+	//
+	// Driven directly through the `Video` role seam with a scripted
+	// double, under `start_paused` virtual time — no hardware, no
+	// wall-clock sleeps. Every await is bounded by a `timeout` whose
+	// virtual deadline auto-advances, so a regression hangs the test
+	// for milliseconds, not forever.
+
+	use crate::baichuan::bc_protocol::VideoStream;
+	use crate::camera::CameraResult;
+	use crate::fake_camera::{MockStep, MockVideoStream};
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	/// What `ScriptedVideo::start_video` does when the reader calls it.
+	enum StartScript {
+		/// Never resolves — exercises the cancel and timeout arms.
+		Hang,
+		/// Immediate protocol error.
+		Fail,
+		/// Hand out the boxed stream (once).
+		Stream(std::sync::Mutex<Option<Box<dyn VideoStream>>>),
+	}
+
+	/// What `ScriptedVideo::stop_video` does after recording the call.
+	#[derive(Clone, Copy)]
+	enum StopScript {
+		Succeed,
+		Fail,
+		Hang,
+	}
+
+	struct ScriptedVideo {
+		start: StartScript,
+		stop: StopScript,
+		stop_calls: AtomicUsize,
+	}
+
+	impl ScriptedVideo {
+		fn new(start: StartScript, stop: StopScript) -> Arc<Self> {
+			Arc::new(Self {
+				start,
+				stop,
+				stop_calls: AtomicUsize::new(0),
+			})
+		}
+
+		fn with_stream(stream: impl VideoStream + 'static, stop: StopScript) -> Arc<Self> {
+			Self::new(
+				StartScript::Stream(std::sync::Mutex::new(Some(Box::new(stream)))),
+				stop,
+			)
+		}
+
+		fn stop_calls(&self) -> usize {
+			self.stop_calls.load(Ordering::SeqCst)
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl crate::camera::Video for ScriptedVideo {
+		async fn start_video(&self, _kind: CoreStreamKind) -> CameraResult<Box<dyn VideoStream>> {
+			match &self.start {
+				StartScript::Hang => std::future::pending().await,
+				StartScript::Fail => Err(crate::baichuan::bc_protocol::Error::Other(
+					"scripted start failure",
+				)),
+				StartScript::Stream(slot) => Ok(slot
+					.lock()
+					.unwrap()
+					.take()
+					.expect("start_video called twice on a single-stream script")),
+			}
+		}
+
+		async fn stop_video(&self, _kind: CoreStreamKind) -> CameraResult<()> {
+			self.stop_calls.fetch_add(1, Ordering::SeqCst);
+			match self.stop {
+				StopScript::Succeed => Ok(()),
+				StopScript::Fail => Err(crate::baichuan::bc_protocol::Error::Other(
+					"scripted stop failure",
+				)),
+				StopScript::Hang => std::future::pending().await,
+			}
+		}
+	}
+
+	/// `get_data` panics — stands in for a translator-side bug so the
+	/// panic-isolation contract (stop_video still runs) is pinned.
+	struct PanickingStream;
+
+	#[async_trait::async_trait]
+	impl VideoStream for PanickingStream {
+		async fn get_data(
+			&mut self,
+		) -> std::result::Result<
+			std::result::Result<BcMedia, crate::baichuan::Error>,
+			crate::baichuan::Error,
+		> {
+			panic!("scripted translator panic");
+		}
+
+		async fn shutdown(&mut self) -> std::result::Result<(), crate::baichuan::Error> {
+			Ok(())
+		}
+	}
+
+	/// One stream whose first pull reports the outer stream-finished
+	/// error, so the translator loop breaks immediately.
+	fn ended_stream() -> MockVideoStream {
+		MockVideoStream::new(vec![MockStep::OuterErr(
+			crate::baichuan::bc_protocol::Error::Other("scripted stream end"),
+		)])
+	}
+
+	fn reader_args(
+		camera: Arc<dyn crate::camera::Video>,
+		cancel: CancellationToken,
+	) -> ReaderTaskArgs {
+		let (tx, _) = broadcast::channel::<Frame>(8);
+		ReaderTaskArgs {
+			camera,
+			camera_name: "unit".to_string(),
+			rtsp_kind: RtspStreamKind::Main,
+			core_kind: CoreStreamKind::Main,
+			tx,
+			audio_pace_tx: None,
+			video_pace_tx: None,
+			last_frame: Arc::new(LastFrameBuffer::new()),
+			sdp_params: Arc::new(RwLock::new(SdpParams {
+				server_ip: "0.0.0.0".to_string(),
+				session_id: "0".to_string(),
+				session_name: "unit".to_string(),
+				video: None,
+				audio: None,
+			})),
+			cancel,
+			bcmedia_dump: None,
+			audio_presence: Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown)),
+			translator_state: Arc::new(Mutex::new(StreamTranslatorState::default())),
+			bridging: Arc::new(Mutex::new(BridgingPolicy::new(
+				Duration::from_secs(5),
+				now_std(),
+			))),
+		}
+	}
+
+	/// Virtual-time bound generous enough to cover every internal
+	/// timeout (`START_VIDEO_TIMEOUT` 30 s, `STOP_VIDEO_TIMEOUT` 5 s).
+	const READER_TEST_BUDGET: Duration = Duration::from_secs(120);
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_exits_on_cancel_before_start_video() {
+		let cam = ScriptedVideo::new(StartScript::Hang, StopScript::Succeed);
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		let args = reader_args(cam.clone() as Arc<dyn crate::camera::Video>, cancel);
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("reader must exit on pre-fired cancel");
+		assert_eq!(cam.stop_calls(), 0, "nothing started, nothing to stop");
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_exits_on_start_video_error() {
+		let cam = ScriptedVideo::new(StartScript::Fail, StopScript::Succeed);
+		let args = reader_args(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			CancellationToken::new(),
+		);
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("reader must exit on start_video error");
+		assert_eq!(cam.stop_calls(), 0, "no stream handle, so no stop_video");
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_gives_up_when_start_video_times_out() {
+		let cam = ScriptedVideo::new(StartScript::Hang, StopScript::Succeed);
+		let args = reader_args(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			CancellationToken::new(),
+		);
+		// Virtual clock auto-advances through START_VIDEO_TIMEOUT.
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("reader must give up after START_VIDEO_TIMEOUT");
+		// Documented battery-risk path: with no StreamData handle there
+		// is nothing to drive stop_video against.
+		assert_eq!(cam.stop_calls(), 0);
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_stops_camera_after_stream_end() {
+		let cam = ScriptedVideo::with_stream(ended_stream(), StopScript::Succeed);
+		let args = reader_args(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			CancellationToken::new(),
+		);
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("reader must exit after the stream ends");
+		assert_eq!(cam.stop_calls(), 1, "graceful path must call stop_video");
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_stops_camera_even_when_translator_panics() {
+		let cam = ScriptedVideo::with_stream(PanickingStream, StopScript::Succeed);
+		let args = reader_args(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			CancellationToken::new(),
+		);
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("reader must survive a translator panic");
+		assert_eq!(
+			cam.stop_calls(),
+			1,
+			"panic isolation exists precisely so stop_video still runs",
+		);
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_tolerates_stop_video_error() {
+		let cam = ScriptedVideo::with_stream(ended_stream(), StopScript::Fail);
+		let args = reader_args(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			CancellationToken::new(),
+		);
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("stop_video error must not wedge teardown");
+		assert_eq!(cam.stop_calls(), 1);
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn reader_task_bounds_a_wedged_stop_video() {
+		let cam = ScriptedVideo::with_stream(ended_stream(), StopScript::Hang);
+		let args = reader_args(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			CancellationToken::new(),
+		);
+		// STOP_VIDEO_TIMEOUT (5 s, virtual) caps the hang.
+		tokio::time::timeout(READER_TEST_BUDGET, reader_task(args))
+			.await
+			.expect("a wedged stop_video must not stall shutdown past its cap");
+		assert_eq!(cam.stop_calls(), 1);
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn stop_and_wait_is_idempotent_after_task_taken() {
+		let src = StreamSource::start_inert_for_test();
+		tokio::time::timeout(
+			Duration::from_secs(1),
+			src.stop_and_wait(Duration::from_secs(1)),
+		)
+		.await
+		.expect("bounded")
+		.expect("first stop_and_wait joins the reader");
+		// Second call finds the handle already taken and is a no-op.
+		src.stop_and_wait(Duration::from_secs(1))
+			.await
+			.expect("second stop_and_wait must be Ok");
+	}
+
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn stop_and_wait_reports_timeout_when_reader_is_wedged() {
+		let cam = ScriptedVideo::with_stream(ended_stream(), StopScript::Hang);
+		let presence = Arc::new(RwLock::new(crate::audio_presence::AudioPresence::Unknown));
+		let src = StreamSource::start(
+			cam.clone() as Arc<dyn crate::camera::Video>,
+			"unit".to_string(),
+			RtspStreamKind::Main,
+			Arc::new(LastFrameBuffer::new()),
+			None,
+			presence,
+			Duration::from_secs(5),
+		);
+		// The reader breaks out of its loop immediately (scripted stream
+		// end), then wedges inside stop_video (5 s cap). A 1 ms budget
+		// elapses first on the virtual clock → Elapsed.
+		let res = src.stop_and_wait(Duration::from_millis(1)).await;
+		assert!(res.is_err(), "wedged reader must surface Elapsed");
+	}
+
+	// ── fixture-capture init failure ─────────────────────────────────
+
+	#[test]
+	fn maybe_capture_packet_latches_init_failure() {
+		// Root path nested under a regular FILE → create fails with
+		// ENOTDIR, deterministically, without touching permissions.
+		let blocker =
+			std::env::temp_dir().join(format!("bairelay-capture-blocker-{}", std::process::id()));
+		std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+		let config = Arc::new(BcMediaDumpConfig::new(blocker.join("sub")));
+
+		let packet = BcMedia::Iframe(crate::baichuan::bcmedia::model::BcMediaIframe {
+			video_type: crate::baichuan::bcmedia::model::VideoType::H264,
+			microseconds: 0,
+			data: vec![],
+			time: None,
+		});
+		let mut dumper: Option<FrameDumper> = None;
+		let mut init_failed = false;
+
+		maybe_capture_packet(
+			&config,
+			"unit",
+			RtspStreamKind::Main,
+			&packet,
+			&mut dumper,
+			&mut init_failed,
+		);
+		assert!(dumper.is_none(), "create must fail under a file");
+		assert!(init_failed, "failure must latch");
+
+		// Second packet takes the latched path: no retry, still no dumper.
+		maybe_capture_packet(
+			&config,
+			"unit",
+			RtspStreamKind::Main,
+			&packet,
+			&mut dumper,
+			&mut init_failed,
+		);
+		assert!(dumper.is_none());
+		assert!(init_failed);
+
+		let _ = std::fs::remove_file(&blocker);
 	}
 }

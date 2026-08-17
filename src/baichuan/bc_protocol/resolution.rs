@@ -253,7 +253,7 @@ impl<T: ToSocketAddrsOrUid + ?Sized> ToSocketAddrsOrUid for &T {
 /// `find_camera`'s `tokio::select!` fallback chain
 /// (local UDP broadcast → remote P2P → map → relay).
 ///
-/// Extracted as a pure function so Stage 6 can cover the table in unit
+/// Extracted as a pure function so the table is coverable in unit
 /// tests without standing up the real UDP sockets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DiscoveryFlags {

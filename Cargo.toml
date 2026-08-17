@@ -48,6 +48,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 bytes = "1"
+# Already in the tree transitively; direct use keeps the per-packet
+# translate() emit list off the heap on the hottest path.
+smallvec = "1"
 quick-xml = { version = "0.41", features = ["serialize"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 ab_glyph = "0.2"

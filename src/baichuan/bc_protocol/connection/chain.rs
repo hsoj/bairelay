@@ -9,8 +9,9 @@
 //! We can't instantiate that select! in a unit test without real
 //! sockets, but we CAN extract the branch-selection + short-circuit
 //! semantics into a generic helper that takes four async closures and
-//! a [`DiscoveryFlags`] struct. Stage 6 uses this helper to cover the
-//! fallback chain, per-step timeouts, and the cellular skip-local path.
+//! a [`DiscoveryFlags`] struct. Unit tests drive this helper to cover
+//! the fallback chain, per-step timeouts, and the cellular skip-local
+//! path.
 //!
 //! The helper deliberately runs the branches sequentially (not in
 //! parallel), mirroring the effect of `find_camera`'s `if allow_X`

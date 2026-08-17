@@ -6,7 +6,7 @@
 //!
 //! Parameter-set aggregation (STAP-A) is intentionally unused: outbound
 //! `Frame::Video` strips SPS/PPS at the translator boundary
-//! (`stream_source::handle_iframe`) and the SDP `sprop-parameter-sets`
+//! (`stream_translate`'s I-frame translator) and the SDP `sprop-parameter-sets`
 //! fmtp attribute carries them out-of-band.
 
 use crate::rtsp::rtp::{build_packet, RtpCounters};

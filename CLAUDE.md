@@ -63,6 +63,7 @@ Read `docs/architecture.md` before non-trivial work; `docs/implementation.md` is
 - **Wake lock** (`src/wake_lock.rs`): `AtomicUsize` + two separate `Notify`s (`notify_acquire` for 0→1, `notify_release` for 1→0), both using `notify_one()` so a permit is stored for late waiters. RAII Drop guards. The grace-period countdown (`src/grace_period.rs`) listens on release and resets on any new acquire.
 - **Watchdog** (`src/watchdog.rs`) is a 30 s safety net, not the primary lifecycle mechanism.
 - **Gap bridging**: the *policy* (threshold, `Live ⇄ Bridging`, replay-PTS synthesis) is a pure state machine in `src/gap_bridging.rs`; `src/stream_source.rs` is its driver — it supplies the clock, looks up the cached burst, and broadcasts. When upstream stalls past `gap_threshold_secs` the source re-broadcasts cached I-frame NALs with synthesised PTS so clients see continuous RTP. Audio is dropped on the wire but PTS counters keep advancing so A/V realigns on resume.
+- **Media translation** follows the same split: `src/stream_translate.rs` is a pure `translate(packet, &mut state, now, bridging) → (emits, video_pts)` layer (codec detection, NAL filtering/reordering, PTS synthesis, SDP derivation, the bridging audio gate); `apply_bcmedia_packet` in `src/stream_source.rs` is its fan-out driver, owning every channel/lock/buffer. Reviewer rule: no `Sender`, `Arc`, or `RwLock` in a `translate`-family signature.
 - **Error strategy**: `thiserror` typed enums in library crates, `anyhow` in the binary. Connection failures retry with backoff and never crash the process; **auth failures stop retrying permanently** (don't hammer cameras with bad credentials). One-shot commands exit with a coarse code table (`src/oneshot/classify.rs`): 2 usage, 3 config, 4 connection/auth, 5 protocol, 6 unsupported, 130 Ctrl+C.
 - **Sockets bind synchronously in `main.rs`** before any "started" log line; bind failure halts startup. That's why `RtspServer::serve_with_listener` takes a pre-bound listener.
 
@@ -82,7 +83,7 @@ Everything is tested through trait seams rather than live hardware:
 
 Core's remaining helpers (`MockConnection`, `BcCamera::from_mock_connection`, `MotionData::test_new`) are behind the `test-util` Cargo feature so a release build can't substitute a scripted connection for a real camera — keep new ones behind it too. Camera-level fakes live next to the port they implement, not in the protocol crate.
 
-`gap_bridging.rs` performs no I/O and takes time as a parameter, so its tests need no doubles, no runtime, and no timeouts — they run in microseconds. Prefer adding a policy test there over driving the same logic through a task loop.
+`gap_bridging.rs` and `stream_translate.rs` perform no I/O and take time as a parameter, so their tests need no doubles, no runtime, and no timeouts — they run in microseconds. Prefer adding a policy/translation test there over driving the same logic through a task loop.
 
 **Hang-protection discipline**: every mock-based "camera doesn't answer" test wraps the op in `tokio::time::timeout(Duration::from_millis(200), …)`. A test awaiting a channel with no guaranteed sender hangs `cargo test` forever. Core-crate tests each stay under 1 s wall time.
 
