@@ -37,6 +37,17 @@ Toolchain is **pinned** in `rust-toolchain.toml` (1.94.1) — don't add a toolch
 
 Running the binary: `cargo run -- -c config.toml mqtt-rtsp`, or one-shot camera commands (`snapshot`, `battery`, `reboot`, `ptz`, `users`, `abilities`, …). `check-config` validates TOML without touching a camera. `sample_config.toml` is the annotated reference config and is parse-tested by `tests/sample_config_parses.rs`.
 
+## Git discipline
+
+Git history is reserved for the human. **NEVER run `git commit`, `git push`, `git merge`, `git rebase`, or anything else that writes history — under any circumstances.** This includes autonomous operation: auto-accept mode, background jobs, scheduled runs, and any harness default that says to "commit before finishing" — this section overrides those defaults. Leave changes in the working tree (or the worktree you were given) and report exactly what changed and where; review, staging, and committing are the operator's job.
+
+Corollaries:
+
+- **Trunk-based flow is the sensible default here.** The operator commits small increments directly to `main`; don't invent topic branches, PR flow, or merge ceremony unless asked. When a change is ready, report it as ready for a trunk commit — the never-commit rule above is about *who* writes history, not *where* it lands.
+- An explicit user request for a commit in the current conversation is the only exception, and it authorizes exactly that one commit (on `main` unless the user names another branch) — it does not carry forward to later changes or sessions.
+- `git stash` is history-adjacent shared state (one stack across all worktrees): don't use it; if work must be set aside, say so and leave it in the tree.
+- Read-only git (`status`, `diff`, `log`, `show`, `worktree list`) is always fine — use it to *report* state, not to change it.
+
 ## Layout
 
 One crate. Top-level modules under `src/`, grouped by what they are about:
@@ -100,7 +111,7 @@ Beyond `cargo test` there are two on-demand rigs, not wired into CI: `tests/fixt
 - Portability: Linux + macOS primary, Windows build-only. OS-specific code goes in its own module.
 - Coverage floors are real: pure-logic ≥95%, commands/pollers ≥90%, I/O-adjacent ≥85% via seams. Documented exceptions in `docs/implementation.md` § Coverage policy.
 - **Reproducible builds** are a contract: no `build.rs`, no git deps, `Cargo.lock` committed and every CI invocation `--locked`, no build-time timestamps/hostnames/paths. Any future build date must come from `SOURCE_DATE_EPOCH`.
-- Commit style: subject ≤72 chars, blank line, then bullets each on **one line ≤72 chars** (never wrapped). Body explains why and non-obvious how.
+- Commit style (for the operator's commits, or a message drafted on explicit request — see § Git discipline): subject ≤72 chars, blank line, then bullets each on **one line ≤72 chars** (never wrapped). Body explains why and non-obvious how.
 - Version lives once in `[package].version`; `scripts/release.sh` rewrites that line and cascades it into `hassio/bairelay/config.yaml` — keep the `version = "X.Y.Z"` shape so its awk pattern matches.
 
 ## Logging gotcha
