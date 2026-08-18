@@ -4306,9 +4306,26 @@ mod tests {
 			presence,
 			Duration::from_secs(5),
 		);
-		// The reader breaks out of its loop immediately (scripted stream
-		// end), then wedges inside stop_video (5 s cap). A 1 ms budget
-		// elapses first on the virtual clock → Elapsed.
+		// Yield-poll until the reader has actually entered the wedged
+		// stop_video (stop_calls increments at entry, before the hang).
+		// Without this barrier, stop_and_wait's cancel races the
+		// reader's very first select! — cancel-arm wins ~half the runs,
+		// the reader exits before ever wedging, and the Elapsed
+		// assertion below flakes. Bounded so a regression hangs the
+		// test for iterations, not forever.
+		for _ in 0..1_000 {
+			if cam.stop_calls() == 1 {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(
+			cam.stop_calls(),
+			1,
+			"reader never reached the wedged stop_video"
+		);
+		// The reader is now parked inside stop_video's 5 s cap; the
+		// 1 ms budget elapses first on the virtual clock → Elapsed.
 		let res = src.stop_and_wait(Duration::from_millis(1)).await;
 		assert!(res.is_err(), "wedged reader must surface Elapsed");
 	}
