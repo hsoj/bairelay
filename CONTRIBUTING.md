@@ -137,7 +137,7 @@ In rough order of "I want to understand the system":
 4. **`docs/testing.md`** — fixture pipeline, HA rig, manual-verify, live-verify discipline.
 5. **`docs/cloud-interception.md`** — wire-level protocol reference for the wake server + push listener.
 
-Those five are reference material and stay current. `docs/remediation-plan.md` is the odd one out — a working list of known gaps against Rust best practice, ordered by risk, with a sequencing table. Read it if you're looking for something to pick up; it gets deleted when it empties.
+Those five are reference material and stay current. `docs/action-plan.md` is the odd one out — the single working plan: known gaps ordered by risk, with sequencing, design rationale, and a checked-and-clean record. Read it if you're looking for something to pick up.
 
 ## Scope
 

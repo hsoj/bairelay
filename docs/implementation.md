@@ -467,7 +467,7 @@ When `tls_client_auth = "request"` or `"require"`, bairelay verifies the client 
 
 ## Coverage policy
 
-Workspace coverage is measured via `cargo tarpaulin` from project root with `tarpaulin.toml` defaults set to `workspace = true`, `all-targets = true`, `skip-clean = true`, and `fail-under = 87`. Current baseline is **~88.6 %** measured against the full workspace (no source-file exclusions). The 87 % gate is intentionally a hair below the actual baseline so natural coverage drift doesn't trip CI on every PR; raising it requires a coordinated push past the structural under-counters in `src/main.rs` (the `#[tokio::main]` body), `src/cli.rs` (clap-derive macro output), and `src/oneshot/runner.rs` (real-camera socket bind). The per-crate gate stays tighter — each non-binary crate stays ≥ 90 %; `wake_server` sits at 94.9 % on its own.
+Coverage is measured via `cargo tarpaulin` from project root with `tarpaulin.toml` set to `all-targets = true`, `skip-clean = true`, and `fail-under = 87`. Current baseline is **~88.6 %** across the whole crate (no source-file exclusions). The 87 % gate is intentionally a hair below the actual baseline so natural coverage drift doesn't trip CI on every PR; raising it requires a coordinated push past the structural under-counters in `src/main.rs` (the `#[tokio::main]` body), `src/cli.rs` (clap-derive macro output), and `src/oneshot/runner.rs` (real-camera socket bind). The protocol and server modules (`src/rtsp/`, `src/wake_server/`, `src/baichuan/`) individually sit well above the gate.
 
 Per-file targets:
 

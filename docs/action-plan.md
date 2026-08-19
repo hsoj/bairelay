@@ -1,24 +1,23 @@
 # Action Plan
 
-The single ordered plan. Consolidates the previous revision of this file (stages 0–4,
-all landed except the S4-1 live-verify pass), the outstanding threads of
-`docs/remediation-plan.md` and `docs/decoupling-plan.md`, and the **2026-08-17
-full-codebase compliance audit** (five passes — errors/panics, async/concurrency,
-types/API shape, architecture/layering, tests/hygiene — against `rust-practices.md`,
+The single plan document. Consolidates every prior planning doc — the staged plan
+(stages 0–4, all landed except the S4-1 live-verify pass), `remediation-plan.md`
+(2026-07-26 review), `decoupling-plan.md` (stage-4 design rationale), and
+`hexagonal-refactor.md` (phases 1–5) — plus the **2026-08-17 full-codebase compliance
+audit** (five passes — errors/panics, async/concurrency, types/API shape,
+architecture/layering, tests/hygiene — against `rust-practices.md`,
 `rust-code-structure.md`, and `CLAUDE.md`; every finding confirmed by reading the code,
-not grep alone).
+not grep alone). The three retired docs are deleted; their still-load-bearing content
+lives in § Design rationale and § Checked and clean below, and their landed history
+lives in git.
 
 Ordered by the project's stated priorities: **stability → developer experience →
 design best practice → composition-based trait design**. Where an item serves several,
 it is placed by the highest one it serves.
 
-**Sequencing lives here and nowhere else.** Companion docs keep their roles:
-
-| Doc | Role |
-|---|---|
-| `remediation-plan.md` | Findings archive (2026-07-26 review) — evidence and diagnosis; every item landed or carried here |
-| `decoupling-plan.md` | Design rationale for the stage-4 shapes — no sequencing; D3 (discovery split) carried into § Deferred |
-| `hexagonal-refactor.md` | Historical record of phases 1–5 — do not re-plan from it |
+**Sequencing lives here and nowhere else.** `docs/code-paths.md` is the mermaid map of
+the paths these items touch; `docs/rust-practices.md` / `docs/rust-code-structure.md`
+supply the rule IDs cited throughout.
 
 Line numbers below are point-in-time (2026-08-17, `main` @ c770f56) — re-measure before
 relying on them.
@@ -154,15 +153,16 @@ lock off Start/Stop edges, so a Start+Stop inside one poll window delivers only 
 and wake-on-motion no-ops for that event. Return the drained sequence (or deliver
 edges) and handle them in order.
 
-## S5-9. Reconcile the grace-period contract · S
+## S5-9. Reconcile the grace-period contract · S — **decided 2026-08-18: docs follow code**
 
-CLAUDE.md says the countdown "resets on any new acquire"; `grace_period.rs:22-53` is
-check-at-deadline and its own docstring says an acquire+release inside the window is
-invisible — a session can be cancelled ~½ s after the camera was last used, and the
-watchdog doesn't cover this path (`GracePeriod::run` returning is what fires
-`sc.cancel()`, `camera.rs:1276`). Decide: re-arm on acquire, or fix CLAUDE.md (and
-`hexagonal-refactor.md`'s domain table, which repeats the claim). Either way, pin the
-chosen behaviour with a test.
+`grace_period.rs:22-53` is check-at-deadline: it sleeps the full window and checks
+idle state once, so an acquire+release pair inside the window is invisible and a
+session can be cancelled ~½ s after the camera was last used; the watchdog doesn't
+cover this path (`GracePeriod::run` returning is what fires `sc.cancel()`,
+`camera.rs:1276`). The decision: check-at-deadline is the accepted behaviour.
+CLAUDE.md now describes it accurately. **Remaining:** pin
+the accepted semantics with a test — held-at-deadline keeps the session; a brief
+acquire+release inside the window does not re-arm.
 
 ## S5-10. Cap and token the network-driven spawns · S
 
@@ -324,6 +324,10 @@ code) — none of these justify a standalone churn PR. Grouped by theme:
   exposure); two `Drop` impls missing the `try_current()` guard their siblings have
   (`motion.rs:216`, `stream.rs:89`); `cloud.rs`'s process-global `TEST_BASE`
   single-test mock.
+- **Documented invariant gaps** (from the 2026-07 review, still open):
+  `rtsp/codec/aac.rs:122` does `(au.len() as u16) << 3`, silently wrapping the 13-bit
+  AU-size field for frames ≥ 8192 bytes — not reachable with real AAC; a
+  `debug_assert!` would document the invariant.
 
 ---
 
@@ -341,6 +345,78 @@ code) — none of these justify a standalone churn PR. Grouped by theme:
 | **Vendored BC types in role signatures** | Re-measure per role after S6-6; anything reachable only from the admin roles keeps its BC type indefinitely. |
 | **`ConnectedStills` test double** | 1 impl, 0 doubles today; add a 10-line fake when next testing the asleep branch. |
 | **A domain crate** | A second binary, or an external consumer of the policy code. |
+
+---
+
+# Design rationale
+
+Absorbed from the retired `decoupling-plan.md` and `hexagonal-refactor.md` — the
+reasoning the deferred items above lean on, kept so a future change lands in a decided
+shape rather than re-litigating it.
+
+**Discovery split target shape** (for the D3 deferral). Per-verb
+`fn build_<verb>(...) -> UdpXml` and `fn classify_<verb>_reply(UdpXml) -> Result<Decision>`,
+leaving each `async fn` as a send/recv/retry driver. The XML shapes are specified in
+`docs/baichuan-protocol.md` §9, so expected values are written down rather than
+inferred from the code under test.
+
+**Why no domain crate.** Built during the hexagonal refactor's phase 4 and reverted.
+The crate wall could only stand in front of the modules least likely to grow an I/O
+dependency — the `Camera` trait's signatures carry vendored BC types, keeping the
+actual protocol boundary outside it — and the cost was a publishable artifact with no
+external consumer. What replaced it: modules named for their subject, the same
+discipline enforced by review (the normal stage-1 posture per
+`rust-code-structure.md` § growth path). Narrower role traits make the wall *less*
+necessary, not more. Trigger to revisit is in the table above.
+
+**DDD ceremony deliberately skipped.** There is no persistence, so no repositories,
+no aggregates-as-transaction-boundaries, no unit of work, no event sourcing, and no
+per-use-case application-service layer. The permanently useful parts were taken —
+value objects, anti-corruption at every external representation, events as return
+values — and the rest has nothing to hold up.
+
+**`log_capture.rs` is not the "assert on logs" smell.** It exists to pin the literal
+marker strings `tests/scripts/manual-verify.sh` greps; the log text *is* the contract
+there. Keep it.
+
+**Blanket local twins for vendored BC types stay out.** Field-for-field copies with
+no second implementation would be pure mapping ceremony; the per-role re-measure
+after S6-6 (deferred table) is the surviving version of this idea.
+
+---
+
+# Checked and clean
+
+Verified negatives, so the next review doesn't re-derive them. Merged from the
+2026-07-26 review and re-confirmed or extended by the 2026-08-17 audit.
+
+- **`wake_lock.rs`** — acquire/release/`idle_since` interleavings traced twice, no
+  lost-wakeup race; the permit-storing `notify_one` + re-check loop is correct.
+  Latent: `notify_release` supports exactly one waiter (only `GracePeriod::run` waits
+  today) — worth an invariant comment, not a bug.
+- **No lock held across `.await` anywhere** — machine-enforced
+  (`clippy::await_holding_lock` + `-D warnings`), zero suppressions.
+- **No unbounded channels** — all 12 production channels bounded with reasoned,
+  commented capacities and explicit backpressure policy at every producer.
+- **Zero production `unwrap()`/`expect()`** — poison recovery centralised in
+  `src/sync.rs`; lint-enforced in CI.
+- **RTSP request framing** — oversize and overflowing `Content-Length` rejected
+  before arithmetic (`checked_add` + cap); pipelined requests drained per read.
+- **`src/wake_server/`** — every in-memory map capped (`MAX_MAP_ENTRIES = 1024`,
+  route `CACHE_CAP`), refresh-vs-insert distinguished; hostile-flood memory
+  amplification handled.
+- **`src/mqtt/`** — control messages validate the camera name against an ASCII
+  allowlist before use.
+- **Crypto** — the constant IV in `baichuan/bc/crypto.rs` is Reolink firmware's
+  constraint, correctly documented; freshness comes from the per-session derived key.
+- **Wire-parser hardening** — all indexing guarded by length checks; the dangerous
+  arithmetic sites explicitly clamp or `checked_add`, with comments. Load-bearing:
+  release builds have no `overflow-checks`, so these guards are the protection.
+- **Drop impls** — all 13 avoid blocking, awaiting, and failing.
+- **Config parsing** — the placement scan covers the exact top-level TLS-key shape
+  `manual-verify.sh --tls` generates, plus misplaced-key failure cases.
+- **Reproducible builds** — no `build.rs`, no git deps, lockfile committed,
+  `--locked` in CI.
 
 ---
 

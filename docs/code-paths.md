@@ -1,361 +1,254 @@
-# Bairelay — Code Paths
+# bairelay — Code Paths
 
 Mermaid companion to `docs/architecture.md`. Architecture explains *why* the
-system is shaped this way; this file traces *what calls what*, with file and
-line anchors so a diagram edge can be checked against source.
-
-Anchors were verified against the tree at `2baf5a6`. Line numbers drift; module
-and function names are the durable part.
+system is shaped this way; this file traces *what calls what*. Verified against
+`main`, 2026-08-18 (single-crate tree, post `stream_translate.rs`). Line
+numbers drift; module and function names are the durable anchors. Annotated
+risks cite `docs/action-plan.md` item IDs.
 
 ---
 
-## 1. Crate dependency graph
+## 1. Module map and layering
 
-Four library crates plus one binary. The rule that keeps this acyclic: **no
-library crate depends on another library crate except `wake-server → core`**,
-and no library crate knows what a camera is except `core`.
+One crate. The four protocol directories know nothing about cameras; the
+compiler no longer enforces this (the crates were merged) — review does.
+Dotted edges are consumer-declared trait seams: the arrow always points from
+camera-side into the protocol module, never back.
 
 ```mermaid
 graph TD
-    BIN["bairelay<br/><i>bin + lib</i><br/>src/"]
-
-    CORE["baichuan<br/><i>Baichuan protocol</i><br/>src/baichuan/"]
-    RTSP["rtsp<br/><i>RTSP/RTSPS server</i><br/>src/rtsp/"]
-    MQTT["mqtt<br/><i>broker bridge + HA discovery</i><br/>src/mqtt/"]
-    WAKE["wake_server<br/><i>local P2P replacement</i><br/>src/wake_server/"]
-
-    BIN --> CORE
-    BIN --> RTSP
-    BIN --> MQTT
-    BIN --> WAKE
-    WAKE --> CORE
-
-    BIN -.->|"implements StreamProvider<br/>src/camera_provider.rs"| RTSP
-    BIN -.->|"implements SharedMqttClient<br/>consumer, src/mqtt_loop.rs"| MQTT
-
-    subgraph ext_core ["core third-party"]
-        direction LR
-        E1["aes · cfb-mode · x25519-dalek<br/>pbkdf2 · sha2 · md5 · zeroize"]
-        E2["nom · cookie-factory · quick-xml<br/>crc32fast · reqwest"]
+    subgraph CAMSIDE ["camera side — src/*.rs"]
+        MAIN["main.rs<br/><i>composition root, sync binds</i>"]
+        ORCH["orchestrator.rs · supervisor.rs"]
+        CH["camera.rs<br/><i>8 role traits + CameraHandle</i>"]
+        BCC["bc_camera.rs<br/><i>only file naming BcCamera</i>"]
+        MS["mqtt_status.rs<br/><i>only file naming StatusPublisher*</i>"]
+        CP["camera_provider.rs"]
+        SS["stream_source.rs<br/><i>fan-out driver</i>"]
+        PURE["stream_translate.rs · gap_bridging.rs<br/><i>pure, no I/O</i>"]
     end
 
-    subgraph ext_rtsp ["rtsp third-party"]
-        direction LR
-        E3["rtsp-types · rtp-types · sdp-types"]
-        E4["rustls · tokio-rustls"]
-    end
+    BAI["src/baichuan/<br/><i>vendored BC protocol</i>"]
+    RTSP["src/rtsp/<br/><i>RTSP/RTSPS server</i>"]
+    MQTT["src/mqtt/<br/><i>broker bridge + HA discovery</i>"]
+    WAKE["src/wake_server/<br/><i>local P2P cloud replacement</i>"]
+    SYNC["src/sync.rs<br/><i>poison-recovery shim — shared kernel<br/>under all four directories</i>"]
 
-    subgraph ext_mqtt ["mqtt third-party"]
-        E5["rumqttc"]
-    end
+    BCC -->|"implements the 8 role traits"| CH
+    BCC --> BAI
+    CP -.->|"implements StreamProvider<br/>declared in rtsp/provider.rs"| RTSP
+    MS -.->|"implements StatusReporter<br/>declared in camera_status.rs"| MQTT
+    MAIN --> ORCH --> CH
+    CH --> SS --> PURE
+    WAKE -->|"bcudp codec, 6 sites<br/>incl. pub error #from — S6-4"| BAI
+    RTSP --> SYNC
+    WAKE --> SYNC
+    BAI --> SYNC
 
-    CORE --> ext_core
-    RTSP --> ext_rtsp
-    MQTT --> ext_mqtt
+    EROSION["known erosion (S6-4):<br/>mqtt_loop.rs names StatusPublisher directly ·<br/>camera.rs names crate::mqtt for HA discovery ·<br/>mqtt re-exports rumqttc types matched camera-side"]
+    EROSION -.-> MQTT
 
-    classDef bin fill:#1f4e79,stroke:#0d2b45,color:#fff
-    classDef lib fill:#2d6a4f,stroke:#123528,color:#fff
-    classDef ext fill:#5a5a5a,stroke:#2e2e2e,color:#fff
-    class BIN bin
-    class CORE,RTSP,MQTT,WAKE lib
-    class E1,E2,E3,E4,E5 ext
+    classDef pure fill:#14532d,stroke:#052e16,color:#fff
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class PURE,SYNC pure
+    class EROSION warn
 ```
-
-The dotted edges are the point of the design, and they run the *same* direction
-as the solid ones on purpose: there is no arrow from a library back to the
-binary. `src/rtsp/` declares `StreamProvider` (`src/rtsp/provider.rs`)
-and the binary supplies the impl (`src/camera_provider.rs`), so camera concepts
-never enter the RTSP module. Same for `src/mqtt/`, which knows about topics
-and payloads but not cameras.
-
-**Known duplication** (`cargo tree -d`): `rand` 0.8 + 0.9, `thiserror` 1 + 2,
-`getrandom` ×3, `rand_core` ×2, `hashbrown` ×2, `rustls-webpki` ×2, `syn` ×2.
-`rand 0.8` is a *direct* dep of core, rtsp and wake-server — migrating those
-three collapses most of it (remediation P2-4).
 
 ---
 
 ## 2. Startup sequence
 
 `src/main.rs`. Every socket binds **synchronously before any "started" log
-line**, so a bind failure halts startup rather than half-starting the daemon.
+line**; a bind failure halts startup rather than half-starting the daemon.
 
 ```mermaid
 flowchart TD
-    START(["main()<br/>src/main.rs:35"]) --> ASYNC["async_main()<br/>:48"]
-    ASYNC --> MODE{"CLI subcommand<br/>src/cli.rs"}
+    START(["main()"]) --> MODE{"CLI subcommand<br/>src/cli.rs"}
 
-    ONESHOT["run_support::run_oneshot<br/>src/run_support.rs:401"]
-    CHECK["run_support::run_check_config_to<br/>:171"]
-    HASS["hassio::cmd::run<br/>src/main.rs:82"]
+    MODE -->|"snapshot / battery / ptz / …"| ONESHOT["run_support::run_oneshot"]
+    MODE -->|"check-config"| CHECK["run_support::run_check_config_to"]
+    MODE -->|"hassio"| HASS["hassio::cmd::run"]
+    MODE -->|"mqtt-rtsp"| CFG["config::load_config<br/>read → parse → hydrate → validate"]
 
-    subgraph DAEMON ["daemon path"]
-        direction TB
-        CFG["config::load_config<br/>src/config.rs"]
-        ORCH["Orchestrator::with_bcmedia_dump_and_discovery<br/>src/main.rs:231"]
-        MQTTLOOP["spawn run_mqtt_event_loop<br/>:330 — OUTSIDE the Supervisor"]
-        SUP["Supervisor::new(token)<br/>:350"]
+    CFG --> ORCH["Orchestrator + CameraHandles built"]
+    ORCH --> MQTTLOOP["spawn run_mqtt_event_loop<br/><b>OUTSIDE the Supervisor</b>, own token"]
+    MQTTLOOP --> SUP["Supervisor::new(token)"]
 
-        CFG --> ORCH --> MQTTLOOP --> SUP
-    end
+    SUP --> BINDS["synchronous binds — failure halts:<br/>RTSP TCP · RTSPS TCP · wake middleman UDP 9999 ·<br/>wake register UDP 58200 · push listener TCP"]
+    BINDS --> SVCS["Supervisor::spawn each:<br/>watchdog 30 s · startup_wake · rtsp · rtsps ·<br/>wake_server · push_listener"]
 
-    subgraph BINDS ["synchronous binds — failure halts startup"]
-        direction TB
-        B1["TcpListener::bind — RTSP :391"]
-        B2["TcpListener::bind — RTSPS :429"]
-        B3["UdpSocket::bind — middleman 9999 :487"]
-        B4["UdpSocket::bind — register 58200 :490"]
-        B5["TcpListener::bind — push listener :547"]
-    end
-
-    subgraph SVCS ["then Supervisor::spawn"]
-        direction TB
-        S1["watchdog :355"]
-        S2["startup_wake :366"]
-        S3["rtsp :402"]
-        S4["rtsps :442"]
-        S5["wake_server :496"]
-        S6["push_listener :555"]
-    end
-
-    MODE -->|"one-shot<br/>snapshot / battery / ptz / …"| ONESHOT
-    MODE -->|"check-config"| CHECK
-    MODE -->|"hassio"| HASS
-    MODE -->|"mqtt-rtsp"| CFG
-
-    SUP --> B1
-    B1 --> S3
-    B2 --> S4
-    B3 --> S5
-    B4 --> S5
-    B5 --> S6
-    SUP --> S1
-    SUP --> S2
-
-    SUP -->|"then await"| RUN["orchestrator.run()<br/>src/orchestrator.rs:146"]
+    SVCS --> RUN["orchestrator.run()<br/><i>awaits every camera task, no budget</i>"]
     RUN --> DRAIN["cameras drain"]
-    DRAIN --> SHUT["sup.shutdown(per_service_timeout)<br/>src/supervisor.rs:87"]
-    SHUT --> FINAL["publish_shutdown_fanout<br/>src/mqtt_loop.rs:64"]
-    FINAL --> EXIT(["exit"])
+    DRAIN --> SHUT["sup.shutdown(per-service timeout)"]
+    SHUT --> FANOUT["publish_shutdown_fanout<br/>mqtt_loop.rs — final disconnected statuses"]
+    FANOUT --> MCANCEL["mqtt_cancel.cancel()"]
+    MCANCEL --> EXIT(["exit"])
 
-    ONESHOT --> CODE["classify() → exit code<br/>src/oneshot/classify.rs:15"]
+    ONESHOT --> CODE["oneshot::classify → exit code"]
     CHECK --> CODE
     CODE --> EXIT
 ```
 
-The MQTT event loop deliberately lives **outside** the `Supervisor`: per-camera
-teardown publishes a final `disconnected` status through it, so it must outlive
-every camera task.
+The MQTT event loop lives outside the `Supervisor` because per-camera teardown
+publishes a final `disconnected` status through it — it must outlive every
+camera task, and shutdown ordering (`sup.shutdown()` before
+`mqtt_cancel.cancel()`) preserves that.
 
 ---
 
 ## 3. Cancellation token tree
 
-Three levels. Cancelling a parent cancels every descendant; a session token
-cancels pollers and listeners without tearing down the camera.
+Global → per-subsystem → per-camera → per-session → per-stream. Cancelling a
+parent cancels every descendant; a session token kills pollers without tearing
+down the camera.
 
 ```mermaid
 graph TD
-    G["global CancellationToken<br/>src/main.rs — Ctrl+C via<br/>run_support::spawn_ctrl_c_cancel:90"]
-    MQTTTOK["MQTT event-loop token<br/>separate, outlives cameras"]
-    SUPTOK["Supervisor token<br/>src/supervisor.rs:40"]
+    G["global CancellationToken<br/>Ctrl+C handler"]
+    MQ["MQTT event-loop token<br/><i>separate — outlives cameras</i>"]
+    SUPT["Supervisor token"]
 
-    subgraph CAMTOK ["per-camera token — src/camera.rs"]
-        direction TB
-        CR["CameraHandle::run()<br/>src/camera.rs:1213"]
-    end
+    G --> MQ
+    G --> SUPT
+    G --> CAM["per-camera token<br/>CameraHandle::run"]
 
-    subgraph SESS ["per-session token — cancelled on disconnect"]
-        direction TB
-        ML["camera_tasks::motion_listener:27"]
-        BP["camera_tasks::battery_poller:212"]
-        PP["camera_tasks::preview_poller:307"]
-        FP["camera_tasks::floodlight_poller:397"]
-        FL["camera_tasks::floodlight_listener:433"]
-        KA["core keepalive<br/>src/baichuan/bc_protocol/keepalive.rs"]
-    end
+    SUPT --> W["watchdog"]
+    SUPT --> SW["startup_wake"]
+    SUPT --> RS["RtspServer::serve_with_listener"]
+    SUPT --> WS["wake_server::run_with_sockets"]
+    SUPT --> PL["push_listener"]
 
-    G --> MQTTTOK
-    G --> SUPTOK
-    G --> CR
+    CAM --> SESS["session token<br/>spawn_session_tasks"]
+    SESS --> ML["motion_listener"]
+    SESS --> BP["battery_poller"]
+    SESS --> PP["preview_poller"]
+    SESS --> FP["floodlight_poller + listener"]
+    SESS --> KA["keepalive_loop"]
+    SESS --> SRC["StreamSource token"]
+    SRC --> PACE["reader · translator · 3 pacer tasks"]
+    RS --> CONN["per-connection token"] --> STASK["per-session task<br/>SessionEntry cancel"]
 
-    SUPTOK --> W["watchdog<br/>src/watchdog.rs — 30 s safety net"]
-    SUPTOK --> SW["startup_wake::warm_last_frame_buffers<br/>src/startup_wake.rs:58"]
-    SUPTOK --> RS["RtspServer::serve_with_listener<br/>src/rtsp/server/listener.rs:63"]
-    SUPTOK --> WS["wake_server::run_with_sockets<br/>src/wake_server/lib.rs:64"]
-    SUPTOK --> PL["push_listener::run_with_listener<br/>src/push_listener.rs:92"]
-
-    CR --> ML
-    CR --> BP
-    CR --> PP
-    CR --> FP
-    CR --> FL
-    CR --> KA
+    ORPHAN["reachable by NO token (S5-10):<br/>main.rs per-MQTT-command spawn ·<br/>Ctrl+C handler task"]
 
     classDef tok fill:#7c2d12,stroke:#431407,color:#fff
-    class G,MQTTTOK,SUPTOK tok
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class G,MQ,SUPT tok
+    class ORPHAN warn
 ```
 
 ---
 
-## 4. RTSP request path
+## 4. Per-camera lifecycle
 
-`src/rtsp/server/`. One task per TCP connection; one task per PLAYing
-session.
+`CameraHandle::run` — the state machine the whole battery design hangs off.
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant C as RTSP client<br/>(ffmpeg / go2rtc / VLC)
-    participant L as listener.rs:63<br/>serve_with_listener
-    participant CN as connection.rs:79<br/>handle_connection
-    participant A as rtsp/auth.rs
-    participant R as server/registry.rs<br/>SessionRegistry
-    participant P as StreamProvider<br/>(binary)
-    participant ST as session_task.rs:281<br/>run
+flowchart TD
+    RUN(["CameraHandle::run"]) --> IDLE["wait_for_acquire<br/><i>camera stays asleep until a wake lock exists</i>"]
+    IDLE --> CONNECT["bc_camera::connect<br/>discover → login, CONNECT_TIMEOUT-bounded"]
 
-    C->>L: TCP accept
-    L->>CN: spawn handle_connection
-    Note over CN: read loop → try_consume_request<br/>drains ALL pipelined requests per read
+    CONNECT -->|"Ok"| SPAWN["spawn_session_tasks<br/>pollers + listeners + keepalive (session token)"]
+    CONNECT -->|"ConnectError::Auth"| TERM(["STOP permanently<br/><i>never hammer bad credentials</i>"])
+    CONNECT -->|"ConnectError::Other"| BACKOFF["ReconnectBackoff 2 s → 60 s cap"] --> IDLE
 
-    C->>CN: OPTIONS
-    CN->>C: 200 Public: …
+    SPAWN --> LIVE["run_connected_session<br/>keepalive_loop probes liveness"]
 
-    C->>CN: DESCRIBE rtsp://host/cam/main
-    CN->>CN: scheme_matches_transport(is_tls) :320
-    CN->>A: authenticate() :570
-    A-->>CN: Challenge / Ok(user) / Forbidden
-    CN->>P: subscribe(camera, kind, user)
-    P-->>CN: SubscriptionHandle{rx, last_frame, sdp, guard}
-    CN->>C: 200 + SDP (sdp.rs)
+    LIVE -->|"last guard released"| GRACE["GracePeriod::run<br/><i>sleeps the window, checks idle at deadline —<br/>an acquire+release inside the window is invisible (S5-9)</i>"]
+    GRACE -->|"idle at deadline"| TEAR["session token cancel →<br/>teardown_session_tasks<br/>final disconnected status via StatusReporter"]
+    GRACE -->|"held at deadline"| LIVE
+    LIVE -->|"keepalive fails / stream dies"| BACKOFF
+    TEAR --> IDLE
 
-    C->>CN: SETUP (per track)
-    CN->>R: create/extend session, allocate transport
-    R->>R: udp_pool.rs — port pair
-    CN->>C: 200 Transport: … Session: …
+    WD["watchdog — 30 s sweep<br/>fires only if idle_for ≥ grace,<br/>i.e. only when GracePeriod failed"] -.->|"safety net"| TEAR
 
-    C->>CN: PLAY
-    CN->>ST: spawn session task
-    ST->>ST: replay_burst() — cached I-frame first
-    loop while playing
-        ST->>ST: video_dispatch_loop:369 / audio_dispatch_loop:445
-        ST->>C: RTP (interleaved TCP or UDP)
-    end
-
-    C->>CN: TEARDOWN
-    CN->>R: drop session
-    ST-->>P: drop SessionGuard → wake lock released
+    classDef term fill:#7f1d1d,stroke:#450a0a,color:#fff
+    class TERM term
 ```
-
-**P0-2 lives at step 8**: `authenticate()` emits a `WWW-Authenticate: Basic`
-challenge and accepts a `Basic` header *unconditionally*, even though
-`ConnectionState::is_tls` is right there and already consulted at line 320.
-
-The session task is a coordinator: after the PLAY gate it spawns two
-independent per-kind dispatch loops, each owning its own
-`broadcast::Receiver`. Periodic **RTCP Sender Reports are deliberately not
-emitted** — the SR helpers in `src/rtsp/server/rtcp.rs` exist for a
-future SR-emitting context (`session_task.rs:1–8`).
 
 ---
 
 ## 5. Media data path (camera → RTP)
 
-The longest path in the system, and the one `src/stream_source.rs` (5441 lines)
-exists to serve.
+The longest path in the system. Since S4-1 the translation core is **pure**:
+`translate()` takes a packet, mutable state, a clock value, and the bridging
+flag, and returns emits — no channel, lock, or socket in any signature.
 
 ```mermaid
 flowchart LR
-    subgraph CAM ["camera — src/baichuan/"]
+    subgraph CAM ["src/baichuan/"]
         direction TB
-        C1["BcCamera::start_video<br/>bc_protocol/stream.rs"]
-        C2["BcSubscription<br/>connection/bcsub.rs"]
-        C3["BcMedia codec<br/>bcmedia/de.rs"]
-        C1 --> C2 --> C3
+        C1["BcCamera::start_video"] --> C2["BcSubscription"] --> C3["BcMedia codec<br/>bcmedia/de.rs"]
     end
 
-    subgraph SRC ["src/stream_source.rs"]
+    subgraph DRV ["stream_source.rs — owns every channel/lock/buffer"]
         direction TB
-        R["reader_task :1263"]
-        T["drive_translator_loop :1432<br/>(PacketSource seam)"]
-        AP["apply_bcmedia_packet :1686"]
-        IF["handle_iframe :1734"]
-        PF["handle_pframe :2018"]
-        AA["handle_aac :2217"]
-        PACE["media_pacer_task :1065<br/>video_pacer_task :1025<br/>audio_pacer_task :993"]
-        BC(["broadcast::Sender&lt;Frame&gt;"])
-        LFB["LastFrameBuffer<br/>src/rtsp/buffer.rs"]
+        R["reader_task"] --> T["drive_translator_loop<br/><i>PacketSource seam</i>"]
+        T --> AP["apply_bcmedia_packet<br/><i>fan-out driver</i>"]
+        AP --> PACE["3 pacer tasks<br/>next_target() re-anchor policy<br/>queues: video 300 · audio 200, try_send-and-drop"]
+        PACE --> BCST(["broadcast::Sender&lt;Frame&gt;"])
+        AP --> LFB["LastFrameBuffer<br/>rtsp/buffer.rs"]
+    end
 
-        R --> T --> AP
-        AP --> IF
-        AP --> PF
-        AP --> AA
-        IF --> PACE
-        PF --> PACE
-        AA --> PACE
-        PACE --> BC
-        IF --> LFB
+    subgraph PURE ["pure layer — no I/O, time as parameter"]
+        direction TB
+        TR["stream_translate::translate<br/>→ (SmallVec&lt;Emit&gt;, Option&lt;pts&gt;)<br/>codec detect · NAL filter · PTS synthesis ·<br/>SDP derive · bridging audio gate"]
+        GB["gap_bridging::BridgingPolicy<br/>Live ⇄ Bridging state machine"]
     end
 
     subgraph OUT ["src/rtsp/"]
         direction TB
-        SUB["session_task::run :281"]
-        PK["server/packetizer.rs"]
-        CD["codec/h264.rs · h265.rs<br/>codec/aac.rs · g711.rs"]
-        TR["transcode/adpcm.rs<br/>transcode/resample.rs"]
-        RTP(["RTP out<br/>server/transport.rs<br/><i>no periodic RTCP SR</i>"])
-
-        SUB --> PK --> CD --> RTP
-        TR --> CD
+        ST["session_task::run<br/>replay_burst() first — cached I-frame"]
+        PK["packetizer.rs"] --> CD["codec/h264 · h265 · aac · g711<br/>transcode/adpcm"]
+        CD --> TP["transport.rs<br/>TCP-interleaved or UDP<br/><i>writer mutex, no deadline — S5-1</i>"]
+        ST --> PK
     end
 
     C3 --> R
-    BC --> SUB
-    LFB --> SUB
+    AP -->|"packet, state, now, bridging"| TR
+    TR -->|"emits"| AP
+    AP <-->|"tick / gap check"| GB
+    BCST --> ST
+    LFB --> ST
+    TP --> CLIENT(["RTSP client"])
 
-    classDef gap fill:#78350f,stroke:#451a03,color:#fff
-    class PACE gap
+    classDef pure fill:#14532d,stroke:#052e16,color:#fff
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class TR,GB pure
+    class TP warn
 ```
 
-`LastFrameBuffer` is the cross-cutting object: written by `handle_iframe`, read
-by `session_task::replay_burst` (`:491`) so a joining client gets a keyframe
-immediately rather than waiting for the camera's next IDR. It is also what
-`startup_wake::warm_last_frame_buffers` (`src/startup_wake.rs:58`) pre-populates
-at boot via `capture_snapshot_into_buffer`.
-
-`replay_burst` reuses the burst's `captured_pts_90khz` rather than restarting at
-zero, and deliberately omits the in-band parameter-set replay — both are
-go2rtc/ffmpeg interop workarounds documented at the call site.
+`LastFrameBuffer` is the cross-cutting object: written by the driver on
+I-frames, read by `replay_burst` so a joining client gets a keyframe instantly,
+and pre-warmed at boot by `startup_wake::warm_last_frame_buffers`.
 
 ---
 
 ## 6. Gap bridging state machine
 
-`src/stream_source.rs:140–223`. The battery-camera concession: cameras stop
-sending, but RTSP clients must keep seeing continuous RTP or they disconnect.
+`src/gap_bridging.rs` — pure; `stream_source.rs::tick_bridging` is its clock
+and driver. The battery concession: cameras stop sending, RTSP clients must
+keep seeing continuous RTP.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Live : stream starts<br/>(no spurious Bridging at startup)
+    [*] --> Live : stream starts
 
-    Live --> Bridging : no upstream packet for<br/>gap_threshold_secs<br/>check_gap_and_update_state:1150
-
-    Bridging --> Live : upstream packet arrives<br/>PTS counter continues monotonically
+    Live --> Bridging : no upstream packet for gap_threshold_secs<br/>(on_tick, driver supplies now)
+    Bridging --> Live : upstream packet arrives<br/>(on_upstream_packet — PTS stays monotonic)
 
     state Live {
         [*] --> Forwarding
-        Forwarding : real NALs from apply_bcmedia_packet
+        Forwarding : real NALs broadcast
         Forwarding : audio forwarded on the wire
-        Forwarding : cache I-frame NALs → LastFrameBuffer
+        Forwarding : I-frame NALs cached (lazy burst anchor)
     }
 
     state Bridging {
         [*] --> Replaying
-        Replaying : emit_replay_frame_if_bridging:1181
         Replaying : re-broadcast cached I-frame NALs
-        Replaying : synthesised PTS, 200 ms detection ticker
-        Replaying : audio DROPPED on the wire —
-        Replaying : but PTS counters keep advancing
+        Replaying : synthesised PTS (advance_replay_pts)
+        Replaying : audio DROPPED on the wire
+        Replaying : audio PTS counters keep advancing
     }
 
     note right of Bridging
@@ -366,292 +259,245 @@ stateDiagram-v2
 
 ---
 
-## 7. Wake lock lifecycle
+## 7. RTSP request path
 
-`src/wake_lock.rs` — `AtomicUsize` plus **two separate** `Notify`s, both using
-`notify_one()` so a permit is stored for a late waiter.
+One task per TCP connection, one per PLAYing session. Auth is hardened:
+Basic is offered/accepted only over TLS; digest verification is constant-time
+across users.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CL as RTSP client
-    participant CP as camera_provider.rs:60<br/>subscribe
-    participant WL as wake_lock.rs<br/>WakeLockCounter
-    participant GP as grace_period.rs:32<br/>run
-    participant CH as camera.rs:1213<br/>CameraHandle::run
+    participant C as RTSP client
+    participant CN as connection.rs<br/>handle_connection
+    participant A as protocol/auth.rs
+    participant P as StreamProvider<br/>(camera_provider.rs)
+    participant R as SessionRegistry
+    participant ST as session_task.rs
 
-    CL->>CP: DESCRIBE / SETUP
-    CP->>CP: ACL check (permitted_users)
-    CP->>WL: acquire() :84 → WakeLockGuard
-    Note over WL: count 0 → 1<br/>notify_acquire.notify_one()
-    WL-->>CH: wait_for_acquire() :115 returns
-    CH->>CH: connect + login → session token
-    CP->>CH: stream_source(kind) :597
-    CH-->>CP: Arc<StreamSource>
-    CP-->>CL: SubscriptionHandle (guard moves into it)
+    C->>CN: DESCRIBE rtsp://host/cam/main
+    CN->>A: authenticate()
+    A-->>CN: Digest challenge / Ok(user)<br/>(Basic only if is_tls)
+    CN->>P: subscribe(camera, kind, user)
+    Note over P: ACL check → wake lock acquire →<br/>SubscriptionHandle{rx, last_frame, sdp, guard}
+    CN->>C: 200 + SDP
 
-    CL->>CP: TEARDOWN / disconnect
-    Note over CP: SubscriptionHandle dropped<br/>→ WakeLockGuard::drop
-    CP->>WL: count 1 → 0<br/>notify_release.notify_one()
-    WL-->>GP: countdown starts
+    C->>CN: SETUP (per track)
+    CN->>R: create/extend session, allocate transport<br/>(udp_pool port pair or interleaved)
+    CN->>C: 200 Transport … Session: {sid};timeout=30
 
-    alt new client before grace expiry
-        CL->>WL: acquire()
-        WL-->>GP: countdown reset
-    else grace expires
-        GP->>CH: "Grace period expired, disconnecting"<br/>src/camera.rs:1127
-        CH->>CH: teardown session → "Disconnected" :1200
+    C->>CN: PLAY
+    CN->>ST: spawn session task
+    ST->>C: replay_burst() — cached I-frame first
+    loop while playing
+        ST->>C: RTP via video/audio dispatch loops
     end
-```
 
-`WakeLockGuard` (`src/wake_lock.rs:26`) carries **no `#[must_use]`** —
-`wake_lock.acquire();` as a bare statement acquires and instantly releases
-(remediation P2-3).
+    C->>CN: TEARDOWN
+    CN->>R: drop session entry
+    ST-->>P: SubscriptionHandle drop → wake lock released
+    Note over R: 5 s sweep expires sessions idle > 30 s
+```
 
 ---
 
-## 8. MQTT control path
+## 8. Wake sources → wake lock
+
+Every path that keeps a battery camera awake converges on
+`WakeLockCounter` (`AtomicUsize` + two `Notify`s, permit-storing).
+
+```mermaid
+flowchart LR
+    RTSPC(["RTSP client"]) -->|"DESCRIBE/SETUP →<br/>subscribe()"| CP["camera_provider.rs"]
+    MQTTC(["MQTT wakeup command"]) -->|"dispatch_control"| MD["mqtt_dispatch.rs"]
+    PUSH(["camera motion push (TCP)"]) --> PL["push_listener.rs<br/>hold for motion_wake_hold"]
+    BOOT(["daemon start"]) --> SW["startup_wake.rs<br/>warm snapshot per camera"]
+
+    CP -->|"acquire → RAII guard<br/>#[must_use]"| WL["WakeLockCounter<br/>0→1 notify_acquire ·<br/>1→0 notify_release"]
+    MD -->|"acquire for command duration"| WL
+    PL -->|"acquire + timed hold"| WL
+    SW -->|"acquire during warm"| WL
+
+    WL -->|"wait_for_acquire returns"| CH["CameraHandle::run<br/>connect + session"]
+    WL -->|"release → deadline check"| GP["grace_period.rs"]
+    GP -->|"idle at deadline"| CH
+
+    classDef lock fill:#7c2d12,stroke:#431407,color:#fff
+    class WL lock
+```
+
+Leak risk (S5-1): a session task wedged in `transport.rs::send_rtp` (no write
+deadline) never drops its `SubscriptionHandle`, so the guard — and the camera —
+never sleeps.
+
+---
+
+## 9. MQTT paths — control in, status out
 
 ```mermaid
 flowchart TD
     BROKER([MQTT broker])
 
-    BROKER -->|"subscribe"| EL["run_mqtt_event_loop<br/>src/main.rs:604"]
-    EL --> CE["mqtt_loop::classify_event :119"]
+    BROKER -->|"poll()"| EL["run_mqtt_event_loop<br/>main.rs — own token"]
+    EL --> CE["mqtt_loop::classify_event"]
+    CE -->|"ConnAck<br/><i>code discarded — S5-4</i>"| CA["handle_connack:<br/>re-subscribe + republish discovery"]
+    CE -->|"Publish"| PC["mqtt::parse_control_message<br/>ASCII allowlist on camera name"]
+    CE -->|"error"| BK["MqttBackoff 1→30 s<br/><i>retries auth failures forever — S5-4</i>"]
 
-    CE -->|"ConnAck"| CA["handle_connack :216<br/>re-subscribe, republish discovery"]
-    CE -->|"Publish"| PC["mqtt::parse_control_message<br/>src/mqtt/control.rs"]
-    CE -->|"Disconnect / error"| RC["reconnect with backoff"]
+    PC --> SPAWN["tokio::spawn per command<br/><i>no token, no cap — S5-10</i>"]
+    SPAWN --> DC["mqtt_dispatch::dispatch_control<br/>wake lock for command duration ·<br/>CMD_TIMEOUT 30 s"]
+    DC --> ROLES["role traits: Ptz · Lighting ·<br/>Power · Stills · DeviceAdmin"]
+    ROLES --> BCAM["BcCamera via bc_camera.rs"]
 
-    PC -->|"ASCII allowlist on camera name"| DC["mqtt_dispatch::dispatch_control<br/>src/mqtt_dispatch.rs:16"]
-
-    DC --> CMD{ControlCommand}
-    CMD --> C1["PtzMove / PtzPreset / PtzAssign"]
-    CMD --> C2["Floodlight / Siren / StatusLight"]
-    CMD --> C3["Pir / Reboot / SetTime"]
-    CMD --> C4["Snapshot / Preview"]
-
-    C1 --> DRV["Arc&lt;dyn camera::Camera&gt;<br/>src/camera.rs"]
-    C2 --> DRV
-    C3 --> DRV
-    C4 --> DRV
-
-    DRV --> BCC["BcCamera<br/>src/baichuan/bc_protocol.rs"]
-
-    subgraph PUB ["outbound"]
+    subgraph OUTB ["status out"]
         direction TB
-        SP["StatusPublisher<br/>src/mqtt/status.rs"]
-        DP["DiscoveryPublisher<br/>src/mqtt/discovery/publisher.rs"]
-        SC["StatusCache<br/>src/status_cache.rs"]
-        OV["preview_overlay::rendered_preview<br/>src/preview_overlay.rs"]
+        EV["CameraEvent<br/>(pollers · listeners · lifecycle)"]
+        SR["StatusReporter port<br/>camera_status.rs"]
+        MSR["MqttStatusReporter<br/>publish + cache atomically"]
+        SP["StatusPublisher → topics"]
+        EV --> SR --> MSR --> SP
     end
 
-    BCC --> SC --> SP --> BROKER
-    DP --> BROKER
-    OV --> BROKER
+    DP["DiscoveryPublisher<br/><i>called from camera.rs directly,<br/>bypassing the port — S6-4</i>"] --> BROKER
+    OV["preview_overlay<br/>caption on Connecting/Sleeping"] --> BROKER
+    SP --> BROKER
+    DC -->|"reply topic: OK / FAIL<br/>reflects actual outcome"| BROKER
 
-    POLL["camera_tasks pollers<br/>battery :212 · preview :307<br/>floodlight :397 · motion :27"] --> SC
-    POLL --> OV
-    C4 --> OV
-
-    classDef issue fill:#7f1d1d,stroke:#450a0a,color:#fff
-    class DC issue
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class SPAWN,BK,DP warn
 ```
-
-`preview_overlay` sits on the **MQTT** path only, not the RTSP one: it decodes
-the preview JPEG and draws a `Connecting` / `Sleeping` caption before publish
-(`Live` passes through untouched). Callers are `camera_tasks.rs:371` and
-`mqtt_dispatch.rs:238`. The RTSP path's equivalent — showing something while the
-camera sleeps — is gap bridging (§6), a different mechanism entirely.
-
-`mqtt_dispatch.rs` is the one genuine layering inversion: at `:195` and `:343`
-it manufactures `bairelay::baichuan::bc_protocol::Error::Other(…)` for
-failures that are purely binary-layer concerns ("PTZ preset name not in cache",
-"Command timed out"). Remediation P3-2.
 
 ---
 
-## 9. Camera connection path (core)
+## 10. Camera connect and login (vendored core)
 
 ```mermaid
 flowchart TD
-    NEW["BcCamera::new(opts)<br/>src/baichuan/bc_protocol.rs:483"]
-    NEW --> FIND["find_camera :274<br/>→ find_camera_with_discoverer :295"]
+    CONNECT["bc_camera::connect<br/><i>the adapter — classifies auth as terminal</i>"] --> NEW["BcCamera::new(opts)"]
+    NEW --> FIND["find_camera"]
 
-    FIND --> DM{"DiscoveryMethods<br/>bc_protocol/resolution.rs:47"}
-    DM -->|None| TCPONLY["TCP to known addr only"]
-    DM -->|Local| BCAST["UDP broadcast on LAN<br/>connection/discovery.rs"]
-    DM -->|Remote| REOL["Reolink servers for IP<br/>then direct"]
-    DM -->|Cloud| CLOUD["cloud.rs — account bound<br/>sigV3 (lver=3)"]
+    FIND --> DM{"DiscoveryMethods"}
+    DM -->|"None"| TCPONLY["TCP to known address"]
+    DM -->|"Local"| BCAST["UDP broadcast on LAN<br/>connection/discovery.rs<br/><i>strategies raced, first answer wins</i>"]
+    DM -->|"Remote"| REOL["Reolink servers for IP"]
+    DM -->|"Cloud"| CLOUD["cloud.rs — sigV3 bundle<br/>(PoW solve on spawn_blocking)"]
 
     TCPONLY --> LOC["CameraLocation"]
     BCAST --> LOC
     REOL --> LOC
     CLOUD --> LOC
 
-    LOC --> CONN{"ConnectionProtocol"}
-    CONN -->|Tcp| TS["tcpsource.rs"]
-    CONN -->|Udp| US["udpsource.rs<br/>BcUdp codec + CRC"]
-    CONN -->|TcpUdp| BOTH["try TCP, fall back UDP"]
-
-    TS --> BCONN["BcConnection<br/>connection/bcconn.rs"]
+    LOC --> SRC{"transport"}
+    SRC -->|"TCP"| TS["tcpsource.rs"]
+    SRC -->|"UDP"| US["udpsource.rs<br/>BcUdp codec · CRC · reorder cap 1024"]
+    TS --> BCONN["BcConnection<br/>AES-CFB · nom parsers"]
     US --> BCONN
-    BOTH --> BCONN
 
-    BCONN --> CODEX["bc/codex.rs<br/>AES-CFB · nom parsers"]
-    CODEX --> LOGIN{"login variant"}
-    LOGIN --> L1["login.rs — legacy"]
-    LOGIN --> L2["login_authlogin.rs"]
-    LOGIN --> L3["login_sigv3.rs — cloud"]
-
-    L1 --> SESS["logged-in session<br/>BcSubscription per message id"]
-    L2 --> SESS
+    BCONN --> LOGIN{"login variant"}
+    LOGIN -->|"legacy / modern"| L1["login.rs"]
+    LOGIN -->|"cloud"| L3["sigV3 (lver=3)<br/><i>logs plaintext login body at debug — S5-3</i>"]
+    L1 --> SESS["session: BcSubscription per msg id<br/>keepalive probe"]
     L3 --> SESS
 
-    SESS --> KA["keepalive.rs — periodic ping"]
-    SESS --> OPS["stream · snap · battery · ptz<br/>motion · floodlight · pir · users · …"]
+    LOGIN -.->|"AuthFailed / CameraLoginFail"| TERM["ConnectError::Auth →<br/>reconnect loop breaks permanently"]
 
     classDef fail fill:#7f1d1d,stroke:#450a0a,color:#fff
-    AUTHFAIL["auth failure →<br/>STOP retrying permanently"]:::fail
-    LOGIN -.-> AUTHFAIL
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class TERM fail
+    class L3 warn
 ```
-
-Connection failures retry with backoff and never crash the process. **Auth
-failures stop retrying permanently** — the daemon must not hammer a camera with
-bad credentials.
 
 ---
 
-## 10. Wake server and push listener
+## 11. Wake server and push listener
 
-The local replacement for Reolink's P2P cloud, so a battery camera can be woken
-without any traffic leaving the LAN.
+The local replacement for Reolink's P2P cloud — a battery camera wakes without
+traffic leaving the LAN.
 
 ```mermaid
 flowchart LR
     CAMERA(["Reolink battery camera"])
 
-    subgraph WS ["wake_server"]
+    subgraph WS ["src/wake_server/"]
         direction TB
-        MM["middleman.rs<br/>UDP :9999"]
-        RG["register.rs<br/>UDP :58200"]
-        REG["registry.rs<br/>CameraRegistry + SessionAnchors<br/>MAX_MAP_ENTRIES = 1024"]
-        RT["route.rs<br/>cache, CACHE_CAP soft cap"]
-        PKT["packet.rs → core bcudp codec"]
-
+        MM["middleman.rs — UDP 9999<br/>C2M_Q / D2M_Q relay"]
+        RG["register.rs — UDP 58200<br/>registration + heartbeat<br/><i>stale after 80 s</i>"]
+        REG["registry.rs<br/>MAX_MAP_ENTRIES = 1024,<br/>refresh vs insert distinguished"]
+        RT["route.rs — source-route cache<br/>CACHE_CAP 256 (process-global)"]
+        PKT["packet.rs → baichuan::bcudp codec"]
         MM --> PKT
         RG --> PKT
-        PKT --> REG
-        REG --> RT
+        PKT --> REG --> RT
     end
 
-    subgraph PLS ["src/push_listener.rs"]
-        PL["run_with_listener :92<br/>TCP, push notifications"]
-    end
+    PL["push_listener.rs — TCP<br/>one task per conn, IP-gated<br/><i>uncapped — S5-10</i>"]
 
-    CAMERA <-->|"C2M_Q / D2M_Q<br/>C2R_C / D2R_C"| MM
-    CAMERA <-->|"registration + heartbeat"| RG
+    CAMERA <--> MM
+    CAMERA <--> RG
     CAMERA -->|"motion push"| PL
+    RT -->|"10-packet wake burst<br/><i>2 spawns per request, no rate limit — S5-10</i>"| CAMERA
+    PL -->|"motion event + wake hold"| WLK["wake lock + StatusReporter"]
 
-    RT -->|"wake burst"| CAMERA
-    PL --> ORCH["Orchestrator / CameraHandle<br/>wake lock acquire"]
-
-    classDef clean fill:#14532d,stroke:#052e16,color:#fff
-    class REG,RT clean
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class PL warn
 ```
-
-Every in-memory map here is capped with refresh-vs-insert distinguished, so a
-hostile flood cannot amplify memory — verified clean in the remediation review.
 
 ---
 
-## 11. One-shot command path
+## 12. One-shot command path
 
-Separate from the daemon entirely: connect, do one thing, log out, exit with a
-coarse code.
+Connect, do one thing, log out, exit with a coarse code — fully separate from
+the daemon.
 
 ```mermaid
 flowchart TD
-    CLI["Cli::Command<br/>src/cli.rs"] --> RO["run_oneshot_to<br/>src/run_support.rs:254"]
-    RO --> FC["find_camera_config<br/>src/oneshot/dispatch.rs:56"]
-    FC --> RUN["oneshot::runner::run<br/>src/oneshot/runner.rs:31"]
-
-    subgraph RUNNER ["runner::run(cfg, cancel, op) — every step timeout-wrapped"]
-        direction TB
-        R1["bc_camera::connect_with_phase_timeouts<br/>connect ≤ CONNECT_TIMEOUT 100 s<br/>login ≤ LOGIN_TIMEOUT 30 s"]
-        R3["op(&dyn Camera) — the injected closure"]
-        R4["end_session — LOGOUT_TIMEOUT 5 s<br/>runs regardless of op outcome"]
-        R1 --> R3 --> R4
-    end
-
-    RUN --> R1
-    R3 -.->|"op is a closure over"| DISP["dispatch_oneshot(cam, cmd, json)<br/>src/oneshot/dispatch.rs:80<br/><i>passed in at run_support.rs:361</i>"]
-
-    DISP --> OPS["snapshot · battery · reboot · ptz<br/>users · abilities · presets · pir<br/>siren · floodlight · status_light<br/>set_time · services · version"]
-
-    CLOUD["cloud_authorise::run<br/>run_support.rs:293<br/><i>bypasses runner entirely</i>"]
-    RO --> CLOUD
-
-    R4 --> OUT["oneshot/output.rs<br/>text or --json"]
-    OPS --> OUT
-    CLOUD --> OUT
-    OUT --> CLS["classify(err)<br/>src/oneshot/classify.rs:15"]
-
-    CLS --> E2["2 — usage"]
-    CLS --> E3["3 — config"]
-    CLS --> E4["4 — connection / auth"]
-    CLS --> E5["5 — protocol"]
-    CLS --> E6["6 — unsupported"]
-    CLS --> E130["130 — Ctrl+C"]
+    CLI["cli.rs subcommand"] --> RO["run_support::run_oneshot"]
+    RO --> RUN["oneshot::runner::run<br/>connect ≤ 100 s · login ≤ 30 s ·<br/>logout ≤ 5 s (always runs)"]
+    RUN -->|"op(&dyn Camera)"| DISP["dispatch_oneshot"]
+    DISP --> NARROW["narrow role per handler:<br/>&dyn Power · &dyn Ptz · &dyn Lighting ·<br/>&dyn DeviceAdmin · &dyn Stills"]
+    NARROW --> OUT["oneshot/output.rs — text or --json"]
+    RO -->|"cloud-authorise<br/>bypasses runner"| OUT
+    OUT --> CLS["classify(err)"]
+    CLS --> E["exit codes: 2 usage · 3 config ·<br/>4 connection/auth · 5 protocol ·<br/>6 unsupported · 130 Ctrl+C"]
 ```
-
-Splitting `dispatch_oneshot` out of `runner::run` is what lets the whole command
-table be tested against `FakeCameraBuilder` without a TCP socket
-(`src/oneshot/dispatch.rs:4`).
-
-The nesting is also why this path shows up in remediation P2-5: the composed
-future at `src/oneshot/runner.rs:50` measures ~34 KB. It is not the largest in
-the workspace — that is `src/main.rs:101` at ~36 KB, with four more around
-36 KB in `src/run_support.rs`.
 
 ---
 
-## 12. Test seams
+## 13. Test seams
 
-Everything is tested through traits rather than live hardware. Core's fakes sit
-behind the `test-util` Cargo feature so a release build cannot substitute a fake
-for a real camera.
+Everything is tested through consumer-declared traits, never live hardware.
 
 ```mermaid
 graph LR
     subgraph PROD ["production impl"]
         direction TB
-        P1["BcCamera"]
+        P1["BcCamera (bc_camera.rs)"]
         P2["Discovery"]
         P3["BcStream"]
-        P4["stream_source reader"]
+        P4["StreamDataSource"]
         P5["CameraProvider"]
         P6["rumqttc client"]
+        P7["MqttStatusReporter"]
     end
-
-    subgraph TRAIT ["trait seam"]
+    subgraph SEAM ["trait seam"]
         direction TB
-        T1["camera::Camera<br/>src/camera.rs<br/><i>8 flat role traits</i>"]
+        T1["camera::Camera —<br/>8 flat role traits"]
         T2["CameraDiscoverer"]
         T3["VideoStream"]
         T4["PacketSource"]
-        T5["StreamProvider<br/>rtsp/src/provider.rs"]
+        T5["StreamProvider"]
         T6["SharedMqttClient"]
+        T7["StatusReporter"]
     end
-
-    subgraph TEST ["test impl"]
+    subgraph TEST ["test double"]
         direction TB
-        F1["FakeCameraBuilder / FakeCalls<br/><i>test-util feature</i>"]
+        F1["FakeCameraBuilder + per-role fakes<br/>(FakePower, FakePtz, …) — cfg(test)"]
         F2["ScriptedDiscoverer"]
         F3["MockVideoStream"]
-        F4["injected BcMedia"]
+        F4["ScriptedSource / injected BcMedia"]
         F5["FakeStreamProvider"]
-        F6["test_support::mock_client()<br/>→ MockHandle"]
+        F6["test_support::mock_client()<br/><i>gating gap — S5-6</i>"]
+        F7["tested via mock_client capture"]
     end
 
     P1 --> T1 --> F1
@@ -660,140 +506,66 @@ graph LR
     P4 --> T4 --> F4
     P5 --> T5 --> F5
     P6 --> T6 --> F6
+    P7 --> T7 --> F7
 
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class F6 warn
 ```
 
-The camera seam was decomposed (S4-2) into eight flat role traits
-(`Session`, `Video`, `Stills`, `Events`, `Power`, `Lighting`, `Ptz`,
-`DeviceAdmin`) composed into `camera::Camera` via a marker blanket impl;
-consumers take the narrowest role that covers them, and per-role fakes
-exist alongside `FakeCameraBuilder`.
-
-**Hang-protection discipline**: every mock-based "camera doesn't answer" test
-wraps the op in `tokio::time::timeout(Duration::from_millis(200), …)`. A test
-awaiting a channel with no guaranteed sender hangs `cargo test` forever.
+The pure modules (`stream_translate.rs`, `gap_bridging.rs`) need **no doubles
+at all** — no runtime, no timeouts, microsecond tests. Prefer adding a policy
+test there over driving the same logic through a task loop.
 
 ---
 
-## 13. Shared-state map
+## 14. Shared-state map
 
-Which objects cross task boundaries, and what guards them. This is the map that
-makes remediation P0-3 (poison-panic cascade) legible.
+Which objects cross task boundaries. The poison sweep landed: everything goes
+through `src/sync.rs`'s recovery traits; zero locks are held across `.await`
+(machine-enforced by `clippy::await_holding_lock` + `-D warnings`).
 
 ```mermaid
 graph TD
-    subgraph BINSTATE ["binary — uses poison-recovering helpers"]
+    SYNC["src/sync.rs<br/>RwLockPoisonRecover · MutexPoisonRecover"]
+
+    subgraph STATE ["cross-task state"]
         direction TB
-        B1["StreamTranslatorState<br/>src/stream_source.rs · 46 sites"]
-        B2["CameraHandle fields<br/>src/camera.rs · 28 sites"]
-        B3["StatusCache<br/>src/status_cache.rs · 10 sites"]
-        HELP["lock_recover / rlock_recover / wlock_recover<br/>RwLockPoisonRecover / MutexPoisonRecover<br/>defined in stream_source.rs:88–135"]
-
-        B1 --> HELP
-        B2 --> HELP
-        B3 --> HELP
+        S1["CameraHandle — 7 small independent locks<br/><i>state + camera under TWO locks:<br/>split-brain readable — S6-1</i>"]
+        S2["StreamSource internals<br/>translator state · SDP · buffers"]
+        S3["SessionRegistry — every connection"]
+        S4["LastFrameBuffer — every session"]
+        S5["wake_server registries (capped)"]
+        S6["StatusCache"]
     end
 
-    subgraph LIBSTATE ["published libraries — panic on poison"]
-        direction TB
-        L1["SessionRegistry<br/>rtsp/server/registry.rs · 17 sites<br/><b>shared by EVERY connection</b>"]
-        L2["LastFrameBuffer<br/>rtsp/src/buffer.rs · 6 sites<br/><b>shared by EVERY session</b>"]
-        L3["CameraRegistry / SessionAnchors<br/>wake-server/registry.rs · 9 sites"]
-        L4["session_task + udp_pool · 4 sites"]
-    end
+    S1 --> SYNC
+    S2 --> SYNC
+    S3 --> SYNC
+    S4 --> SYNC
+    S5 --> SYNC
+    S6 --> SYNC
 
-    subgraph OKG ["idiom already in-tree"]
-        O1["wake-server/route.rs:77,83,96<br/>unwrap_or_else — p.into_inner"]
-    end
-
-    NOTE["expect(… poisoned) cascades one bug<br/>across every other holder — one panic<br/>takes down the whole server, not one client"]
-
-    L1 -.-> NOTE
-    L2 -.-> NOTE
-    L3 -.-> NOTE
-    L4 -.-> NOTE
-
-    O1 -.->|"same fix, applied"| L3
-    HELP -.->|"P3-1: move to src/sync.rs,<br/>then sweep the libraries"| L1
+    ACT["message-passing instead of locks:<br/>pacer mpsc queues (bounded, reasoned) ·<br/>broadcast fan-out · watch for latest-value"]
 
     classDef good fill:#14532d,stroke:#052e16,color:#fff
-    classDef bad fill:#7f1d1d,stroke:#450a0a,color:#fff
-    class HELP,O1 good
-    class L1,L2,L3,L4,NOTE bad
-```
-
-The idiom already exists in-tree (`src/wake_server/route.rs:77,83,96`) —
-it is simply not applied uniformly. Note these sites use `.expect("… poisoned")`
-rather than `.unwrap()`, so grepping for `unwrap` finds none of them.
-
----
-
-## 14. Live-verify log-marker contract
-
-`tests/scripts/manual-verify.sh` is the live-hardware gate and drives the daemon
-purely by grepping stdout. Reword a marker and the script does not fail loudly —
-it stalls its poll window and reports a *misleading* FAIL.
-
-```mermaid
-flowchart LR
-    subgraph EMIT ["emitted by"]
-        E1["src/rtsp/server/listener.rs:78"]
-        E2["src/main.rs:415"]
-        E3["src/startup_wake.rs:102"]
-        E4["src/camera.rs:1127"]
-        E5["src/camera.rs:1200"]
-    end
-
-    subgraph MARK ["marker string"]
-        M1["RTSP server listening"]
-        M2["RTSP server started"]
-        M3["Startup wake cycle complete"]
-        M4["Grace period expired, disconnecting"]
-        M5["Disconnected"]
-    end
-
-    subgraph USE ["manual-verify.sh stage"]
-        U1["30 s startup gate"]
-        U2["60 s warm-cycle gate"]
-        U3["battery-sleep stage"]
-    end
-
-    E1 --> M1 --> U1
-    E2 --> M2 --> U1
-    E3 --> M3 --> U2
-    E4 --> M4 --> U3
-    E5 --> M5 --> U3
-
-    PIN["src/log_capture.rs<br/>test-only tracing capture"]
-    PIN ==>|"PINNED"| M3
-    PIN -.->|"not yet pinned"| M1
-    PIN -.->|"not yet pinned"| M4
-    PIN -.->|"not yet pinned"| M5
-
-    classDef pinned fill:#14532d,stroke:#052e16,color:#fff
-    classDef loose fill:#78350f,stroke:#451a03,color:#fff
-    class M3 pinned
-    class M1,M4,M5 loose
+    classDef warn fill:#78350f,stroke:#451a03,color:#fff
+    class SYNC,ACT good
+    class S1 warn
 ```
 
 ---
 
-## Cross-reference to the remediation plan
+## Cross-reference to the action plan
 
-| Diagram | Remediation item |
+Annotated risks in these diagrams map to `docs/action-plan.md` items:
+
+| Diagram | Item |
 |---|---|
-| §4 RTSP request path, step 8 | P0-2 — Basic auth offered over plaintext |
-| §13 Shared-state map | P0-3 — poison-panic cascade · P3-1 — move helpers to `src/sync.rs` |
-| §1 Crate dependency graph | P1-1 — no supply-chain scanning · P2-4 — duplicate dep trees |
-| §14 Log-marker contract | P1-4 — marker contract unpinned |
-| §8 MQTT control path | P3-2 — error-type layering inversion |
-| §11 One-shot path | P2-5 — large futures |
-| §12 Test seams | resolved — the camera seam is 8 role traits (was P3-3) |
-| §5 Media data path, §6 gap bridging | P3-6 — `stream_source.rs` at 5441 lines |
-| §7 Wake lock lifecycle | P2-3 — `#[must_use]` missing on `WakeLockGuard` |
-| §2 Startup sequence | P1-5 — `permitted_users` unvalidated by `check-config` |
-
-Nothing in these diagrams depends on P0-1 as the remediation plan states it: the
-discovery flood test passes and `cargo test` is green. The gate is red on
-`cargo clippy --all-targets -- -D warnings` instead —
-`src/log_capture.rs:112`, `await_marker` is never used.
+| §5 §8 transport write, wake-lock leak | **S5-1** |
+| §9 ConnAck discarded, infinite auth retry | **S5-4** |
+| §3 §9 §11 token-less / uncapped spawns | **S5-10** |
+| §10 sigV3 login body at debug | **S5-3** |
+| §4 grace period check-at-deadline vs doc | **S5-9** |
+| §13 mock_client gating gap | **S5-6** |
+| §14 CameraHandle split-brain state | **S6-1** |
+| §1 wake_server→baichuan edge, discovery bypassing the port | **S6-4** |
